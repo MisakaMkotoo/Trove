@@ -2,7 +2,7 @@
 
 <h1 align="center">Trove</h1>
 
-<p align="center"><b>Apple Music 风格的 Android 音乐播放器</b><br />本地曲库、网易云在线、电脑音乐库同步，一个应用里。</p>
+<p align="center"><b>An Apple Music-inspired Android music player</b><br />Local library, NetEase streaming, desktop library sync — in one app.</p>
 
 <p align="center">
 <img src="https://img.shields.io/badge/license-GPLv3-orange" alt="License: GPL-3.0" />
@@ -10,69 +10,73 @@
 <img src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7F52FF" alt="Kotlin + Compose" />
 </p>
 
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a></p>
+
 > [!IMPORTANT]
-> Trove 是个人维护的非官方项目，与 Apple、网易云音乐均无关联，也未获得其授权或认可。
-> 在线功能依赖第三方接口，可能随时失效；请优先使用正版服务。应用不包含账号、广告或统计上传。
+> Trove is an unofficial, independently maintained project. It is not affiliated with,
+> endorsed by, or connected to Apple or NetEase Cloud Music. Online features rely on
+> third-party endpoints and may break at any time; please support the official services.
+> The app contains no account system, ads, or analytics uploads.
 
-## 功能
+## Features
 
-**界面**
-- Apple Music 风格的玻璃与模糊界面，四种「正在播放」主题：标准、自适应取色、专辑封面流动背景（Kawarp 管线）、扭曲像素。
-- 歌词弹簧滚动：活动行先行、远端行错峰拖尾，结尾行同样能回到焦点位。
-- 可独立开启的「自适应字体颜色」，从封面取色，可与任意播放主题组合。
-- 12 种界面语言，深浅色与「减少透明度」选项。
+**Interface**
+- Frosted-glass, Apple Music–style UI with four now-playing themes: Standard, Adaptive colours, Album artwork flow (Kawarp pipeline), and Distorted pixels.
+- Spring-based lyric scrolling: the active line leads while further lines trail behind with staggered springs; the last lines can still reach the focus slot.
+- Optional "Adaptive text colour" that samples colours from the artwork and works with any player theme.
+- 12 UI languages, light/dark themes, and a reduce-transparency option.
 
-**播放**
-- 队列播放：下一首播放、加入队列、拖动排序、移除；随机与循环。
-- 迷你播放条与全屏播放器，进度、音量、音质标识。
-- 内置 FFmpeg 解码：FLAC、MP3、M4A/AAC、OGG、Opus、WAV、AIFF、APE、WavPack、DSF/DFF、WMA 等。
-- 10 段均衡器、音量标准化、最长 12 秒交叉淡入淡出。
+**Playback**
+- Queue with play next, add to queue, drag reorder, remove; shuffle and repeat.
+- Mini player and fullscreen player with seek, volume, and quality badge.
+- Embedded FFmpeg decoding: FLAC, MP3, M4A/AAC, OGG, Opus, WAV, AIFF, APE, WavPack, DSF/DFF, WMA, and more.
+- 10-band equalizer, volume normalization, crossfade up to 12 seconds.
 
-**网易云**
-- 通过歌单链接导入，匹配本地曲目或在线播放（不强制下载）。
-- 首页每日推荐、私人雷达、心动模式。
-- 在线歌词优先从网易云获取，失败回退 LRCLIB / 酷狗。
-- 在线曲目可收藏，收藏单独持久化，并出现在「我喜欢的音乐」歌单。
-- 在线播放走本地流缓存（800MB LRU），断网时退回暂停。
+**NetEase Cloud Music**
+- Import playlists by link; tracks are matched locally or streamed online (no forced download).
+- Daily recommendations, Private Radar, and Heartbeat mode on the home tab.
+- Online lyrics are fetched from NetEase first, falling back to LRCLIB / Kugou.
+- Online tracks can be favourited; favourites are persisted separately and appear in the "Favourites" playlist.
+- Online playback goes through a local stream cache (800 MB LRU) and pauses when the network drops.
 
-**本地曲库**
-- 扫描设备音频文件，按曲目、艺人、专辑、流派、作曲家、播放列表浏览与搜索。
-- 最近添加、重复曲目清理、隐藏 40 秒以下音频、底部标签页重排。
-- 自定义播放列表封面与艺人图片；专辑封面取自内嵌图片。
+**Local library**
+- Scan device audio; browse and search tracks, artists, albums, genres, composers, and playlists.
+- Recently added, duplicate cleanup, hide tracks under 40 seconds, reorder bottom tabs.
+- Custom playlist covers and artist pictures; album art from embedded files.
 
-**同步与导入**
-- 局域网电脑音乐库同步。
-- NCM 文件解码导入。
-- Last.fm 记录（scrobbling）与听歌统计。
+**Sync and import**
+- LAN sync with the desktop music library.
+- NCM file decoding and import.
+- Last.fm scrobbling and listening statistics.
 
-## 下载
+## Download
 
-从 [Releases](https://github.com/MisakaMkotoo/Trove/releases) 下载 APK。当前版本：**1.2.0 Beta**（`FavFoldMusic-v1.2.0-beta.apk`）。
+Get the APK from [Releases](https://github.com/MisakaMkotoo/Trove/releases). Current version: **1.2.0 Beta** (`FavFoldMusic-v1.2.0-beta.apk`).
 
-要求 Android 12（API 31）及以上。首次安装需要在系统设置里允许来自该来源的安装。
+Requires Android 12 (API 31) or newer. You will need to allow installs from this source once.
 
-## 构建
+## Building
 
-环境要求：
+Requirements:
 
 - JDK 21
-- Android SDK 36（`compileSdk = 36`，`minSdk = 31`）
-- Android NDK 30.x（以 `androidApp/build.gradle.kts` 的 `ndkVersion` 为准）
-- 使用仓库自带的 Gradle wrapper
+- Android SDK 36 (`compileSdk = 36`, `minSdk = 31`)
+- Android NDK 30.x (see `ndkVersion` in `androidApp/build.gradle.kts`)
+- The Gradle wrapper bundled in this repository
 
-FFmpeg 的预编译 `.so` 不随仓库分发（`androidApp/src/main/jniLibs/` 已在 `.gitignore` 中）。首次构建前先生成：
+Prebuilt FFmpeg `.so` files are not distributed with the repository (`androidApp/src/main/jniLibs/` is ignored). Generate them first:
 
 ```bash
 bash scripts/build-ffmpeg-android.sh all
 ```
 
-然后：
+Then:
 
 ```bash
-# 调试包
+# Debug build
 ./gradlew :androidApp:assembleProdDebug
 
-# 发布包（需要签名环境变量）
+# Release build (requires signing env vars)
 export MOBILE_KEYSTORE_FILE=/path/to/keystore
 export MOBILE_KEYSTORE_PASSWORD=...
 export MOBILE_KEY_ALIAS=...
@@ -80,26 +84,26 @@ export MOBILE_KEY_PASSWORD=...
 ./gradlew :androidApp:assembleProdRelease
 ```
 
-未配置签名环境变量时会退回 debug 签名，仅适合本地测试。
+Without the signing variables the release build falls back to the debug signature, which is only suitable for local testing.
 
-## 项目结构
+## Project layout
 
 ```text
-androidApp/     Android 应用（Compose UI、播放服务、网易云、同步）
-sharedLogic/    共享的播放队列与曲库模型
-scripts/        FFmpeg / OpenSSL 构建脚本、图标与工具脚本
-tools/          字体子集、罗马化数据
-brand/          应用图标源文件
+androidApp/     Android app (Compose UI, playback service, NetEase, sync)
+sharedLogic/    Shared playback queue and library models
+scripts/        FFmpeg / OpenSSL build scripts, icon and tooling scripts
+tools/          Font subsetting and romanization data
+brand/          App icon sources
 ```
 
-## 上游与致谢
+## Upstream and acknowledgements
 
-Trove 是 [Exodi-dio/tune](https://github.com/Exodi-dio/tune)（GPL-3.0）的独立衍生项目，在播放器、界面、网易云集成与同步上做了大量修改，并非 Tune 的官方分支。
+Trove is an independent derivative of [Exodi-dio/tune](https://github.com/Exodi-dio/tune) (GPL-3.0). The player, UI, NetEase integration, and sync features have been substantially reworked; it is not an official branch of Tune.
 
-- 界面设计语言源自 [Airmedy](https://github.com/misa198/airmedy)（GPL-3.0）。
-- 部分艺人页交互参考 [BitChord](https://github.com/kushagrasinghx/BitChord)（GPL-3.0）。
-- 第三方组件与来源记录见 [NOTICE](NOTICE)。
+- Interface design language: [Airmedy](https://github.com/misa198/airmedy) by misa198 (GPL-3.0).
+- Some artist-page interactions adapted from [BitChord](https://github.com/kushagrasinghx/BitChord) (GPL-3.0).
+- Third-party components and provenance are listed in [NOTICE](NOTICE).
 
-## 许可证
+## License
 
-本项目使用 **GNU General Public License v3.0（GPLv3）**，详见 [LICENSE](LICENSE)。作为 GPLv3 衍生作品，分发修改版时需保留版权声明与许可证，并提供对应源码。
+Licensed under the **GNU General Public License v3.0 (GPLv3)** — see [LICENSE](LICENSE). As a GPLv3 derivative, redistributing modified builds requires keeping the copyright notices and license, and providing the corresponding source.
