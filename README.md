@@ -1,5 +1,3 @@
-<p align="center"><img src="brand/icon-source.png" width="140" alt="Trove" /></p>
-
 <h1 align="center">Trove</h1>
 
 <p align="center"><b>An Apple Music-inspired Android music player</b><br />Local library, NetEase streaming, desktop library sync — in one app.</p>

@@ -1,5 +1,3 @@
-<p align="center"><img src="brand/icon-source.png" width="140" alt="Trove" /></p>
-
 <h1 align="center">Trove</h1>
 
 <p align="center"><b>Apple Music 风格的 Android 音乐播放器</b><br />本地曲库、网易云在线、电脑音乐库同步，一个应用里。</p>
