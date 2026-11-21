@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ARR（自适应刷新率）默认会把无触摸的动画压到 60Hz；关掉它，动画期间保持屏幕最高刷新率。 -->
+    <style name="Theme.FavMusic" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsFrameRatePowerSavingsBalanced">false</item>
+    </style>
+</resources>

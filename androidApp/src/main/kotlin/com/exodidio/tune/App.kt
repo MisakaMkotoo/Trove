@@ -1,0 +1,815 @@
+package com.exodidio.tune
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.material3.Text
+import java.time.LocalTime
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
+import kotlinx.coroutines.launch
+import com.exodidio.tune.ui.components.TuneGlassIconButton
+import com.exodidio.tune.ui.components.TuneDialog
+import com.exodidio.tune.ui.components.TuneBottomSheet
+import com.exodidio.tune.ui.components.TunePillButtonVariant
+import com.exodidio.tune.ui.components.AnchoredPopupMenuHost
+import com.exodidio.tune.ui.components.MaterialSymbols
+import com.exodidio.tune.ui.components.StackPageHeader
+import com.exodidio.tune.ui.components.LibrarySortHeaderButton
+import com.exodidio.tune.ui.components.LibrarySortOption
+import com.exodidio.tune.ui.navigation.AppDestinationContent
+import com.exodidio.tune.ui.navigation.CompactNavigationHeight
+import com.exodidio.tune.ui.navigation.ContentScrollDirection
+import com.exodidio.tune.ui.navigation.FloatingNavigationBottomMargin
+import com.exodidio.tune.ui.navigation.FloatingNavigationContentGap
+import com.exodidio.tune.ui.navigation.FloatingNavigationHeight
+import com.exodidio.tune.ui.navigation.FullScreenPlayer
+import com.exodidio.tune.ui.navigation.MiniPlayerHeight
+import com.exodidio.tune.ui.navigation.MiniPlayerNavigationGap
+import com.exodidio.tune.ui.navigation.NavigationChrome
+import com.exodidio.tune.ui.navigation.NavigationChromeScrollAccumulator
+import com.exodidio.tune.ui.navigation.showsMiniPlayer
+import com.exodidio.tune.ui.navigation.titleRes
+import com.exodidio.tune.sync.metadataObject
+import com.exodidio.tune.ui.screens.ArtistSortOption
+import com.exodidio.tune.ui.screens.AlbumSortOption
+import com.exodidio.tune.ui.screens.GenreSortOption
+import com.exodidio.tune.ui.screens.ComposerSortOption
+import com.exodidio.tune.ui.screens.TrackSortOption
+import com.exodidio.tune.ui.screens.isFavoriteOf
+import com.exodidio.tune.ui.screens.CreatePlaylistBottomSheet
+import com.exodidio.tune.ui.screens.CreateEqualizerProfileBottomSheet
+import com.exodidio.tune.ui.screens.EqualizerProfileMenuBottomSheet
+import com.exodidio.tune.ui.components.TrackContextBottomSheet
+import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
+import com.exodidio.tune.ui.theme.TuneTheme
+import com.exodidio.tune.ui.theme.LocalTuneColors
+import com.exodidio.tune.ui.theme.TuneColors
+import android.app.ActivityManager
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
+import com.exodidio.tune.ui.components.LocalReduceMotion
+import com.exodidio.tune.player.PlaybackState
+
+private enum class EqualizerProfileSheet { Menu, Create, DeleteConfirmation }
+
+internal fun shouldShowHeaderBlur(
+    isContentScrolled: Boolean,
+    destinationChanged: Boolean,
+    previousHeaderWasBlurred: Boolean,
+): Boolean = isContentScrolled || (destinationChanged && previousHeaderWasBlurred)
+
+internal fun homeGreetingTitleRes(hour: Int): Int = when (hour) {
+    in 0..11 -> R.string.home_greeting_morning
+    in 12..16 -> R.string.home_greeting_afternoon
+    in 17..20 -> R.string.home_greeting_evening
+    else -> R.string.home_greeting_night
+}
+
+/** 歌单页整页取封面平均色时，文字/图标按背景明暗在黑白之间切换。 */
+private fun adaptiveTuneColors(base: TuneColors, tint: Color?): TuneColors {
+    if (tint == null) return base
+    val background = tint.copy(alpha = 1f)
+    val dark = background.luminance() < 0.5f
+    val on = if (dark) Color.White else Color.Black
+    return base.copy(
+        background = background,
+        card = background,
+        glass = on.copy(alpha = 0.10f),
+        glassOpaque = background,
+        glassElevated = on.copy(alpha = 0.14f),
+        buttonSecondary = on.copy(alpha = 0.10f),
+        sliderInactive = on.copy(alpha = 0.18f),
+        textFieldClear = on.copy(alpha = 0.24f),
+        borderGlass = on.copy(alpha = 0.16f),
+        textMain = on,
+        textMuted = on.copy(alpha = 0.66f),
+        foregroundSubtle = on.copy(alpha = 0.5f),
+        navigationActive = on.copy(alpha = 0.14f),
+    )
+}
+
+@Composable
+private fun AlbumHeroHeaderGradient(color: Color?, visible: Boolean) {
+    val fade by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(1500, easing = FastOutSlowInEasing),
+        label = "album-header-glass-colour-fade",
+    )
+    color?.takeIf { fade > 0.01f }?.let {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+                .background(
+                    Brush.verticalGradient(
+                        0f to it.copy(alpha = 0.36f * fade),
+                        1f to it.copy(alpha = 0f),
+                    ),
+                ),
+        )
+    }
+}
+
+@Composable
+private fun LazyListState.resetAfterPagePop(generation: Int) {
+    LaunchedEffect(generation) {
+        if (generation > 0) scrollToItem(0)
+    }
+}
+
+@Composable
+internal fun App(
+    uiState: AppUiState = AppUiState(),
+    destinations: AppDestinationModels = AppDestinationModels(),
+    playback: PlaybackModel = PlaybackModel(),
+    onIntent: (AppIntent) -> Unit = {},
+    onFullScreenPlayerVisibilityChanged: (Boolean) -> Unit = {},
+) {
+    val library = destinations.library
+    val settings = destinations.settings
+    val tracksUiState = library.tracks.state
+    val artistsUiState = library.artists.state
+    val albumsUiState = library.albums.state
+    val genresUiState = library.genres.state
+    val composersUiState = library.composers.state
+    val playlistsUiState = library.playlists.state
+    val playbackState = playback.state
+    val playbackQueue = playback.queue
+    TuneTheme(themeMode = uiState.themeMode) {
+        val context = LocalContext.current
+        val isLowRamDevice = remember(context) {
+            (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).isLowRamDevice
+        }
+        val reduceMotion = uiState.reduceTransparency || isLowRamDevice
+        val baseTuneColors = LocalTuneColors.current
+        val currentStackPage = uiState.stackFor(uiState.selectedDestination).currentStackPage(uiState.selectedDestination)
+        val currentPage = currentStackPage.page
+        var albumHeroColor by remember { mutableStateOf<Color?>(null) }
+        // 歌单详情：整页使用封面的平均色，并根据明暗自适应文字/图标颜色。
+        val playlistTint = if (
+            currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.NeteasePlaylistDetails
+        ) {
+            albumHeroColor
+        } else {
+            null
+        }
+        val pageTuneColors = remember(baseTuneColors, playlistTint) {
+            adaptiveTuneColors(baseTuneColors, playlistTint)
+        }
+        // 换页时清掉上一页的封面取色，避免新页面在拿到自己的颜色前套用旧色。
+        LaunchedEffect(currentPage) {
+            albumHeroColor = null
+        }
+        CompositionLocalProvider(
+            LocalTuneColors provides pageTuneColors,
+            com.exodidio.tune.ui.components.LocalMoodRadioMenuActions provides com.exodidio.tune.ui.components.MoodRadioMenuActions(
+                playback.moodRadioEligibleTrackIds, playback.onStartMoodRadio,
+            ),
+            com.exodidio.tune.ui.components.LocalSimilarSongsMenuActions provides
+                com.exodidio.tune.ui.components.SimilarSongsMenuActions(
+                    available = true,
+                    isAvailable = { trackId -> com.exodidio.tune.netease.NeteaseRepository.songIdForTrack(trackId) != null },
+                    onOpen = { trackId -> onIntent(AppIntent.OpenSimilarSongs(trackId)) },
+                ),
+            LocalReduceMotion provides reduceMotion,
+        ) {
+        val hazeState = if (uiState.reduceTransparency) null else rememberHazeState()
+        val homeListState = remember(uiState.pageStateGenerationFor(AppDestination.Home, AppStackPage.Root)) { LazyListState() }
+        val insightListState = remember(uiState.pageStateGenerationFor(AppDestination.Insight, AppStackPage.Root)) { LazyListState() }
+        val libraryListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.Root)) { LazyListState() }
+        val tracksListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryTracks), tracksUiState.sortOption, tracksUiState.sortOrder) {
+            LazyListState()
+        }
+        val artistsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryArtists), artistsUiState.sortOption, artistsUiState.sortOrder) {
+            LazyListState()
+        }
+        val albumsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryAlbums), albumsUiState.sortOption, albumsUiState.sortOrder, albumsUiState.layoutMode) {
+            LazyListState()
+        }
+        val artistDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ArtistDetails), uiState.selectedArtistId) { LazyListState() }
+        val genreDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.GenreDetails), uiState.selectedGenreId) { LazyListState() }
+        val composerDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ComposerDetails), uiState.selectedComposerId) { LazyListState() }
+        val genresListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryGenres), genresUiState.sortOption, genresUiState.sortOrder) {
+            LazyListState()
+        }
+        val composersListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryComposers), composersUiState.sortOption, composersUiState.sortOrder) {
+            LazyListState()
+        }
+        val playlistsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryPlaylists)) { LazyListState() }
+        val duplicatesListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryDuplicates)) { LazyListState() }
+        homeListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Home, AppStackPage.Root))
+        insightListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Insight, AppStackPage.Root))
+        libraryListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.Root))
+        tracksListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryTracks))
+        artistsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryArtists))
+        albumsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryAlbums))
+        artistDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ArtistDetails))
+        genreDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.GenreDetails))
+        composerDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ComposerDetails))
+        genresListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryGenres))
+        composersListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryComposers))
+        playlistsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryPlaylists))
+        duplicatesListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryDuplicates))
+        val coroutineScope = rememberCoroutineScope()
+        var previousDestination by remember { mutableStateOf(uiState.selectedDestination) }
+        var previousHeaderWasBlurred by remember { mutableStateOf(false) }
+        val destinationChanged = previousDestination != uiState.selectedDestination
+        val animateHeaderChanges = !destinationChanged
+        var settingsContentScrolled by remember { mutableStateOf(false) }
+        var previousStackPage by remember { mutableStateOf(currentStackPage) }
+        val isForwardHeaderTransition = currentStackPage.index >= previousStackPage.index
+        val showsMiniPlayer = playbackState.showsMiniPlayer()
+        var isFullScreenPlayerVisible by rememberSaveable { mutableStateOf(false) }
+        var isFullScreenPlayerOpeningFromSwipe by remember { mutableStateOf(false) }
+        var fullScreenPlayerDragProgress by remember { mutableFloatStateOf(0f) }
+        var isFullScreenPlayerDragging by remember { mutableStateOf(false) }
+        var pendingFullScreenPlayerAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+        var trackContextSheet by remember { mutableStateOf<TrackContextBottomSheetRequest?>(null) }
+        // F1: hoisted library-removal set. No per-track delete/hide mutation exists
+        // in the store (library is scan-replaced), so keep-best losers + confirmed
+        // device-deletes accumulate here and are filtered out of every library
+        // surface + the playback queue in AppDestinationContent. Entries only,
+        // never files (delete-from-device files go through MediaStore consent).
+        // In-memory only by design (plain `remember`, not persisted): a library
+        // rescan/scan-replace rebuilds the store from disk and removed copies
+        // reappear — files were never deleted. Dismissed duplicate groups behave
+        // the same way. Deliberate, and surfaced to the user via
+        // `duplicates_rescan_note`; not an accident.
+        var removedTrackIds by remember { mutableStateOf(emptySet<String>()) }
+        var equalizerProfileSheet by remember { mutableStateOf<EqualizerProfileSheet?>(null) }
+        var isNavigationCompact by remember { mutableStateOf(false) }
+        val navigationScrollAccumulator = remember { NavigationChromeScrollAccumulator() }
+        val navigationScrollThresholdPx = with(LocalDensity.current) { 24.dp.toPx() }
+        fun setFullScreenPlayerVisible(visible: Boolean) {
+            if (isFullScreenPlayerVisible == visible) return
+            isFullScreenPlayerVisible = visible
+            // System-bar content must be updated in the same user interaction as
+            // the panel. Deferring this callback to LaunchedEffect can leave it
+            // stale until an unrelated playback-state recomposition occurs.
+            onFullScreenPlayerVisibilityChanged(visible)
+        }
+        fun closeFullScreenPlayerThen(action: () -> Unit) {
+            if (!isFullScreenPlayerVisible) {
+                action()
+                return
+            }
+            pendingFullScreenPlayerAction = action
+            setFullScreenPlayerVisible(false)
+            isFullScreenPlayerOpeningFromSwipe = false
+            isFullScreenPlayerDragging = false
+            fullScreenPlayerDragProgress = 0f
+        }
+        LaunchedEffect(showsMiniPlayer) {
+            if (!showsMiniPlayer) {
+                // Keep the chrome geometry while destinations and pages change.
+                // Playback ending is the only transition that invalidates a
+                // compact mini-player layout.
+                isNavigationCompact = false
+                navigationScrollAccumulator.reset()
+                setFullScreenPlayerVisible(false)
+                isFullScreenPlayerOpeningFromSwipe = false
+                isFullScreenPlayerDragging = false
+                fullScreenPlayerDragProgress = 0f
+            }
+        }
+        val navigationChromeHeight = when {
+            showsMiniPlayer && isNavigationCompact -> CompactNavigationHeight
+            showsMiniPlayer -> FloatingNavigationHeight + MiniPlayerHeight + MiniPlayerNavigationGap
+            else -> FloatingNavigationHeight
+        }
+        val targetNavigationBottomPadding = navigationChromeHeight + FloatingNavigationBottomMargin + FloatingNavigationContentGap +
+            WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val navigationBottomPadding by animateDpAsState(
+            targetValue = targetNavigationBottomPadding,
+            animationSpec = tween(420, easing = FastOutSlowInEasing),
+            label = "navigation-bottom-padding",
+        )
+        val pageTitle = when {
+            currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails -> ""
+            // 资料库一级页的大标题放在内容里，随页面滚动；顶栏只保留悬浮按钮。
+            uiState.selectedDestination == AppDestination.Library && currentPage == AppStackPage.Root -> ""
+            uiState.selectedDestination == AppDestination.Home && currentPage == AppStackPage.Root -> stringResource(homeGreetingTitleRes(LocalTime.now().hour))
+            else -> stringResource(currentPage.titleRes(uiState.selectedDestination))
+        }
+        val showBack = currentPage != AppStackPage.Root ||
+            (uiState.selectedDestination == AppDestination.Settings && uiState.settingsReturnDestination != null)
+        val showSettingsButton = currentPage == AppStackPage.Root &&
+            uiState.selectedDestination != AppDestination.Settings
+        val showCreatePlaylistAction = currentPage == AppStackPage.Root &&
+            uiState.selectedDestination == AppDestination.Library
+        // 底栏标签：只允许可停靠的目的地；老偏好里没有新标签时补上默认四项。
+        val dockDestinations = run {
+            val saved = uiState.visibleTabs.filter { it in AppDestination.dockable }
+            if (saved.none { it == AppDestination.Discover || it == AppDestination.Search }) {
+                AppDestination.dockable
+            } else {
+                saved
+            }
+        }
+        val showLibrarySortAction = currentPage == AppStackPage.LibraryTracks ||
+            currentPage == AppStackPage.LibraryArtists || currentPage == AppStackPage.LibraryAlbums ||
+            currentPage == AppStackPage.LibraryGenres || currentPage == AppStackPage.LibraryComposers
+        val showPlaylistAddAction = currentPage == AppStackPage.LibraryPlaylists
+        var showCreatePlaylistSheet by rememberSaveable { mutableStateOf(false) }
+        var showLyricsInfoSheet by rememberSaveable { mutableStateOf(false) }
+        var createPlaylistForTracks by remember { mutableStateOf<List<String>?>(null) }
+        BackHandler(enabled = showBack) { onIntent(AppIntent.NavigateBack) }
+
+        val isContentScrolled by remember(uiState.selectedDestination, currentPage, homeListState, insightListState, libraryListState, tracksListState, artistsListState, albumsListState, artistDetailsListState, genreDetailsListState, composerDetailsListState, genresListState, composersListState, playlistsListState, duplicatesListState) {
+            derivedStateOf {
+                when {
+                    uiState.selectedDestination == AppDestination.Home && currentPage == AppStackPage.Root ->
+                        homeListState.firstVisibleItemIndex > 0 || homeListState.firstVisibleItemScrollOffset > 0
+                    uiState.selectedDestination == AppDestination.Insight && currentPage == AppStackPage.Root ->
+                        insightListState.firstVisibleItemIndex > 0 || insightListState.firstVisibleItemScrollOffset > 0
+                    uiState.selectedDestination == AppDestination.Library && currentPage == AppStackPage.Root ->
+                        libraryListState.firstVisibleItemIndex > 0 || libraryListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryTracks ->
+                        tracksListState.firstVisibleItemIndex > 0 || tracksListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryArtists ->
+                        artistsListState.firstVisibleItemIndex > 0 || artistsListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryAlbums ->
+                        albumsListState.firstVisibleItemIndex > 0 || albumsListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.ArtistDetails ->
+                        artistDetailsListState.firstVisibleItemIndex > 0 || artistDetailsListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.GenreDetails ->
+                        genreDetailsListState.firstVisibleItemIndex > 0 || genreDetailsListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.ComposerDetails ->
+                        composerDetailsListState.firstVisibleItemIndex > 0 || composerDetailsListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryGenres ->
+                        genresListState.firstVisibleItemIndex > 0 || genresListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryComposers ->
+                        composersListState.firstVisibleItemIndex > 0 || composersListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryPlaylists ->
+                        playlistsListState.firstVisibleItemIndex > 0 || playlistsListState.firstVisibleItemScrollOffset > 0
+                    currentPage == AppStackPage.LibraryDuplicates ->
+                        duplicatesListState.firstVisibleItemIndex > 0 || duplicatesListState.firstVisibleItemScrollOffset > 0
+                    uiState.selectedDestination == AppDestination.Settings -> settingsContentScrolled
+                    else -> false
+                }
+            }
+        }
+        val showHeaderBlur = shouldShowHeaderBlur(
+            isContentScrolled = isContentScrolled,
+            destinationChanged = destinationChanged,
+            previousHeaderWasBlurred = previousHeaderWasBlurred,
+        )
+        SideEffect {
+            previousDestination = uiState.selectedDestination
+            previousHeaderWasBlurred = isContentScrolled
+            previousStackPage = currentStackPage
+        }
+        AnchoredPopupMenuHost(
+            hazeState = hazeState,
+            dismissKey = currentStackPage,
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+            AppDestinationContent(
+                stackPage = currentStackPage,
+                themeMode = uiState.themeMode,
+                reduceTransparency = uiState.reduceTransparency,
+                playerTheme = uiState.playerTheme,
+                showVolumeSlider = uiState.showVolumeSlider,
+                fullscreenArtwork = uiState.fullscreenArtwork,
+                fullscreenLyrics = uiState.fullscreenLyrics,
+                keepScreenOn = uiState.keepScreenOn,
+                onKeepScreenOnChanged = { enabled -> onIntent(AppIntent.SetKeepScreenOn(enabled)) },
+                lyricsFontLevel = uiState.lyricsFontLevel,
+                visibleTabs = uiState.visibleTabs,
+                onVisibleTabsChanged = { tabs -> onIntent(AppIntent.SetVisibleTabs(tabs)) },
+                hazeState = hazeState,
+                navigationBottomPadding = navigationBottomPadding,
+                homeListState = homeListState,
+                insightListState = insightListState,
+                libraryListState = libraryListState,
+                tracksListState = tracksListState,
+                artistsListState = artistsListState,
+                albumsListState = albumsListState,
+                genresListState = genresListState,
+                composersListState = composersListState,
+                playlistsListState = playlistsListState,
+                duplicatesListState = duplicatesListState,
+                selectedAlbumId = uiState.selectedAlbumId,
+                selectedPlaylistId = uiState.selectedPlaylistId,
+                selectedSimilarSongId = uiState.selectedSimilarSongId,
+                selectedArtistId = uiState.selectedArtistId,
+                selectedGenreId = uiState.selectedGenreId,
+                selectedComposerId = uiState.selectedComposerId,
+                showGenres = uiState.showGenres,
+                showComposers = uiState.showComposers,
+                artistDetailsListState = artistDetailsListState,
+                genreDetailsListState = genreDetailsListState,
+                composerDetailsListState = composerDetailsListState,
+                onIntent = onIntent,
+                destinations = destinations,
+                playbackQueue = playbackQueue,
+                onTrackPlayNext = playback.onTrackPlayNext,
+                onTrackAddToQueue = playback.onTrackAddToQueue,
+                onTrackFavoriteToggle = playback.onFavoriteToggle,
+                onTrackContextBottomSheet = { request -> trackContextSheet = request },
+                removedTrackIds = removedTrackIds,
+                onTracksRemovedFromLibrary = { ids -> removedTrackIds = removedTrackIds + ids.toSet() },
+                onAlbumHeroColorChanged = { color ->
+                    albumHeroColor = color
+                    library.details.onHeroColorChanged(color)
+                },
+                onSettingsContentScrolled = { settingsContentScrolled = it },
+                onContentScroll = { delta ->
+                    if (!showsMiniPlayer) return@AppDestinationContent
+                    if (navigationScrollAccumulator.update(delta, navigationScrollThresholdPx)) {
+                        isNavigationCompact = navigationScrollAccumulator.compact
+                    }
+                },
+            )
+            AlbumHeroHeaderGradient(
+                color = albumHeroColor,
+                visible = currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails ||
+                    currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.GenreDetails ||
+                    currentPage == AppStackPage.ComposerDetails,
+            )
+            StackPageHeader(
+                title = pageTitle,
+                hazeState = hazeState,
+                isContentScrolled = showHeaderBlur,
+                onBackClick = if (showBack) {
+                    { onIntent(AppIntent.NavigateBack) }
+                } else {
+                    null
+                },
+                hasActions = showSettingsButton || showCreatePlaylistAction || showLibrarySortAction || showPlaylistAddAction || currentPage == AppStackPage.SettingsEqualizer || currentPage == AppStackPage.SettingsLyrics,
+                animateChanges = animateHeaderChanges,
+                titleStackKey = "${uiState.selectedDestination.name}:${currentPage.name}",
+                isForward = isForwardHeaderTransition,
+                backGlassTintAlpha = if (currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails) 0.08f else null,
+            ) {
+                if (showSettingsButton) {
+                    Row(
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        if (showCreatePlaylistAction) {
+                            TuneGlassIconButton(
+                                hazeState = hazeState,
+                                symbol = MaterialSymbols.PlaylistAdd,
+                                label = stringResource(R.string.playlist_create),
+                                onClick = { showCreatePlaylistSheet = true },
+                            )
+                        }
+                        TuneGlassIconButton(
+                            hazeState = hazeState,
+                            symbol = MaterialSymbols.Settings,
+                            label = stringResource(R.string.destination_settings),
+                            onClick = { onIntent(AppIntent.OpenSettings) },
+                        )
+                    }
+                } else if (showPlaylistAddAction) {
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                    ) {
+                        TuneGlassIconButton(
+                            hazeState = hazeState,
+                            symbol = MaterialSymbols.Add,
+                            label = stringResource(R.string.playlist_create),
+                            onClick = { showCreatePlaylistSheet = true },
+                        )
+                        TuneGlassIconButton(
+                            hazeState = hazeState,
+                            symbol = MaterialSymbols.FileImport,
+                            label = stringResource(R.string.playlist_import_m3u),
+                            onClick = { onIntent(AppIntent.ImportM3u) },
+                        )
+                    }
+                } else if (currentPage == AppStackPage.SettingsEqualizer) {
+                    TuneGlassIconButton(
+                        hazeState = hazeState,
+                        symbol = MaterialSymbols.MoreVert,
+                        label = stringResource(R.string.equalizer_profile_menu),
+                        onClick = { equalizerProfileSheet = EqualizerProfileSheet.Menu },
+                    )
+                } else if (currentPage == AppStackPage.SettingsLyrics) {
+                    TuneGlassIconButton(
+                        hazeState = hazeState,
+                        symbol = MaterialSymbols.Info,
+                        label = stringResource(R.string.lyrics_info_action),
+                        onClick = { showLyricsInfoSheet = true },
+                    )
+                } else if (currentPage == AppStackPage.LibraryTracks) {
+                    LibrarySortHeaderButton(
+                        hazeState = hazeState,
+                        options = listOf(
+                            LibrarySortOption(TrackSortOption.Name, R.string.sort_name),
+                            LibrarySortOption(TrackSortOption.Artist, R.string.sort_artist),
+                            LibrarySortOption(TrackSortOption.PlayCount, R.string.sort_play_count),
+                            LibrarySortOption(TrackSortOption.DateAdded, R.string.sort_date_added),
+                        ),
+                        selectedOption = tracksUiState.sortOption,
+                        sortOrder = tracksUiState.sortOrder,
+                        onSortOptionSelected = library.tracks.onSortOptionSelected,
+                        onToggleSortOrder = library.tracks.onToggleSortOrder,
+                    )
+                } else if (currentPage == AppStackPage.LibraryArtists) {
+                    LibrarySortHeaderButton(
+                        hazeState = hazeState,
+                        options = listOf(
+                            LibrarySortOption(ArtistSortOption.Name, R.string.sort_name),
+                            LibrarySortOption(ArtistSortOption.DateAdded, R.string.sort_date_added),
+                        ),
+                        selectedOption = artistsUiState.sortOption,
+                        sortOrder = artistsUiState.sortOrder,
+                        onSortOptionSelected = library.artists.onSortOptionSelected,
+                        onToggleSortOrder = library.artists.onToggleSortOrder,
+                    )
+                } else if (currentPage == AppStackPage.LibraryAlbums) {
+                    LibrarySortHeaderButton(
+                        hazeState = hazeState,
+                        options = listOf(
+                            LibrarySortOption(AlbumSortOption.Name, R.string.sort_name),
+                            LibrarySortOption(AlbumSortOption.Artist, R.string.sort_artist),
+                            LibrarySortOption(AlbumSortOption.DateAdded, R.string.sort_date_added),
+                        ),
+                        selectedOption = albumsUiState.sortOption,
+                        sortOrder = albumsUiState.sortOrder,
+                        onSortOptionSelected = library.albums.onSortOptionSelected,
+                        onToggleSortOrder = library.albums.onToggleSortOrder,
+                        layoutMode = albumsUiState.layoutMode,
+                        onLayoutModeSelected = library.albums.onLayoutModeSelected,
+                    )
+                } else if (currentPage == AppStackPage.LibraryGenres) {
+                    LibrarySortHeaderButton(
+                        hazeState = hazeState,
+                        options = listOf(
+                            LibrarySortOption(GenreSortOption.Name, R.string.sort_name),
+                            LibrarySortOption(GenreSortOption.DateAdded, R.string.sort_date_added),
+                        ),
+                        selectedOption = genresUiState.sortOption,
+                        sortOrder = genresUiState.sortOrder,
+                        onSortOptionSelected = library.genres.onSortOptionSelected,
+                        onToggleSortOrder = library.genres.onToggleSortOrder,
+                    )
+                } else if (currentPage == AppStackPage.LibraryComposers) {
+                    LibrarySortHeaderButton(
+                        hazeState = hazeState,
+                        options = listOf(
+                            LibrarySortOption(ComposerSortOption.Name, R.string.sort_name),
+                            LibrarySortOption(ComposerSortOption.DateAdded, R.string.sort_date_added),
+                        ),
+                        selectedOption = composersUiState.sortOption,
+                        sortOrder = composersUiState.sortOrder,
+                        onSortOptionSelected = library.composers.onSortOptionSelected,
+                        onToggleSortOrder = library.composers.onToggleSortOrder,
+                    )
+                }
+            }
+            if (showCreatePlaylistSheet) {
+                CreatePlaylistBottomSheet(
+                    onDismiss = { showCreatePlaylistSheet = false; createPlaylistForTracks = null },
+                    onCreate = { name, artworkUri ->
+                        showCreatePlaylistSheet = false
+                        createPlaylistForTracks?.let { library.playlists.onCreateWithTracks(name, artworkUri, it) }
+                            ?: library.playlists.onCreate(name, artworkUri)
+                        createPlaylistForTracks = null
+                    },
+                )
+            }
+            if (showLyricsInfoSheet) {
+                TuneBottomSheet(
+                    title = { Text(stringResource(R.string.lyrics_info_title)) },
+                    onDismiss = { showLyricsInfoSheet = false },
+                ) {
+                    Text(
+                        text = stringResource(R.string.lyrics_info_description),
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                        color = LocalTuneColors.current.textMuted,
+                    )
+                }
+            }
+            when (equalizerProfileSheet) {
+                EqualizerProfileSheet.Menu -> EqualizerProfileMenuBottomSheet(
+                    isDefault = settings.equalizer.selectedProfile.isDefault,
+                    onDismiss = { equalizerProfileSheet = null },
+                    onCreate = { equalizerProfileSheet = EqualizerProfileSheet.Create },
+                    onReset = {
+                        settings.onEqualizerProfileReset(settings.equalizer.presetKey)
+                        equalizerProfileSheet = null
+                    },
+                    onDelete = { equalizerProfileSheet = EqualizerProfileSheet.DeleteConfirmation },
+                )
+                EqualizerProfileSheet.Create -> CreateEqualizerProfileBottomSheet(
+                    onDismiss = { equalizerProfileSheet = null },
+                    onCreate = { name ->
+                        settings.onEqualizerProfileCreate(name)
+                        equalizerProfileSheet = null
+                    },
+                )
+                EqualizerProfileSheet.DeleteConfirmation -> TuneDialog(
+                    title = stringResource(R.string.equalizer_profile_delete_title),
+                    description = stringResource(R.string.equalizer_profile_delete_description),
+                    dismissLabel = stringResource(R.string.cancel),
+                    onDismiss = { equalizerProfileSheet = null },
+                    confirmLabel = stringResource(R.string.equalizer_profile_delete),
+                    onConfirm = {
+                        settings.onEqualizerProfileDelete(settings.equalizer.presetKey)
+                        equalizerProfileSheet = null
+                    },
+                    confirmVariant = TunePillButtonVariant.Destructive,
+                )
+                null -> Unit
+            }
+            NavigationChrome(
+                selectedDestination = uiState.selectedDestination,
+                visibleDestinations = dockDestinations,
+                playbackState = playbackState,
+                playbackQueue = playbackQueue,
+                hazeState = hazeState,
+                compact = showsMiniPlayer && isNavigationCompact,
+                onExpandClick = {
+                    isNavigationCompact = false
+                    navigationScrollAccumulator.reset()
+                },
+                onDestinationSelected = { destination ->
+                    if (destination == uiState.selectedDestination) {
+                        if (destination == AppDestination.Home) {
+                            coroutineScope.launch {
+                                homeListState.animateScrollToItem(0)
+                            }
+                        } else if (destination == AppDestination.Insight) {
+                            coroutineScope.launch {
+                                insightListState.animateScrollToItem(0)
+                            }
+                        } else if (destination == AppDestination.Library && currentPage == AppStackPage.Root) {
+                            coroutineScope.launch {
+                                libraryListState.animateScrollToItem(0)
+                            }
+                        }
+                    }
+                    onIntent(AppIntent.SelectDestination(destination))
+                },
+                onPreviousClick = playback.onPrevious,
+                onPlayPauseClick = playback.onPlayPause,
+                onNextClick = playback.onNext,
+                onMiniPlayerDismiss = {
+                    isNavigationCompact = false
+                    navigationScrollAccumulator.reset()
+                    playback.onMiniPlayerDismiss()
+                },
+                onOpenFullScreenPlayer = {
+                    isFullScreenPlayerOpeningFromSwipe = false
+                    setFullScreenPlayerVisible(true)
+                },
+                onFullScreenPlayerDrag = { progress ->
+                    isFullScreenPlayerDragging = true
+                    fullScreenPlayerDragProgress = progress
+                },
+                onFullScreenPlayerDragEnd = { shouldOpen ->
+                    isFullScreenPlayerDragging = false
+                    // A partial pull must not remain as the overlay's source of truth
+                    // once the pointer is released. The overlay then animates to either
+                    // its closed or fully-open resting state.
+                    fullScreenPlayerDragProgress = 0f
+                    isFullScreenPlayerOpeningFromSwipe = shouldOpen
+                    setFullScreenPlayerVisible(shouldOpen)
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(start = 20.dp, end = 20.dp, bottom = FloatingNavigationBottomMargin),
+            )
+            val currentPlayingId = when (val state = playbackState) {
+                is PlaybackState.Preparing -> state.item.trackId
+                is PlaybackState.Playing -> state.item.trackId
+                is PlaybackState.Paused -> state.item.trackId
+                else -> ""
+            }
+            // 队列可能包含在线流播曲目（网易云/心动模式），曲库里没有，回退到播放专用表。
+            val currentPlayingTrack = playback.queueTracks.firstOrNull { it.id == currentPlayingId }
+                ?: com.exodidio.tune.sync.AndroidSyncRuntime.syncStore.trackForPlayback(currentPlayingId)
+            val currentPlayingMetadata = remember(currentPlayingTrack?.metadataJson) {
+                currentPlayingTrack?.metadataObject()
+            }
+            val isCurrentFavorite = remember(currentPlayingMetadata) { isFavoriteOf(currentPlayingMetadata) }
+            // 播放器主题独立于页面染色，使用进入歌单前的主题色。
+            CompositionLocalProvider(LocalTuneColors provides baseTuneColors) {
+            FullScreenPlayer(
+                visible = isFullScreenPlayerVisible,
+                dragProgress = fullScreenPlayerDragProgress,
+                isDragging = isFullScreenPlayerDragging,
+                openingFromMiniPlayerSwipe = isFullScreenPlayerOpeningFromSwipe,
+                playbackState = playbackState,
+                queue = playbackQueue,
+                queueTracks = playback.queueTracks,
+                lyrics = playback.lyrics,
+                lyricsLoading = playback.lyricsLoading,
+                romanization = playback.romanization,
+                romanizationAllowed = playback.romanizationAllowed,
+                onRomanizationInput = playback.onRomanizationInput,
+                onRomanizationToggle = playback.onRomanizationToggle,
+                artworkCrossfade = playback.artworkCrossfade,
+                blendArtworkDuringCrossfade = playback.blendArtworkDuringCrossfade,
+                showQualityBadge = playback.showFullscreenQualityBadge,
+                appleBackdrop = playback.appleBackdrop,
+                adaptiveTextColor = playback.adaptiveTextColor,
+                playerTheme = uiState.playerTheme,
+                showVolumeSlider = uiState.showVolumeSlider,
+                fullscreenArtwork = uiState.fullscreenArtwork,
+                fullscreenLyrics = uiState.fullscreenLyrics,
+                lyricsFontLevel = uiState.lyricsFontLevel,
+                volume = playback.systemVolume,
+                onSeek = playback.onSeek,
+                onVolumeChange = playback.onSystemVolumeChange,
+                onPrevious = playback.onPrevious,
+                onPlayPause = playback.onPlayPause,
+                onNext = playback.onNext,
+                onQueueTrackSelected = playback.onQueueTrackSelected,
+                onQueueReordered = playback.onQueueReordered,
+                onQueueTrackRemoved = playback.onQueueTrackRemoved,
+                onShuffleChange = playback.onShuffleChange,
+                onRepeatModeChange = playback.onRepeatModeChange,
+                moodRadioEligibleTrackIds = playback.moodRadioEligibleTrackIds,
+                onStartMoodRadio = playback.onStartMoodRadio,
+                moodRadioActive = playback.moodRadioActive,
+                isFavorite = isCurrentFavorite,
+                onFavoriteToggle = playback.onFavoriteToggle,
+                onTrackPlayNext = playback.onTrackPlayNext,
+                onTrackAddToQueue = playback.onTrackAddToQueue,
+                onTrackGoToAlbum = { albumId -> onIntent(AppIntent.OpenAlbumDetails(albumId)) },
+                onTrackGoToArtist = { artistId -> onIntent(AppIntent.OpenArtistDetails(artistId)) },
+                onTrackContextBottomSheet = { request -> trackContextSheet = request },
+                onCloseFullscreenThen = ::closeFullScreenPlayerThen,
+                onOpenMediaOutputSwitcher = playback.onOpenMediaOutputSwitcher,
+                onDismiss = {
+                    setFullScreenPlayerVisible(false)
+                    isFullScreenPlayerOpeningFromSwipe = false
+                },
+                onDismissAnimationFinished = {
+                    pendingFullScreenPlayerAction?.let { action ->
+                        pendingFullScreenPlayerAction = null
+                        action()
+                    }
+                },
+                hazeState = hazeState,
+            )
+            }
+            trackContextSheet?.let { request ->
+                TrackContextBottomSheet(
+                    request = request,
+                    onDismiss = { trackContextSheet = null },
+                    onArtistSelected = { artist ->
+                        trackContextSheet = null
+                        onIntent(AppIntent.OpenArtistDetails(artist.id))
+                    },
+                    onSearchLyrics = playback.onSearchLyrics,
+                    onLyricsSelected = playback.onLyricsSelected,
+                    playlists = library.playlists.availablePlaylists,
+                    onPlaylistMembershipChange = library.playlists.onMembershipChange,
+                    onCreatePlaylistRequested = { trackIds ->
+                        trackContextSheet = null
+                        createPlaylistForTracks = trackIds
+                        showCreatePlaylistSheet = true
+                    },
+                )
+            }
+            }
+        }
+        BackHandler(enabled = isFullScreenPlayerVisible) {
+            setFullScreenPlayerVisible(false)
+            isFullScreenPlayerOpeningFromSwipe = false
+        }
+        }
+    }
+}

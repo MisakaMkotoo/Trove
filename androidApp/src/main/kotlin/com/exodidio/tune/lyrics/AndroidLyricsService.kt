@@ -1,0 +1,439 @@
+package com.exodidio.tune.lyrics
+
+import android.content.ContentUris
+import android.content.Context
+import android.provider.MediaStore
+import android.util.Base64
+import android.util.Log
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import com.exodidio.tune.BuildConfig
+import com.exodidio.tune.lyrics.LyricsCandidate
+import com.exodidio.tune.lyrics.bestLyricsCandidate
+import com.exodidio.tune.lyrics.normalizeLyricsText
+import com.exodidio.tune.lyrics.removeFeaturedLyricsTitle
+import com.exodidio.tune.sync.AndroidLibrarySyncStore
+import com.exodidio.tune.sync.metadataObject
+
+internal data class FetchedLyric(val content: String, val source: String)
+
+/** 带 `[mm:ss]` 时间轴的行数，用于比较各来源完整度。 */
+internal fun countTimedLyricLines(content: String): Int =
+    content.lineSequence().count { line -> line.startsWith("[") && line.getOrNull(1)?.isDigit() == true }
+
+private val LyricTimestampTag = Regex("\\[(\\d+):(\\d+(?:[.:]\\d+)?)\\]")
+
+internal fun lyricTimestamps(content: String): List<Float> =
+    LyricTimestampTag.findAll(content).mapNotNull { match ->
+        val minutes = match.groupValues[1].toFloatOrNull() ?: return@mapNotNull null
+        val secondsText = match.groupValues[2].replace(':', '.')
+        val seconds = secondsText.toFloatOrNull() ?: return@mapNotNull null
+        minutes * 60f + seconds
+    }.toList()
+
+internal fun firstLyricTimestamp(content: String): Float? = lyricTimestamps(content).minOrNull()
+
+internal fun lastLyricTimestamp(content: String): Float? = lyricTimestamps(content).maxOrNull()
+
+internal data class LyricsSearchResult(
+    val provider: String,
+    val trackName: String,
+    val artistName: String,
+    val duration: Int,
+    val content: String,
+    val source: String,
+)
+
+internal abstract class LyricsProvider {
+    abstract fun enabled(settings: LyricsSettings): Boolean
+    abstract suspend fun fetch(track: LyricsTrack): FetchedLyric?
+    abstract suspend fun search(title: String, artist: String, duration: Int): List<LyricsSearchResult>
+}
+
+internal class AndroidLyricsService(
+    private val library: AndroidLibrarySyncStore,
+    private val providers: List<LyricsProvider> = listOf(
+        NeteaseLyricsProvider(),
+        LrclibLyricsProvider(),
+        KugouLyricsProvider(),
+    ),
+    private val appContext: Context? = null,
+    private val localFileReader: ((String) -> String?)? = null,
+    private val localPathOverride: ((LyricsTrack) -> String?)? = null,
+) {
+    suspend fun fetch(trackId: String, settings: LyricsSettings) {
+        val track = library.trackForPlayback(trackId) ?: run {
+            Log.w("TuneLyrics", "Cannot fetch lyrics: track $trackId is unavailable")
+            return
+        }
+        val durationSeconds = (track.metadataObject()?.get("duration") as? JsonPrimitive)
+            ?.contentOrNull?.toDoubleOrNull()?.toInt() ?: 0
+        val lyricsTrack = LyricsTrack(
+            title = track.title,
+            artist = track.artists,
+            album = track.album,
+            duration = durationSeconds,
+            audioPath = track.audioPath,
+            trackId = trackId,
+        )
+        readLocalLrc(trackId, lyricsTrack)?.let { local ->
+            library.saveProviderLyrics(trackId, local, "local-lrc")
+            Log.d("TuneLyrics", "Using local .lrc lyrics for ${lyricsTrack.title}")
+            return
+        }
+        val active = providers.filter { it.enabled(settings) }
+        if (active.isEmpty()) return
+        // 网易云优先：任何歌曲都先试网易云（ID 直取或搜索匹配），失败再并发回退其他来源。
+        val netease = active.filterIsInstance<NeteaseLyricsProvider>().firstOrNull()
+            ?: active.firstOrNull { it::class.simpleName == "NeteaseLyricsProvider" }
+        var lyric: FetchedLyric? = null
+        if (netease != null) {
+            val started = android.os.SystemClock.elapsedRealtime()
+            lyric = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(NeteasePriorityTimeoutMs) { netease.fetch(lyricsTrack) }
+            }.getOrNull()
+            Log.d(
+                "TuneLyrics",
+                "Provider Netease(priority) took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${lyric != null}",
+            )
+        }
+        val fallbackProviders = active.filterNot { it === netease }
+        if (lyric == null && fallbackProviders.isNotEmpty()) {
+            Log.d("TuneLyrics", "Fetching lyrics for ${lyricsTrack.title} from ${fallbackProviders.size} fallback provider(s)")
+            lyric = coroutineScope {
+                val results = Channel<Result<FetchedLyric?>>(fallbackProviders.size)
+                val jobs = fallbackProviders.map { provider ->
+                    async {
+                        val started = android.os.SystemClock.elapsedRealtime()
+                        val outcome = runCatching {
+                            kotlinx.coroutines.withTimeoutOrNull(ProviderTimeoutMs) { provider.fetch(lyricsTrack) }
+                        }
+                        Log.d(
+                            "TuneLyrics",
+                            "Provider ${provider::class.simpleName} took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${outcome.getOrNull() != null}",
+                        )
+                        results.send(outcome)
+                    }
+                }
+                repeat(fallbackProviders.size) {
+                    val result = results.receive()
+                    result.exceptionOrNull()?.let { Log.w("TuneLyrics", "Lyrics provider failed", it) }
+                    result.getOrNull()?.let { hit ->
+                        jobs.forEach { job -> job.cancel() }
+                        return@coroutineScope hit
+                    }
+                }
+                null
+            }
+        }
+        lyric?.let {
+            library.saveProviderLyrics(trackId, it.content, it.source)
+            System.err.println(
+                "LYR source=${it.source} track=$trackId chars=${it.content.length} lines=${countTimedLyricLines(it.content)} " +
+                    "first=${firstLyricTimestamp(it.content)} last=${lastLyricTimestamp(it.content)} duration=${lyricsTrack.duration}",
+            )
+        } ?: System.err.println("LYR none track=$trackId title=${lyricsTrack.title} duration=${lyricsTrack.duration}")
+    }
+
+    private fun readLocalLrc(trackId: String, track: LyricsTrack): String? {
+        val reader: (String) -> String? = localFileReader ?: { path ->
+            try {
+                File(path).takeIf { it.isFile }?.readText()
+            } catch (_: Exception) {
+                null
+            }
+        }
+        val audioPath = localPathOverride?.invoke(track) ?: resolveTrackFilePath(trackId, track)
+        return resolveLocalLrcContent(audioPath, track.artist, track.title, reader)
+    }
+
+    private fun resolveTrackFilePath(trackId: String, track: LyricsTrack): String? {
+        track.audioPath?.trim()?.takeIf { it.isNotBlank() }?.let { raw ->
+            if (!raw.startsWith("content://", ignoreCase = true)) return raw
+        }
+        val mediaId = mediaIdForLocalTrackId(trackId) ?: return null
+        val context = appContext ?: return null
+        return try {
+            val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, mediaId)
+            context.contentResolver.query(uri, arrayOf(MediaStore.Audio.Media.DATA), null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx)?.takeIf { it.isNotBlank() } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun search(trackId: String, title: String, artist: String, settings: LyricsSettings): List<LyricsSearchResult> {
+        if (title.isBlank()) return emptyList()
+        val duration = 0
+        return coroutineScope {
+            providers.filter { it.enabled(settings) }.map { provider ->
+                async {
+                    runCatching { provider.search(title.trim(), artist.trim(), duration) }
+                        .onFailure { Log.w("TuneLyrics", "Lyrics search provider failed", it) }
+                        .getOrDefault(emptyList())
+                }
+            }.awaitAll().flatten()
+        }
+    }
+
+}
+
+internal class LrclibLyricsProvider : LyricsProvider() {
+    override fun enabled(settings: LyricsSettings) = settings.lrclib
+    override suspend fun fetch(track: LyricsTrack): FetchedLyric? {
+        val title = normalizeLyricsText(removeFeaturedLyricsTitle(track.title));
+        val artist = normalizeLyricsText(track.artist)
+        exact(title, artist, track.album, track.duration)?.let { return it }
+        if (track.album.isNotBlank()) exact(title, artist, "", track.duration)?.let { return it }
+        val candidates = request(
+            "https://lrclib.net/api/search",
+            mapOf("track_name" to title, "artist_name" to artist)
+        ) ?: return null
+        val values = ProviderJson.decodeFromString(ListSerializer, candidates)
+        val best = bestLyricsCandidate(values.map {
+            LyricsCandidate(
+                it.trackName,
+                it.artistName,
+                it.duration
+            )
+        }, title, artist, track.duration) ?: return null
+        return values.firstOrNull { it.trackName == best.title && it.artistName == best.artist && it.duration == best.durationSeconds }
+            ?.toLyric()
+    }
+
+    override suspend fun search(title: String, artist: String, duration: Int): List<LyricsSearchResult> = request(
+        "https://lrclib.net/api/search",
+        mapOf("track_name" to title, "artist_name" to artist),
+    )?.let { response ->
+        ProviderJson.decodeFromString(ListSerializer, response).mapNotNull { candidate ->
+            candidate.toLyric()?.let { lyric ->
+                LyricsSearchResult("lrclib", candidate.trackName, candidate.artistName, candidate.duration.toInt(), lyric.content, lyric.source)
+            }
+        }
+    } ?: emptyList()
+
+    private suspend fun exact(
+        title: String,
+        artist: String,
+        album: String,
+        duration: Int
+    ): FetchedLyric? {
+        val params = mutableMapOf(
+            "track_name" to title,
+            "artist_name" to artist
+        ).apply {
+            if (album.isNotBlank()) put(
+                "album_name",
+                album
+            ); if (duration > 0) put("duration", duration.toString())
+        }
+        return request(
+            "https://lrclib.net/api/get",
+            params
+        )?.let {
+            ProviderJson.decodeFromString(LrclibCandidate.serializer(), it).toLyric()
+        }
+    }
+
+    private fun LrclibCandidate.toLyric(): FetchedLyric? = syncedLyrics.takeIf(String::isNotBlank)
+        ?.let {
+            FetchedLyric(
+                decodeLyricsHtml(it),
+                "lrclib-synced"
+            )
+        } ?: plainLyrics.takeIf(String::isNotBlank)?.let {
+        FetchedLyric(
+            decodeLyricsHtml(it),
+            "lrclib-plain"
+        )
+    }
+}
+
+internal class KugouLyricsProvider : LyricsProvider() {
+    override fun enabled(settings: LyricsSettings) = settings.kugou
+    override suspend fun fetch(track: LyricsTrack): FetchedLyric? {
+        var title = normalizeLyricsText(removeFeaturedLyricsTitle(track.title));
+        var artist = normalizeLyricsText(track.artist)
+        repeat(3) { attempt ->
+            val candidates = kugouSearch("$artist - $title", track.duration * 1000)
+            val best = bestLyricsCandidate(candidates.map {
+                LyricsCandidate(
+                    it.song,
+                    it.singer,
+                    it.duration / 1000.0,
+                    it.score
+                )
+            }, title, artist, track.duration)
+            candidates.firstOrNull { best != null && it.song == best.title && it.singer == best.artist && it.duration / 1000.0 == best.durationSeconds }
+                ?.let { candidate ->
+                    kugouDownload(
+                        candidate.id,
+                        candidate.accesskey
+                    )?.let { content ->
+                        return FetchedLyric(
+                            content,
+                            if (SyncedLrc.containsMatchIn(content)) "kugou-synced" else "kugou-plain"
+                        )
+                    }
+                }
+            if (attempt == 0) {
+                title = Brackets.replace(title, ""); artist = Brackets.replace(artist, "")
+            } else if (attempt == 1) {
+                val old = title; title = artist; artist = old
+            }
+        }
+        return null
+    }
+
+    override suspend fun search(title: String, artist: String, duration: Int): List<LyricsSearchResult> = coroutineScope {
+        kugouSearch("$artist - $title", duration * 1000).take(5).map { candidate ->
+            async {
+                kugouDownload(candidate.id, candidate.accesskey)?.takeIf(String::isNotBlank)?.let { content ->
+                    LyricsSearchResult(
+                        provider = "kugou",
+                        trackName = title,
+                        artistName = artist,
+                        duration = candidate.duration / 1000,
+                        content = decodeLyricsHtml(content),
+                        source = if (SyncedLrc.containsMatchIn(content)) "kugou-synced" else "kugou-plain",
+                    )
+                }
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+    private suspend fun kugouSearch(keyword: String, duration: Int): List<KugouCandidate> = request(
+        "http://krcs.kugou.com/search",
+        mapOf(
+            "ver" to "1",
+            "man" to "yes",
+            "client" to "mobi",
+            "keyword" to keyword,
+            "duration" to duration.toString(),
+            "hash" to "",
+            "album_audio_id" to ""
+        )
+    )
+        ?.let { ProviderJson.decodeFromString(KugouSearch.serializer(), it).candidates }
+        ?: emptyList()
+
+    private suspend fun kugouDownload(id: String, key: String): String? = request(
+        "https://lyrics.kugou.com/download",
+        mapOf(
+            "ver" to "1",
+            "client" to "pc",
+            "id" to id,
+            "accesskey" to key,
+            "fmt" to "lrc",
+            "charset" to "utf8"
+        )
+    )
+        ?.let { ProviderJson.decodeFromString(KugouDownload.serializer(), it).content }
+        ?.let { Base64.decode(it, Base64.DEFAULT).toString(Charsets.UTF_8) }
+
+}
+
+private suspend fun request(base: String, params: Map<String, String>): String? =
+    withContext(Dispatchers.IO) {
+        val query = params.entries.joinToString("&") {
+            "${
+                URLEncoder.encode(
+                    it.key,
+                    "UTF-8"
+                )
+            }=${URLEncoder.encode(it.value, "UTF-8")}"
+        }
+        (URL("$base?$query").openConnection() as HttpURLConnection).run {
+            try {
+                connectTimeout = 4_000; readTimeout = 6_000; setRequestProperty(
+                    "User-Agent",
+                    "Tune-Android/${BuildConfig.VERSION_NAME}"
+                ); if (responseCode !in 200..299) null else inputStream.bufferedReader()
+                    .use { it.readText() }
+            } finally {
+                disconnect()
+            }
+        }
+    }
+
+private const val ProviderTimeoutMs = 8_000L
+private const val NeteasePriorityTimeoutMs = 10_000L
+private const val MissCacheMs = 10 * 60_000L
+
+private val Brackets = Regex("[(（【〔\\[{｛][^)）】〕\\]}｝]*[)）】〕\\]}｝]")
+private val SyncedLrc = Regex("(?m)^\\[\\d{2}:\\d{2}\\.\\d+]")
+private val HtmlEntity = Regex("&(#(?:x[0-9a-fA-F]+|\\d+)|amp|apos|lt|gt|quot|nbsp);")
+private val ListSerializer =
+    kotlinx.serialization.builtins.ListSerializer(LrclibCandidate.serializer())
+internal val ProviderJson = Json {
+    ignoreUnknownKeys = true
+    coerceInputValues = true
+}
+
+/** Matches desktop html.UnescapeString without treating LRC line breaks as HTML whitespace. */
+internal fun decodeLyricsHtml(content: String): String = HtmlEntity.replace(content) { match ->
+    when (val entity = match.groupValues[1]) {
+        "amp" -> "&"
+        "apos" -> "'"
+        "lt" -> "<"
+        "gt" -> ">"
+        "quot" -> "\""
+        "nbsp" -> " "
+        else -> entity.removePrefix("#").let { value ->
+            val radix = if (value.startsWith("x", ignoreCase = true)) 16 else 10
+            value.removePrefix("x").removePrefix("X").toIntOrNull(radix)?.toChar()?.toString() ?: match.value
+        }
+    }
+}
+
+internal data class LyricsTrack(
+    val title: String,
+    val artist: String,
+    val album: String,
+    val duration: Int,
+    val audioPath: String? = null,
+    val trackId: String = "",
+)
+
+@Serializable
+internal data class LrclibCandidate(
+    val trackName: String = "",
+    val artistName: String = "",
+    val duration: Double = 0.0,
+    val syncedLyrics: String = "",
+    val plainLyrics: String = ""
+)
+
+@Serializable
+private data class KugouSearch(val candidates: List<KugouCandidate> = emptyList())
+@Serializable
+private data class KugouCandidate(
+    val id: String,
+    val accesskey: String,
+    val singer: String = "",
+    val song: String = "",
+    val duration: Int = 0,
+    val score: Int = 0
+)
+
+@Serializable
+private data class KugouDownload(val content: String = "")

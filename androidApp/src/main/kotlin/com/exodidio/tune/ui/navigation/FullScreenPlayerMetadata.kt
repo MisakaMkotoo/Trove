@@ -1,0 +1,207 @@
+package com.exodidio.tune.ui.navigation
+
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import dev.chrisbanes.haze.HazeState
+import com.exodidio.tune.R
+import com.exodidio.tune.player.ArtworkCrossfadeTransition
+import com.exodidio.tune.player.PlaybackItem
+import com.exodidio.tune.player.PlaybackQueueSnapshot
+import com.exodidio.tune.sync.LibraryTrack
+import com.exodidio.tune.ui.components.TuneIconButton
+import com.exodidio.tune.ui.components.TuneIconButtonVariant
+import com.exodidio.tune.ui.components.TuneMarqueeText
+import com.exodidio.tune.ui.components.TunePillButton
+import com.exodidio.tune.ui.components.TunePillButtonVariant
+import com.exodidio.tune.ui.components.MaterialSymbol
+import com.exodidio.tune.ui.components.MaterialSymbols
+import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
+import com.exodidio.tune.ui.components.TrackContextMenu
+import com.exodidio.tune.ui.components.TrackContextMenuActions
+import com.exodidio.tune.ui.components.TrackInfoValue
+import com.exodidio.tune.ui.theme.LocalTuneColors
+
+internal const val FullScreenPlayerMetadataSwipeTestTag = "full_screen_player_metadata_swipe_target"
+
+@Composable
+internal fun FullScreenPlayerMetadataTransition(
+    item: PlaybackItem,
+    crossfade: ArtworkCrossfadeTransition?,
+    displayedHorizontalSwipeOffset: Float,
+    hazeState: HazeState?,
+    compact: Boolean,
+    isFavorite: Boolean,
+    onFavoriteToggle: (String, Boolean) -> Unit,
+    contextTrack: LibraryTrack?,
+    contextMenuExpanded: Boolean,
+    onContextMenuOpen: () -> Unit,
+    onContextMenuDismiss: () -> Unit,
+    playbackQueue: PlaybackQueueSnapshot,
+    onTrackPlayNext: (String) -> Unit,
+    onTrackAddToQueue: (String) -> Unit,
+    moodRadioEligibleTrackIds: Set<String>,
+    onStartMoodRadio: (String) -> Unit,
+    onTrackGoToAlbum: (String) -> Unit,
+    onTrackGoToArtist: (String) -> Unit,
+    onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit,
+    onCloseFullscreenThen: ((() -> Unit) -> Unit),
+) {
+    androidx.compose.animation.AnimatedContent(
+        targetState = item,
+        transitionSpec = {
+            if (crossfade != null) {
+                (slideInHorizontally(tween(200, easing = FastOutSlowInEasing)) { it / 4 } + fadeIn(tween(200, easing = FastOutSlowInEasing))) togetherWith
+                    (slideOutHorizontally(tween(180, easing = FastOutSlowInEasing)) { -it / 4 } + fadeOut(tween(160, easing = FastOutSlowInEasing)))
+            } else EnterTransition.None togetherWith ExitTransition.None
+        },
+        label = "full-screen-player-metadata-crossfade",
+    ) { animatedItem ->
+        FullScreenPlayerMetadata(
+            animatedItem, displayedHorizontalSwipeOffset, hazeState, compact, isFavorite, onFavoriteToggle,
+            contextTrack, contextMenuExpanded, onContextMenuOpen, onContextMenuDismiss, playbackQueue,
+            onTrackPlayNext, onTrackAddToQueue, moodRadioEligibleTrackIds, onStartMoodRadio, onTrackGoToAlbum, onTrackGoToArtist,
+            onTrackContextBottomSheet, onCloseFullscreenThen,
+        )
+    }
+}
+
+@Composable
+private fun FullScreenPlayerMetadata(
+    item: PlaybackItem,
+    displayedHorizontalSwipeOffset: Float,
+    hazeState: HazeState?,
+    compact: Boolean,
+    isFavorite: Boolean,
+    onFavoriteToggle: (String, Boolean) -> Unit,
+    contextTrack: LibraryTrack?,
+    contextMenuExpanded: Boolean,
+    onContextMenuOpen: () -> Unit,
+    onContextMenuDismiss: () -> Unit,
+    playbackQueue: PlaybackQueueSnapshot,
+    onTrackPlayNext: (String) -> Unit,
+    onTrackAddToQueue: (String) -> Unit,
+    moodRadioEligibleTrackIds: Set<String>,
+    onStartMoodRadio: (String) -> Unit,
+    onTrackGoToAlbum: (String) -> Unit,
+    onTrackGoToArtist: (String) -> Unit,
+    onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit,
+    onCloseFullscreenThen: ((() -> Unit) -> Unit),
+) {
+    val colors = LocalTuneColors.current
+    val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val favoriteScale = remember(item.trackId) { Animatable(1f) }
+    var previousFavorite by remember(item.trackId) { mutableStateOf(isFavorite) }
+    LaunchedEffect(item.trackId, isFavorite) {
+        val wasAdded = isFavorite && !previousFavorite
+        previousFavorite = isFavorite
+        if (wasAdded) {
+            favoriteScale.snapTo(1f)
+            favoriteScale.animateTo(1.14f, tween(120, easing = FastOutSlowInEasing))
+            favoriteScale.animateTo(1f, tween(180, easing = FastOutSlowInEasing))
+        } else if (!isFavorite) favoriteScale.snapTo(1f)
+    }
+    val heartLabel = stringResource(R.string.player_heart)
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).clipToBounds().graphicsLayer { translationX = displayedHorizontalSwipeOffset }
+            .semantics { testTag = FullScreenPlayerMetadataSwipeTestTag }) {
+            TuneMarqueeText(item.title, colors.onPrimary, if (compact) MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold) else MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold))
+            TuneMarqueeText(item.artist, colors.foregroundSubtle, if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium)
+        }
+        Spacer(Modifier.width(4.dp))
+        if (!compact) Box(
+            modifier = Modifier
+                .size(48.dp)
+                .graphicsLayer { scaleX = favoriteScale.value; scaleY = favoriteScale.value }
+                .semantics { contentDescription = heartLabel }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    role = Role.Button,
+                ) {
+                    if (!isFavorite) hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                    onFavoriteToggle(item.trackId, !isFavorite)
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            MaterialSymbol(
+                symbol = MaterialSymbols.Star,
+                tint = colors.onPrimary,
+                size = 26.dp,
+                filled = isFavorite,
+            )
+        }
+        // Now-playing keeps only the favorites action. The overflow (three-dot)
+        // menu was removed per v1.2.0 feedback; track actions remain available
+        // from library rows and queue entries.
+    }
+}
+
+@Composable
+internal fun FullScreenQualityDialog(labelRes: Int, symbol: String, details: List<TrackInfoValue>, onDismiss: () -> Unit) {
+    val colors = LocalTuneColors.current
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true, usePlatformDefaultWidth = false)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).background(colors.card, RoundedCornerShape(24.dp)), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                Modifier.padding(start = 24.dp, top = 24.dp, end = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    MaterialSymbol(symbol, null, size = 32.dp, tint = colors.textMain)
+                    Text(stringResource(labelRes), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = colors.textMain)
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    details.forEach { detail -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(stringResource(detail.labelRes), style = MaterialTheme.typography.bodyMedium, color = colors.textMuted)
+                        Text(detail.value, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), color = colors.textMain)
+                    } }
+                }
+            }
+            TunePillButton(stringResource(R.string.ok), onDismiss, TunePillButtonVariant.Primary, Modifier.padding(start = 16.dp, top = 20.dp, end = 16.dp, bottom = 16.dp))
+        }
+    }
+}
