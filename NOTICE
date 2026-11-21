@@ -1,19 +1,21 @@
-# NOTICE — Tune
+# NOTICE — Trove
 
-Tune is reworked by **exodi_dio** and licensed under GPLv3 (see LICENSE).
+Trove is an independent derivative of **Tune** by **exodi_dio**
+(https://github.com/Exodi-dio/tune), licensed under GPLv3 (see LICENSE).
+The player, UI, NetEase integration, and library/sync features have been
+substantially reworked in this repository.
 
 ## Provenance
 
-- Application base: the Android/KMP mobile app from
-  `misa198/airmedy` (GPLv3). All PC/desktop sync and previous-developer
-  references have been removed; the player, library, and UI were reworked
-  into a standalone local music player.
+- Upstream project: `Exodi-dio/tune` (GPL-3.0). Trove is not an official
+  branch of Tune and is maintained independently.
+- Application base (via upstream): the Android/KMP mobile app from
+  `misa198/airmedy` (GPLv3).
 - Artist-screen UI elements and transitions adapted from
   `kushagrasinghx/BitChord` (GPLv3).
 
-## Third-party components (from upstream)
+## Third-party components
 
 - FFmpeg (LGPL-2.1+) — audio decoding.
-- miniaudio, SFBAudioEngine references (desktop legacy, not shipped).
 - OpenCC (Apache-2.0), go-pinyin phrase data (MIT), koreanromanizer (MIT)
   — romanization data/tooling where retained.
