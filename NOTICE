@@ -5,17 +5,66 @@ Trove is an independent derivative of **Tune** by **exodi_dio**
 The player, UI, NetEase integration, and library/sync features have been
 substantially reworked in this repository.
 
-## Provenance
+## Bundled native components
 
-- Upstream project: `Exodi-dio/tune` (GPL-3.0). Trove is not an official
-  branch of Tune and is maintained independently.
-- Application base (via upstream): the Android/KMP mobile app from
-  `misa198/airmedy` (GPLv3).
+- **FFmpeg 8.1.2** — LGPL-2.1-or-later, built **without** `--enable-gpl`
+  and shipped as dynamically linked shared libraries (`libavcodec.so`,
+  `libavformat.so`, `libavutil.so`, `libswresample.so`).
+  - Source: <https://ffmpeg.org/>; the exact build is described by
+    `scripts/build-ffmpeg-android.sh`.
+  - The shared libraries can be replaced with compatible builds; no
+    relinking against proprietary code is required.
+  - License text: `licenses/LGPL-2.1.txt`.
+- **OpenSSL 3.0.x** — Apache-2.0.
+  - Source: <https://github.com/openssl/openssl>.
+  - License text: `licenses/Apache-2.0.txt`.
+
+## Third-party libraries
+
+All of the following are distributed under Apache-2.0 unless noted
+(`licenses/Apache-2.0.txt`):
+
+- AndroidX (Media3, Room, DataStore, Lifecycle, Palette, DocumentFile,
+  Activity Compose, Annotation, Collection).
+- Jetpack Compose / Compose Multiplatform, Material3.
+- Kotlin standard library, kotlinx-coroutines, kotlinx-serialization.
+- Haze (`dev.chrisbanes.haze`), Vico (`com.patrykandpatrick.vico`),
+  Reorderable (`sh.calvin.reorderable`), ZXing Core (`com.google.zxing`).
+- Material Symbols icon font (Google), bundled at
+  `androidApp/src/main/res/font/material_symbols_rounded.ttf`.
+
+Additional licenses:
+
+- **protobuf** (transitive via DataStore) — BSD-3-Clause, Copyright 2008
+  Google Inc. Text: `licenses/BSD-3-Clause-protobuf.txt`.
+- **Lucide icons** (`com.composables:icons-lucide-android`) — MIT; upstream
+  Lucide is ISC, Copyright (c) Lucide Icons and Contributors.
+  Text: `licenses/ISC-lucide.txt`.
+
+## Adapted code and algorithms
+
+- **Kawarp** by Better Lyrics (<https://github.com/better-lyrics/kawarp>,
+  MIT) — the album-artwork background rendering pipeline (Kawase blur,
+  simplex-noise domain warping, tint/saturation pass) is adapted in
+  `AppleBackdrop.kt`. Text: `licenses/MIT-kawarp.txt`.
+- **Simplex noise** — Copyright (C) 2011 Ashima Arts, Copyright (C)
+  2011-2016 Stefan Gustavson (MIT). Text: `licenses/MIT-simplex-noise.txt`.
+- **ncmdump** by nondanee (<https://github.com/nondanee/ncmdump>, MIT) —
+  the NCM decoding flow in `NcmDecoder.kt` follows its implementation.
+  Text: `licenses/MIT-ncmdump.txt`.
+
+## Data and tooling
+
+- **OpenCC** — Apache-2.0; Traditional Chinese lookup.
+- **go-pinyin** / **phrase-pinyin-data** — MIT, Copyright (c) 2016, 2017
+  mozillazg.
+- **koreanromanizer** — MIT, Copyright (c) 2025 Donghe Youn (Daissue).
+- Full attribution for romanization data: `tools/romanization/ATTRIBUTION.md`.
+
+## Upstream provenance
+
+- Upstream project: **[Exodi-dio/tune](https://github.com/Exodi-dio/tune)**
+  (GPL-3.0). Trove is not an official branch of Tune.
+- Application base (via upstream): `misa198/airmedy` (GPLv3).
 - Artist-screen UI elements and transitions adapted from
   `kushagrasinghx/BitChord` (GPLv3).
-
-## Third-party components
-
-- FFmpeg (LGPL-2.1+) — audio decoding.
-- OpenCC (Apache-2.0), go-pinyin phrase data (MIT), koreanromanizer (MIT)
-  — romanization data/tooling where retained.
