@@ -3,17 +3,19 @@ package com.exodidio.tune
 enum class AppDestination {
     Home,
     Discover,
+    Mine,
     Insight,
     Library,
     Search,
-    Settings;
+    Settings,
+    Account;
 
     val storageValue: String
         get() = name.lowercase()
 
     companion object {
         /** 可在底栏显示的标签；“统计/数据分析”和“设置”不再占底栏。 */
-        val dockable: List<AppDestination> = listOf(Home, Discover, Library, Search)
+        val dockable: List<AppDestination> = listOf(Home, Discover, Mine, Library, Search)
 
         fun fromStorage(value: String?): AppDestination? =
             entries.firstOrNull { it.storageValue == value }
@@ -37,16 +39,19 @@ enum class AppStackPage {
     LibraryDuplicates,
     PlaylistDetails,
     SimilarSongs,
+    MineCreatedPlaylists,
+    MineSavedPlaylists,
+    MineArtists,
     SettingsAppearance,
     SettingsPlayback,
     SettingsSongTransition,
+    SettingsPlaybackLyrics,
     SettingsVolumeNormalization,
     SettingsEqualizer,
     SettingsAppleBackdrop,
     SettingsIntegration,
     SettingsMusicSync,
     SettingsNcmImport,
-    SettingsLastFm,
     SettingsLyrics,
     SettingsAbout,
     SettingsTabLayout,
@@ -54,6 +59,7 @@ enum class AppStackPage {
     SettingsNeteasePlaylists,
     SettingsDuplicates,
     SettingsInsight,
+    SettingsServiceStatus,
     NeteasePlaylistDetails,
 }
 
@@ -83,16 +89,20 @@ val AppStackPage.destination: AppDestination
         AppStackPage.NeteasePlaylistDetails,
         AppStackPage.SimilarSongs,
         -> AppDestination.Library
+        AppStackPage.MineCreatedPlaylists,
+        AppStackPage.MineSavedPlaylists,
+        AppStackPage.MineArtists,
+        -> AppDestination.Mine
         AppStackPage.SettingsAppearance,
         AppStackPage.SettingsPlayback,
         AppStackPage.SettingsSongTransition,
+        AppStackPage.SettingsPlaybackLyrics,
         AppStackPage.SettingsVolumeNormalization,
         AppStackPage.SettingsEqualizer,
         AppStackPage.SettingsAppleBackdrop,
         AppStackPage.SettingsIntegration,
         AppStackPage.SettingsMusicSync,
         AppStackPage.SettingsNcmImport,
-        AppStackPage.SettingsLastFm,
         AppStackPage.SettingsLyrics,
         AppStackPage.SettingsAbout,
         AppStackPage.SettingsTabLayout,
@@ -100,6 +110,7 @@ val AppStackPage.destination: AppDestination
         AppStackPage.SettingsNeteasePlaylists,
         AppStackPage.SettingsDuplicates,
         AppStackPage.SettingsInsight,
+        AppStackPage.SettingsServiceStatus,
         -> AppDestination.Settings
     }
 

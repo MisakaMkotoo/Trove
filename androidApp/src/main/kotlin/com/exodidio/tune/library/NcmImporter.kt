@@ -9,6 +9,7 @@ import com.exodidio.tune.sync.LibrarySyncProtocol
 import com.exodidio.tune.sync.LibraryTrack
 import com.exodidio.tune.sync.albumIdFor
 import com.exodidio.tune.sync.artistIdFor
+import com.exodidio.tune.sync.writeTextAtomically
 import java.io.File
 import java.security.MessageDigest
 import java.time.Instant
@@ -193,7 +194,7 @@ internal class NcmImporter(private val context: Context) {
     }
 
     private fun writeCache(dir: File, base: String, cache: CachedNcm) {
-        runCatching { File(dir, "$base.json").writeText(LibrarySyncProtocol.json.encodeToString(cache)) }
+        runCatching { File(dir, "$base.json").writeTextAtomically(LibrarySyncProtocol.json.encodeToString(cache)) }
     }
 
     private fun sha1(value: String): String =

@@ -1,7 +1,5 @@
 package com.exodidio.tune.ui.navigation
 
-import com.exodidio.tune.lyrics.RomanizationUiState
-
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -23,7 +21,9 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,12 +33,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -62,8 +64,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlin.math.roundToInt
@@ -79,10 +83,25 @@ import com.exodidio.tune.sync.metadataObject
 import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
 import com.exodidio.tune.settings.PlayerTheme
 import com.exodidio.tune.ui.theme.LocalTuneColors
-private val FullScreenPlayerCompactArtworkSize = 80.dp
-private val FullScreenPlayerCompactGap = 24.dp
+private val FullScreenPlayerCompactArtworkSize = 60.dp
+/** 紧凑头再往右缩进：连同 20dp 内容边距对齐 Apple 实测的约 32dp。 */
+// 父列自带 20dp 水平内边距：这里 15dp 偏移 => 封面主体绝对左边距 35dp。
+private val FullScreenPlayerCompactLeftInset = 15.dp
+/** 紧凑封面圆角：Apple 实测约 3.5dp（60dp 封面）。 */
+private val FullScreenPlayerCompactCornerRadius = 3.5.dp
+/** 苹果播放页封面：盒子宽 = 屏宽 - 48dp（左右各 24dp），暂停缩到 0.85。 */
+private val FullScreenArtworkHorizontalInset = 48.dp
+/** 状态栏 + 拖拽把手之后再留 35dp，封面顶部落在约 93dp。 */
+private val FullScreenArtworkTopGap = 35.dp
+/** 封面盒子到标题块的距离（苹果实测 59dp）。 */
+private val FullScreenArtworkMetadataGap = 59.dp
+/** 标题 + 艺人两行的块高，用于撑开头部容器。 */
+private val FullScreenArtworkMetadataHeight = 56.dp
+private val FullScreenPlayerCompactGap = 9.dp
+/** 紧凑文字块比父级多出的宽度（伸到屏幕右缘）；requiredWidth 会居中，需要右移一半抵消。 */
+private val FullScreenPlayerCompactRightOverflow = 20.dp
 private const val LyricsControlsIdleHideDelayMs = 5_000L
-private const val LyricsControlsFadeMs = 450
+private const val LyricsControlsFadeMs = 180
 /** 进度条触摸区比可见轨道高出的部分：实心遮挡层从这里开始，歌词一直露到进度条。 */
 private val SliderTrackTopOverhang = 20.dp
 // Reserve the player chrome, metadata, and a usable controls area on short screens.
@@ -98,10 +117,10 @@ internal fun FullScreenPlayer(
     queueTracks: List<LibraryTrack> = emptyList(),
     lyrics: String? = null,
     lyricsLoading: Boolean = false,
-    romanization: RomanizationUiState = RomanizationUiState(),
-    romanizationAllowed: Boolean = false,
-    onRomanizationInput: (List<String>, Boolean) -> Unit = { _, _ -> },
-    onRomanizationToggle: () -> Unit = {},
+    translationVisible: Boolean = true,
+    onTranslationToggle: () -> Unit = {},
+    lyricSpringStrength: Float = 90f,
+    lyricAutoFullscreen: Boolean = true,
     artworkCrossfade: ArtworkCrossfadeTransition? = null,
     blendArtworkDuringCrossfade: Boolean = true,
     showQualityBadge: Boolean = false,
@@ -180,7 +199,52 @@ internal fun FullScreenPlayer(
     }
 
     if (expansionProgress.value <= 0f) return
-    val artwork = rememberFullscreenArtwork(item.artworkPath)
+    // 播放页封面走 1600² 高清：命中缓存立即用，没有就后台补；补好之前继续显示 600² 图。
+    // 播放页封面直接走 Coil（与列表共用缓存）：先用列表尺寸兜底，再升 600，最后才换 1600。
+    val coverInfo by produceState<com.exodidio.tune.netease.NeteaseRepository.PlaybackCoverInfo?>(
+        initialValue = null,
+        item.trackId,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { com.exodidio.tune.netease.NeteaseRepository.playbackCoverInfo(item.trackId) }
+                .getOrNull()
+        }
+    }
+    val coverUrl = coverInfo?.url
+    val coverKey = coverInfo?.key
+    val thumbArtwork = rememberCoilArtwork(coverUrl, 200, coverKey)
+    val previewArtwork = rememberCoilArtwork(coverUrl, 600, coverKey)
+    var hiResPath by remember(item.trackId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(item.trackId, previewArtwork != null) {
+        // 600 真正显示出来之后才拉 1600，避免和切歌抢带宽。
+        if (previewArtwork == null) return@LaunchedEffect
+        // 连点切歌时这一首可能只停留几十毫秒：稍等再拉高清封面，
+        // 中间曲目被切走时协程自动取消，不会每首向网易云要一张 1600 图。
+        delay(500)
+        hiResPath = runCatching {
+            com.exodidio.tune.netease.NeteaseRepository.ensureHiResCover(item.trackId)
+        }.getOrNull()?.also { path ->
+            System.err.println("HIRES use track=${item.trackId} file=${path.substringAfterLast('/')}")
+        }
+    }
+    val hiResArtwork = rememberFullscreenArtwork(hiResPath)
+    // Coil 没取到（本地曲目/离线）时退回文件封面。
+    val fallbackArtwork = rememberFullscreenArtwork(
+        if (thumbArtwork == null && previewArtwork == null) item.artworkPath else null,
+    )
+    val coverArtwork = hiResArtwork?.takeIf { it.identity != null && it.identity == coverKey }
+        ?: previewArtwork
+        ?: thumbArtwork
+        ?: fallbackArtwork
+    // 背景与取色固定用 600：新 600 到达前保持上一张，避免一次切歌里背景换两次。
+    var stableBackground by remember { mutableStateOf<FullScreenArtwork?>(null) }
+    LaunchedEffect(previewArtwork) {
+        if (previewArtwork != null) stableBackground = previewArtwork
+    }
+    val backgroundArtwork = stableBackground?.takeIf { it.identity == coverKey }
+        ?: previewArtwork
+        ?: coverArtwork
+    val artworkSwap = rememberArtworkSwap(coverArtwork)
     val activeArtworkCrossfade = artworkCrossfade.takeIf { blendArtworkDuringCrossfade }
     val incomingArtwork = rememberFullscreenArtwork(activeArtworkCrossfade?.toArtworkPath, keepPrevious = false)
     val crossfadeProgress = rememberArtworkCrossfadeProgress(artworkCrossfade)
@@ -189,7 +253,7 @@ internal fun FullScreenPlayer(
     // incoming cover never replaces it with a blank layer or a full-opacity
     // new cover before the blend can render.
     val outgoingArtwork = remember(activeArtworkCrossfade?.id) {
-        activeArtworkCrossfade?.let { artwork }
+        activeArtworkCrossfade?.let { coverArtwork }
     }
     val isArtworkCrossfading = activeArtworkCrossfade != null &&
         outgoingArtwork != null && incomingArtwork != null
@@ -201,8 +265,55 @@ internal fun FullScreenPlayer(
         ?.toLongOrNull()
         ?.takeIf { it > 0L }
         ?.times(1_000L)
-    val currentPositionMs = playbackState.positionMsOrZero()
-    val durationMs = playbackState.durationMsOrZero()
+    // 播放状态短暂滑过 Idle / Preparing 时位置不应归零，否则进度条与歌词会闪回开头。
+    // 初值直接取当前播放状态：避免首帧以 0 渲染造成一次闪跳。
+    var lastKnownPositionMs by remember {
+        mutableLongStateOf(
+            when (playbackState) {
+                is PlaybackState.Playing -> playbackState.positionMs
+                is PlaybackState.Paused -> playbackState.positionMs
+                else -> 0L
+            },
+        )
+    }
+    var lastKnownDurationMs by remember {
+        mutableLongStateOf(
+            when (playbackState) {
+                is PlaybackState.Playing -> playbackState.durationMs
+                is PlaybackState.Paused -> playbackState.durationMs
+                else -> 0L
+            },
+        )
+    }
+    var lastKnownPositionTrackId by remember {
+        mutableStateOf(playbackState.fullScreenItemOrNull()?.trackId)
+    }
+    LaunchedEffect(playbackState) {
+        val trackId = playbackState.fullScreenItemOrNull()?.trackId
+        if (trackId != null && trackId != lastKnownPositionTrackId) {
+            lastKnownPositionTrackId = trackId
+            lastKnownPositionMs = 0L
+            lastKnownDurationMs = 0L
+        }
+        val position = when (playbackState) {
+            is PlaybackState.Playing -> playbackState.positionMs
+            is PlaybackState.Paused -> playbackState.positionMs
+            else -> null
+        }
+        val duration = when (playbackState) {
+            is PlaybackState.Playing -> playbackState.durationMs
+            is PlaybackState.Paused -> playbackState.durationMs
+            else -> null
+        }
+        if (position != null) {
+            val sameTrack = trackId == lastKnownPositionTrackId
+            val transientZero = sameTrack && position == 0L && lastKnownPositionMs > 1_500L
+            if (!transientZero) lastKnownPositionMs = position
+        }
+        if (duration != null && duration > 0L) lastKnownDurationMs = duration
+    }
+    val currentPositionMs = lastKnownPositionMs
+    val durationMs = lastKnownDurationMs
     val displayedDurationMs = durationMs.takeIf { it > 0L } ?: metadataDurationMs
     val isPreparing = playbackState is PlaybackState.Preparing
     val isPlaying = playbackState is PlaybackState.Playing
@@ -221,7 +332,7 @@ internal fun FullScreenPlayer(
         }
     }
     val artworkScale by animateFloatAsState(
-        targetValue = if (playbackState is PlaybackState.Paused && !isPanelOpen) 0.75f else 1f,
+        targetValue = if (playbackState is PlaybackState.Paused && !isPanelOpen) 0.85f else 1f,
         animationSpec = tween(if (isPanelOpen) 320 else 500, easing = FastOutSlowInEasing),
         label = "full-screen-artwork-scale",
     )
@@ -255,15 +366,22 @@ internal fun FullScreenPlayer(
         playerInteractionTick += 1
         lyricsOverlayVisible = true
     }
+    val hideLyricsControls: () -> Unit = {
+        lyricsOverlayVisible = false
+    }
     // 点歌词文字只跳转：重新计时，但不改变控件当前显隐状态。
     val noteLyricsInteraction: () -> Unit = {
         playerInteractionTick += 1
     }
-    LaunchedEffect(visible, lyricsView, isPlaying, lyricsAvailable, lyricsOverlayVisible, playerInteractionTick) {
-        if (!visible || !lyricsView || !isPlaying || !lyricsAvailable) {
+    LaunchedEffect(visible, lyricsView, isPlaying, lyricsAvailable, lyricsOverlayVisible, playerInteractionTick, lyricAutoFullscreen) {
+        // 关闭“自动进入全屏歌词”后不再自动显隐；手势仍可手动进出。
+        if (!lyricAutoFullscreen) return@LaunchedEffect
+        if (!visible || !lyricsView || !lyricsAvailable) {
             if (!lyricsOverlayVisible) lyricsOverlayVisible = true
             return@LaunchedEffect
         }
+        // 暂停时不自动显隐：全屏进出只由手势决定。播放时停留 5 秒自动进入全屏。
+        if (!isPlaying) return@LaunchedEffect
         if (!lyricsOverlayVisible) return@LaunchedEffect
         delay(LyricsControlsIdleHideDelayMs)
         lyricsOverlayVisible = false
@@ -277,7 +395,7 @@ internal fun FullScreenPlayer(
     // Off (default) = normal card-shaped artwork. Independent of Adaptive theme.
     val fullscreenArtworkEnabled = fullscreenArtwork
     val adaptiveColors = rememberAdaptivePlayerColors(
-        bitmap = artwork?.sourceBitmap,
+        bitmap = backgroundArtwork?.sourceBitmap,
         enabled = adaptiveEnabled || adaptiveTextColor,
     )
     val basePlayerColors = LocalTuneColors.current
@@ -301,7 +419,7 @@ internal fun FullScreenPlayer(
     }
     // 遮挡层要与背景完全同色：按 FullScreenPlayerBackground 的合成方式算出实心等价色。
     val overlayDominant by animateColorAsState(
-        targetValue = artwork?.dominant ?: effectivePlayerColors.playerBackdrop,
+        targetValue = backgroundArtwork?.dominant ?: effectivePlayerColors.playerBackdrop,
         animationSpec = tween(280, easing = FastOutSlowInEasing),
         label = "lyrics-overlay-dominant",
     )
@@ -350,7 +468,8 @@ internal fun FullScreenPlayer(
 
     @Composable
     fun CompactMetadata(callModifier: Modifier = Modifier) {
-        Box(callModifier) {
+        // 两行文本作为一个块，与紧凑封面垂直居中对齐。
+        Box(callModifier, contentAlignment = Alignment.CenterStart) {
             FullScreenPlayerMetadataTransition(
                 item = item,
                 crossfade = artworkCrossfade,
@@ -383,7 +502,7 @@ internal fun FullScreenPlayer(
         // The player column has 20dp padding on each side. On short screens,
         // cap the square cover by height so the controls retain their space.
         val expandedArtworkSize = minOf(
-            maxWidth - 40.dp,
+            maxWidth - FullScreenArtworkHorizontalInset,
             (maxHeight - FullScreenPlayerArtworkVerticalReserve).coerceAtLeast(0.dp),
         )
         val compactMetadataWidth = maxWidth - 20.dp
@@ -394,9 +513,15 @@ internal fun FullScreenPlayer(
             label = "full-screen-artwork-size",
         )
         val artworkHorizontalOffset by animateDpAsState(
-            targetValue = if (isPanelOpen || lyricsView) 0.dp else ((maxWidth - 40.dp) - expandedArtworkSize) / 2,
+            targetValue = if (isPanelOpen || lyricsView) FullScreenPlayerCompactLeftInset else ((maxWidth - 40.dp) - expandedArtworkSize) / 2,
             animationSpec = tween(320, easing = FastOutSlowInEasing),
             label = "full-screen-artwork-horizontal-offset",
+        )
+        // 大封面 9dp；紧凑头按 Apple 实测调成 3.5dp，开合时同步过渡。
+        val artworkCornerRadius by animateDpAsState(
+            targetValue = if (isPanelOpen || lyricsView) FullScreenPlayerCompactCornerRadius else FullScreenArtworkCornerRadius,
+            animationSpec = tween(320, easing = FastOutSlowInEasing),
+            label = "full-screen-artwork-corner-radius",
         )
         // 头部高度：普通播放器为大封面，面板打开后收成 80dp 紧凑头。
         // 队列重排时临时撑满，让列表用满整屏；歌词视图沿用紧凑头，歌词在下方铺满。
@@ -404,7 +529,7 @@ internal fun FullScreenPlayer(
             targetValue = when {
                 lyricsView -> FullScreenPlayerCompactArtworkSize
                 isQueueReordering -> maxHeight
-                else -> expandedArtworkSize + 96.dp
+                else -> expandedArtworkSize + FullScreenArtworkMetadataGap + FullScreenArtworkMetadataHeight
             },
             animationSpec = tween(
                 if (isQueueReordering) QueueReorderTransitionDurationMs else 320,
@@ -418,6 +543,8 @@ internal fun FullScreenPlayer(
         // 遮挡层的实心部分从进度条开始，歌词模糊截止线同步上移这段触摸区。
         val lyricsBottomInsetPx =
             ((lyricsOverlayHeightPx - sliderOverhangPx).coerceAtLeast(0f)) * lyricsOverlayAlpha
+        // 翻译按钮固定在播放条上方：用不随淡出变化的高度。
+        val lyricsControlsInsetPx = (lyricsOverlayHeightPx - sliderOverhangPx).coerceAtLeast(0f)
         Box(
             modifier = Modifier
             .fillMaxSize()
@@ -445,7 +572,7 @@ internal fun FullScreenPlayer(
             },
     ) {
             FullScreenPlayerBackground(
-                artwork = artwork,
+                artwork = backgroundArtwork,
                 outgoingArtwork = outgoingArtwork,
                 incomingArtwork = incomingArtwork,
                 crossfadeProgress = crossfadeProgress,
@@ -464,7 +591,7 @@ internal fun FullScreenPlayer(
             ) {
             Spacer(Modifier.height(8.dp))
             FullScreenPlayerDragHandle()
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(FullScreenArtworkTopGap))
             FullScreenPlayerSwipeTarget(
                 modifier = Modifier.padding(horizontal = 20.dp),
                 testTag = FullScreenPlayerArtworkSwipeTestTag,
@@ -481,12 +608,14 @@ internal fun FullScreenPlayer(
                         .height(topBlockHeight),
                 ) {
                     FullScreenPlayerArtwork(
-                        artwork = artwork,
+                        artwork = coverArtwork,
                         outgoingArtwork = outgoingArtwork,
                         incomingArtwork = incomingArtwork,
                         crossfadeProgress = crossfadeProgress,
                         isArtworkCrossfading = isArtworkCrossfading,
                         fullscreen = fullscreenArtworkEnabled,
+                        swap = artworkSwap,
+                        cornerRadius = artworkCornerRadius,
                         modifier = Modifier
                             .size(artworkSize)
                             .offset(x = artworkHorizontalOffset)
@@ -513,9 +642,11 @@ internal fun FullScreenPlayer(
                         visible = !isPanelOpen,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .offset(y = expandedArtworkSize + 36.dp),
+                            // 父级已有 20dp 内边距，这里再补 15dp，让标题和进度条都从 35dp 开始。
+                            .padding(start = 15.dp)
+                            .offset(y = expandedArtworkSize + FullScreenArtworkMetadataGap),
                         enter = fadeIn(tween(160)) + slideInVertically(tween(160)) { 10 },
-                        exit = fadeOut(tween(120)) + slideOutVertically(tween(120)) { -10 },
+                        exit = fadeOut(tween(280)) + slideOutVertically(tween(280)) { -10 },
                     ) {
                         FullScreenPlayerMetadataTransition(
                             item = item,
@@ -545,13 +676,24 @@ internal fun FullScreenPlayer(
                         modifier = Modifier
                             // Extend only the compact metadata into the outer
                             // column's right inset, leaving it flush to screen edge.
+                            .offset(x = FullScreenPlayerCompactRightOverflow / 2)
                             .requiredWidth(compactMetadataWidth)
-                            .padding(start = FullScreenPlayerCompactArtworkSize + FullScreenPlayerCompactGap)
                             .height(FullScreenPlayerCompactArtworkSize),
                         enter = fadeIn(tween(200, delayMillis = 120)) + slideInVertically(tween(200, delayMillis = 120)) { 12 },
                         exit = fadeOut(tween(120)) + slideOutVertically(tween(120)) { -10 },
                     ) {
-                        CompactMetadata(Modifier.fillMaxSize())
+                        // 用 Row + Spacer 显式留出「缩进 + 封面 + 间距」，不依赖 Modifier.padding，
+                        // 保证文字起点稳定在封面右侧 9dp。
+                        Row(Modifier.fillMaxSize()) {
+                            Spacer(
+                                Modifier.width(
+                                    FullScreenPlayerCompactLeftInset +
+                                        FullScreenPlayerCompactArtworkSize +
+                                        FullScreenPlayerCompactGap,
+                                ),
+                            )
+                            CompactMetadata(Modifier.weight(1f).fillMaxHeight())
+                        }
                     }
                     androidx.compose.animation.AnimatedVisibility(
                         visible = selectedPanel == FullScreenPlayerPanel.Queue,
@@ -619,11 +761,10 @@ internal fun FullScreenPlayer(
                         trackId = item.trackId,
                         lyrics = lyrics,
                         loading = lyricsLoading,
-                        visible = visible,
-                        romanization = romanization,
-                        romanizationAllowed = romanizationAllowed,
-                        onRomanizationInput = onRomanizationInput,
-                        onRomanizationToggle = onRomanizationToggle,
+                        isPlaying = playbackState is PlaybackState.Playing,
+                        translationVisible = translationVisible,
+                        onTranslationToggle = onTranslationToggle,
+                        springStrength = lyricSpringStrength,
                         currentPositionMs = currentPositionMs,
                         pendingSeekPositionMs = lyricsSeekPositionMs,
                         seekRequestId = lyricsSeekRequestId,
@@ -631,7 +772,11 @@ internal fun FullScreenPlayer(
                         modifier = Modifier.fillMaxSize(),
                         fullscreen = true,
                         bottomInsetPx = lyricsBottomInsetPx,
+                        controlsInsetPx = lyricsControlsInsetPx,
+                        translationButtonVisible = lyricsOverlayVisible,
                         onShowControls = showLyricsControls,
+                        onHideControls = hideLyricsControls,
+                        onInteraction = noteLyricsInteraction,
                         onSeekInteraction = noteLyricsInteraction,
                         fontLevel = lyricsFontLevel,
                     )
@@ -678,7 +823,7 @@ internal fun FullScreenPlayer(
                     Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
-                        .padding(start = 20.dp, end = 20.dp),
+                        .padding(start = 35.dp, end = 35.dp),
                 ) {
                     PlayerControls(Modifier.fillMaxWidth())
                 }
@@ -693,16 +838,4 @@ private fun PlaybackState.fullScreenItemOrNull(): PlaybackItem? = when (this) {
     is PlaybackState.Preparing -> item
     is PlaybackState.Playing -> item
     is PlaybackState.Paused -> item
-}
-
-private fun PlaybackState.positionMsOrZero(): Long = when (this) {
-    is PlaybackState.Playing -> positionMs
-    is PlaybackState.Paused -> positionMs
-    else -> 0L
-}
-
-private fun PlaybackState.durationMsOrZero(): Long = when (this) {
-    is PlaybackState.Playing -> durationMs
-    is PlaybackState.Paused -> durationMs
-    else -> 0L
 }

@@ -67,7 +67,8 @@ internal object AndroidPlaybackRuntime {
     suspend fun availableTrackIds(trackIds: Collection<String>): Set<String> {
         check(::appContext.isInitialized) { "AndroidPlaybackRuntime is not initialized" }
         if (trackIds.isEmpty()) return emptySet()
-        return availableSyncedTrackIds(appContext.filesDir, syncStore.tracks.first(), trackIds.toSet()) { uri ->
+        val knownTracks = syncStore.tracks.first() + syncStore.playbackOnlyTracksFlow.value
+        return availableSyncedTrackIds(appContext.filesDir, knownTracks, trackIds.toSet()) { uri ->
             contentUriExists(appContext.contentResolver, uri)
         }
     }
@@ -116,15 +117,22 @@ internal fun availableSyncedTrackIds(
     tracks: List<LibraryTrack>,
     requestedTrackIds: Set<String>,
     contentExists: (String) -> Boolean = { false },
-): Set<String> = tracks.asSequence()
-    .filter { it.id in requestedTrackIds }
-    .filter { track ->
-        when (val target = resolveAudioTarget(filesDir, track.audioPath)) {
-            is AudioTarget.FileTarget -> target.file.isFile
-            is AudioTarget.ContentTarget -> contentExists(target.uri)
-            is AudioTarget.RemoteTarget -> true
-            is AudioTarget.StreamTarget -> true
-            null -> false
+): Set<String> {
+    val known = tracks.filter { it.id in requestedTrackIds }
+    val knownIds = known.mapTo(HashSet(known.size)) { it.id }
+    val available = known.asSequence()
+        .filter { track ->
+            when (val target = resolveAudioTarget(filesDir, track.audioPath)) {
+                is AudioTarget.FileTarget -> target.file.isFile
+                is AudioTarget.ContentTarget -> contentExists(target.uri)
+                is AudioTarget.RemoteTarget -> true
+                is AudioTarget.StreamTarget -> true
+                null -> false
+            }
         }
-    }
-    .mapTo(LinkedHashSet()) { it.id }
+        .mapTo(LinkedHashSet()) { it.id }
+    // 曲库还没恢复完时 ids 不在 tracks 里：先保留，等各自数据源就绪后再解析；
+    // 只有明确存在但文件已失效的本地曲目才丢弃。
+    requestedTrackIds.filterTo(available) { it !in knownIds }
+    return available
+}

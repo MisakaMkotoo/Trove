@@ -117,7 +117,12 @@ internal fun LibraryPlaylistsContent(
                     val progress = downloadProgress[playlist.id]
                     PlaylistContextMenu(
                         playlistId = playlist.id,
-                        trackIds = NeteaseRepository.playableTrackIds(playlist.id),
+                        // 组合期不要全量物化整张歌单；只有菜单真正展开时才计算（结果在仓库内按条目缓存）。
+                        trackIds = if (neteaseMenuId == playlist.id) {
+                            NeteaseRepository.playableTrackIds(playlist.id)
+                        } else {
+                            emptyList()
+                        },
                         expanded = neteaseMenuId == playlist.id,
                         onDismiss = { if (neteaseMenuId == playlist.id) neteaseMenuId = null },
                         onPlayNext = { ids -> AndroidPlaybackRuntime.controller().playNext(ids) },
@@ -139,6 +144,7 @@ internal fun LibraryPlaylistsContent(
                                     playlistId = playlist.id,
                                     name = playlist.name,
                                     artworkPaths = listOfNotNull(playlist.coverPath),
+                                    artworkUrl = playlist.coverUrl,
                                     onClick = { onNeteasePlaylistClick(playlist.id) },
                                     onLongClick = { neteaseMenuId = playlist.id },
                                 )

@@ -8,6 +8,10 @@ import com.exodidio.tune.player.DailyTrackListeningStat
 import com.exodidio.tune.player.ListeningWrite
 import com.exodidio.tune.player.PlaybackEndReason
 import com.exodidio.tune.player.TrackAnalysis
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -691,6 +695,18 @@ private const val FavoritesPlaylistId = "favorites"
     private data class PersistedListening(
         val tracks: List<DailyTrackListeningStat> = emptyList(),
         val attempts: List<DailyPlaybackAttemptStat> = emptyList(),
+        val recent: List<RecentPlayRecord> = emptyList(),
+    )
+
+    /** 本地最近播放：合格播放开始时记录；快照足以在重启后恢复在线曲目与封面。 */
+    @Serializable
+    data class RecentPlayRecord(
+        val trackId: String = "",
+        val playedAt: Long = 0L,
+        val title: String = "",
+        val artists: String = "",
+        val album: String = "",
+        val coverUrl: String = "",
     )
 
     private val stateFile = File(context.filesDir, "local-library-state.json")
@@ -698,6 +714,9 @@ private const val FavoritesPlaylistId = "favorites"
     private val listeningFile = File(context.filesDir, "listening-stats.json")
     private val trackDayStats = mutableMapOf<Pair<String, String>, DailyTrackListeningStat>()
     private val attemptDayStats = mutableMapOf<String, DailyPlaybackAttemptStat>()
+    private val _recentlyPlayed = MutableStateFlow(emptyList<RecentPlayRecord>())
+    /** 最近播放（trackId + 播放时间），最新的在前。 */
+    val recentlyPlayed: StateFlow<List<RecentPlayRecord>> = _recentlyPlayed.asStateFlow()
     private var listeningDirty = false
     private var lastListeningPersistAt = 0L
 
@@ -722,10 +741,38 @@ private const val FavoritesPlaylistId = "favorites"
         }
     }
 
-    /** 播放解析用：先查曲库，再查“仅播放”的在线曲目。 */
+    /** 批量合并封面回写：一次只发布一轮 StateFlow，避免大歌单逐首刷新拖垮主线程。 */
+    fun putPlaybackOnlyTracks(tracks: List<LibraryTrack>) {
+        if (tracks.isEmpty()) return
+        val updates = tracks.associateBy { it.id }
+        val existing = playbackOnlyTracks.value
+        val existingIds = existing.mapTo(HashSet(existing.size)) { it.id }
+        playbackOnlyTracks.value = existing.map { current ->
+            val update = updates[current.id] ?: return@map current
+            if (current.id in favorites) update.copy(metadataJson = favoriteJson(update.metadataJson, true)) else update
+        } + tracks.filterNot { it.id in existingIds }
+        if (onlineFavoriteTracks.value.isNotEmpty()) {
+            onlineFavoriteTracks.value = onlineFavoriteTracks.value.map { current ->
+                val update = updates[current.id] ?: return@map current
+                if (current.id in favorites) update.copy(metadataJson = favoriteJson(update.metadataJson, true)) else update
+            }
+        }
+    }
+
+    /** 冷启动恢复队列时随会话落盘的元数据：本地扫描/远端曲库还没就绪也能解析、显示。 */
+    private val restoredQueueTracks = MutableStateFlow<Map<String, LibraryTrack>>(emptyMap())
+    val restoredQueueTracksFlow: StateFlow<Map<String, LibraryTrack>> = restoredQueueTracks.asStateFlow()
+
+    fun putRestoredQueueTracks(tracks: List<LibraryTrack>) {
+        if (tracks.isEmpty()) return
+        restoredQueueTracks.value = restoredQueueTracks.value + tracks.associateBy { it.id }
+    }
+
+    /** 播放解析用：先查曲库，再查“仅播放”的在线曲目，最后用恢复的队列元数据兜底。 */
     fun trackForPlayback(trackId: String): LibraryTrack? =
         _tracks.value.firstOrNull { it.id == trackId }
             ?: playbackOnlyTracks.value.firstOrNull { it.id == trackId }
+            ?: restoredQueueTracks.value[trackId]
 
     // 本地扫描结果、网易云导入和电脑曲库分开存，任何一方变化后重新拼起来。
     private var localTracks: List<LibraryTrack> = emptyList()
@@ -788,7 +835,22 @@ private const val FavoritesPlaylistId = "favorites"
     private val _hiddenTracks = MutableStateFlow(emptyList<LibraryTrack>())
     val hiddenTracks: StateFlow<List<LibraryTrack>> = _hiddenTracks.asStateFlow()
 
+    // 启动读盘在后台完成：UI 先用空列表/骨架渲染，主线程不再解析三份 JSON。
+    private val initialStateLoaded = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val initialStateSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+    @Volatile private var persistBeforeStateLoad = false
+
+    /** 依赖曲库内容的启动流程（首页匹配、电脑曲库恢复）先等这份缓存。 */
+    suspend fun awaitLoaded() {
+        initialStateSignal.await()
+    }
+
     init {
+        AndroidSyncRuntime.backgroundScope.launch { loadInitialState() }
+    }
+
+    private fun loadInitialState() {
+        try {
         val persisted = runCatching {
             LibrarySyncProtocol.json.decodeFromString<PersistedState>(stateFile.readText())
         }.getOrDefault(PersistedState())
@@ -819,6 +881,7 @@ private const val FavoritesPlaylistId = "favorites"
             persisted.attempts.forEach { attemptDayStats[it.localDate] = it }
             _dailyTrackListeningStats.value = persisted.tracks
             _dailyPlaybackAttemptStats.value = persisted.attempts
+            _recentlyPlayed.value = persisted.recent
         }
         importedTracks = runCatching {
             LibrarySyncProtocol.json.decodeFromString<List<ImportedTrackData>>(importedFile.readText())
@@ -838,16 +901,29 @@ private const val FavoritesPlaylistId = "favorites"
                 sortArtists = track.artists,
             )
         }.filter { track -> track.audioPath?.let { File(it).isFile } == true }
-        if (importedTracks.isNotEmpty()) publishTracks()
+        // 收藏标记是发布时写进每首曲目元数据的：读盘期间如果已有扫描/恢复先发布过，
+        // 这里必须重发一次，否则那批曲目会一直显示成未收藏（收藏页缺歌）。
+        publishTracks()
+        } finally {
+            // 解析失败也必须放行等待方，否则队列恢复会永远挂着。
+            val flushPending = synchronized(this) {
+                initialStateLoaded.set(true)
+                persistBeforeStateLoad.also { persistBeforeStateLoad = false }
+            }
+            initialStateSignal.complete(Unit)
+            if (flushPending) runCatching { persistState() }
+            if (listeningDirty) runCatching { persistListening(System.currentTimeMillis()) }
+        }
     }
 
     /** 网易云导入的曲目；持久化在文件里，重启后自动回到曲库。 */
     fun importedTracksSnapshot(): List<LibraryTrack> = importedTracks
 
     suspend fun setImportedTracks(tracks: List<LibraryTrack>) {
+        initialStateSignal.await()
         importedTracks = tracks
         runCatching {
-            importedFile.writeText(
+            importedFile.writeTextAtomically(
                 LibrarySyncProtocol.json.encodeToString(
                     tracks.map { track ->
                         ImportedTrackData(
@@ -870,6 +946,11 @@ private const val FavoritesPlaylistId = "favorites"
 
     private fun persistState() {
         synchronized(this) {
+        if (!initialStateLoaded.get()) {
+            // 缓存还没读完就落盘，会把空/半装状态覆盖磁盘；读完后再补写。
+            persistBeforeStateLoad = true
+            return
+        }
         val state = PersistedState(
             favorites = favorites.toList(),
             hidden = hidden.toList(),
@@ -887,7 +968,7 @@ private const val FavoritesPlaylistId = "favorites"
                 )
             },
         )
-        runCatching { stateFile.writeText(LibrarySyncProtocol.json.encodeToString(state)) }
+        runCatching { stateFile.writeTextAtomically(LibrarySyncProtocol.json.encodeToString(state)) }
         }
     }
 
@@ -964,6 +1045,9 @@ private const val FavoritesPlaylistId = "favorites"
 
     /** Commit a local import, replacing all tracks for the plan. */
     suspend fun commitLocalLibrary(import: LocalImport) {
+        // 扫描会重建 localTracks：必须等持久化的收藏/隐藏读完，
+        // 否则随后的发布会把收藏标记全部刷掉。
+        initialStateSignal.await()
         val artworkByKey = import.artworkAssets.associate { it.assetId to it.relativePath }
         if (artworkByKey.isNotEmpty()) {
             _artworkPaths.value = _artworkPaths.value + artworkByKey
@@ -1071,6 +1155,26 @@ private const val FavoritesPlaylistId = "favorites"
                     playCount = (current?.playCount ?: 0) + 1,
                 )
             }
+            // 近期播放从 3 秒开始记录，与统计口径无关；重复播放会提到最前，最多 100 条。
+            is ListeningWrite.RecentPlay -> {
+                if (event.trackId.isBlank()) return
+                val recent = _recentlyPlayed.value.filterNot { it.trackId == event.trackId }
+                val track = trackForPlayback(event.trackId)
+                val coverUrl = track?.metadataObject()?.get("coverUrl")
+                    ?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+                _recentlyPlayed.value = (
+                    listOf(
+                        RecentPlayRecord(
+                            trackId = event.trackId,
+                            playedAt = event.occurredAt,
+                            title = track?.title.orEmpty(),
+                            artists = track?.artists.orEmpty(),
+                            album = track?.album.orEmpty(),
+                            coverUrl = coverUrl,
+                        ),
+                    ) + recent
+                    ).take(100)
+            }
             is ListeningWrite.Session -> {
                 val session = event.value
                 if (session.trackId.isBlank() || session.listenedSeconds <= 0) return
@@ -1118,11 +1222,14 @@ private const val FavoritesPlaylistId = "favorites"
 
     private fun persistListening(nowMs: Long) {
         if (!listeningDirty) return
+        // 启动缓存还没读完：内存里已有新统计，等读完后的下一拍再写，别把旧文件盖成半装状态。
+        if (!initialStateLoaded.get()) return
         val payload = PersistedListening(
             tracks = trackDayStats.values.toList(),
             attempts = attemptDayStats.values.toList(),
+            recent = _recentlyPlayed.value,
         )
-        runCatching { listeningFile.writeText(LibrarySyncProtocol.json.encodeToString(payload)) }
+        runCatching { listeningFile.writeTextAtomically(LibrarySyncProtocol.json.encodeToString(payload)) }
         listeningDirty = false
         lastListeningPersistAt = nowMs
     }
@@ -1290,6 +1397,9 @@ private const val FavoritesPlaylistId = "favorites"
             currentStore = AndroidLibrarySyncStore(context.applicationContext)
         }
     }
+
+    /** 进程级后台任务：Service 销毁后仍要完成的落盘/收尾（听歌统计、会话保存、解码器释放）。 */
+    val backgroundScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val syncStore: AndroidLibrarySyncStore
         get() = currentStore

@@ -98,8 +98,8 @@ internal fun SimilarSongsContent(
                 actions = TrackContextMenuActions(
                     favorite = false,
                     addToPlaylist = false,
-                    goToAlbum = false,
-                    goToArtists = false,
+                    goToAlbum = true,
+                    goToArtists = true,
                     hide = false,
                 ),
             ) {
@@ -108,6 +108,7 @@ internal fun SimilarSongsContent(
                         title = track.title,
                         artist = track.artists,
                         artworkPath = track.artworkPath,
+                        artworkUrl = NeteaseRepository.coverUrlForTrack(track),
                         contentPadding = PaddingValues(start = 24.dp, top = 6.dp, end = 8.dp, bottom = 6.dp),
                         onClick = {
                             AndroidPlaybackRuntime.controller().play(

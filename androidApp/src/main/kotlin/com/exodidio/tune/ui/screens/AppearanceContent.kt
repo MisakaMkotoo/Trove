@@ -16,6 +16,7 @@ import com.exodidio.tune.ui.components.ActionListDivider
 import com.exodidio.tune.ui.components.ActionListDividerStyle
 import com.exodidio.tune.ui.components.ActionListItem
 import com.exodidio.tune.ui.components.Card
+import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.Selection
 import com.exodidio.tune.ui.components.SelectionOption
 
@@ -30,6 +31,11 @@ internal fun AppearanceContent(
     adaptiveTextColor: Boolean = false,
     onAdaptiveTextColorChanged: (Boolean) -> Unit = {},
     onAppleBackdropSelected: () -> Unit = {},
+    onTabLayoutSelected: () -> Unit = {},
+    rememberTabPage: Boolean = true,
+    onRememberTabPageChanged: (Boolean) -> Unit = {},
+    mergeBottomBars: Boolean = true,
+    onMergeBottomBarsChanged: (Boolean) -> Unit = {},
     showVolumeSlider: Boolean = false,
     onShowVolumeSliderChanged: (Boolean) -> Unit = {},
     fullscreenArtwork: Boolean = false,
@@ -143,6 +149,31 @@ internal fun AppearanceContent(
                     ActionListItem(
                         labelRes = R.string.appearance_apple_backdrop_settings,
                         onClick = onAppleBackdropSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_tab_layout,
+                        leadingSymbol = MaterialSymbols.Tune,
+                        onClick = onTabLayoutSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_remember_tab_page,
+                        trailingContent = {
+                            Switch(
+                                checked = rememberTabPage,
+                                onCheckedChange = onRememberTabPageChanged,
+                            )
+                        },
+                        onClick = { onRememberTabPageChanged(!rememberTabPage) },
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_merge_bottom_bars,
+                        trailingContent = {
+                            Switch(
+                                checked = mergeBottomBars,
+                                onCheckedChange = onMergeBottomBarsChanged,
+                            )
+                        },
+                        onClick = { onMergeBottomBarsChanged(!mergeBottomBars) },
                     ),
                 ),
                 containerStyle = ActionListContainerStyle.Plain,

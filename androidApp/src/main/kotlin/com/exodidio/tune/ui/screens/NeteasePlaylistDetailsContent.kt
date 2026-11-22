@@ -93,9 +93,9 @@ internal fun NeteasePlaylistDetailsContent(
     val playlist = remember(playlists, selectedId) { playlists.firstOrNull { it.id == selectedId } }
     val libraryById = remember(libraryTracks) { libraryTracks.associateBy { it.id } }
     val playableById = remember(libraryTracks, playbackOnlyTracks) {
-        (libraryTracks + playbackOnlyTracks).associateBy { it.id }
+        // 曲库（含刚下载导入的曲目）优先于仅播放的流式副本，菜单才能立刻变成“删除下载”。
+        (playbackOnlyTracks + libraryTracks).associateBy { it.id }
     }
-    var matchEntry by remember { mutableStateOf<NeteaseEntryRecord?>(null) }
     var contextEntryId by remember { mutableStateOf<Long?>(null) }
     var createTracks by remember { mutableStateOf<List<String>?>(null) }
     var busyId by remember { mutableStateOf<Long?>(null) }
@@ -118,7 +118,7 @@ internal fun NeteasePlaylistDetailsContent(
         busyId = entry.songId
         scope.launch {
             val result = NeteaseRepository.ensureDownloaded(context, id, entry.songId)
-            status = result.fold(onSuccess = { "" }, onFailure = { it.message ?: "下载失败" })
+            status = result.fold(onSuccess = { "" }, onFailure = { it.message ?: context.getString(R.string.netease_download_failed) })
             busyId = null
         }
     }
@@ -126,7 +126,11 @@ internal fun NeteasePlaylistDetailsContent(
     fun playEntry(entry: NeteaseEntryRecord) {
         val current = playlist ?: return
         // 整个歌单作为队列，上一首/下一首才可用。
-        playQueue(current, playableId(entry))
+        val track = NeteaseRepository.entryTrack(entry)
+        System.err.println(
+            "PLAYENTRY song=${entry.songId} title=${entry.title} -> id=${track.id} audio=${track.audioPath}",
+        )
+        playQueue(current, track.id)
     }
 
     fun playAll(shuffle: Boolean) {
@@ -138,14 +142,24 @@ internal fun NeteasePlaylistDetailsContent(
         else AndroidPlaybackRuntime.controller().play(request)
     }
 
-    /** 把歌单条目映射成曲目；优先本地匹配/已下载，否则登记流式曲目。 */
+    /** 把歌单条目映射成曲目；网易云侧只用自己的下载文件或流式曲目。 */
     fun entryTrack(entry: NeteaseEntryRecord): LibraryTrack = NeteaseRepository.entryTrack(entry)
 
     val current = playlist
+    // 逐行判断下载态/封面要 stat 文件：统一在 IO 做一次，行内只查结果。
+    var entryFiles by remember(current?.entries, libraryById) {
+        mutableStateOf(optimisticEntryFiles(current?.entries.orEmpty(), libraryById))
+    }
+    LaunchedEffect(current?.entries, libraryById) {
+        val entries = current?.entries ?: return@LaunchedEffect
+        entryFiles = withContext(Dispatchers.IO) {
+            verifyEntryFiles(entries, libraryById, context.filesDir)
+        }
+    }
     LaunchedEffect(current?.id) {
         val loaded = current ?: return@LaunchedEffect
         if (loaded.entries.isEmpty()) {
-            status = "正在加载…"
+            status = context.getString(R.string.netease_loading)
             val started = System.currentTimeMillis()
             val result = NeteaseRepository.ensureDynamicLoaded(context, loaded.id)
             System.err.println(
@@ -153,6 +167,14 @@ internal fun NeteasePlaylistDetailsContent(
                     "error=${result.exceptionOrNull()?.message.orEmpty()}",
             )
             status = result.exceptionOrNull()?.message ?: ""
+        } else if (NeteaseRepository.isRadarPlaylist(loaded)) {
+            // 雷达每日更新：每次打开都用云端最新内容覆盖，旧条目先展示、后台替换。
+            NeteaseRepository.refresh(context, loaded.id)
+                .onFailure {
+                    System.err.println("NETOPEN radar refresh failed id=${loaded.id} err=${it.message}")
+                    // 后台刷新失败要在页面内说清楚：旧条目继续可用，但不能假装刷新成功。
+                    status = it.message ?: context.getString(R.string.netease_radar_refresh_failed)
+                }
         }
     }
     if (current == null) {
@@ -172,13 +194,23 @@ internal fun NeteasePlaylistDetailsContent(
     )
     val appleArtistStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp)
     val appleRowPadding = PaddingValues(start = 16.dp, top = 4.dp, end = 0.dp, bottom = 4.dp)
+    // 封面缓存会被淘汰：先按记录乐观展示，再在 IO 线程确认文件是否还在，失效才回退到 URL。
+    var storedCover by remember(current.coverPath) { mutableStateOf(current.coverPath) }
+    LaunchedEffect(current.coverPath) {
+        val path = current.coverPath
+        storedCover = withContext(Dispatchers.IO) {
+            path?.let { candidate -> File(candidate).takeIf { it.isFile }?.absolutePath }
+        }
+    }
+    val remoteCover = rememberNeteaseImagePath(current.coverUrl, enabled = storedCover == null, sizePx = 800)
+    val heroCoverPath = storedCover ?: remoteCover
     LazyColumn(
         modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding()),
     ) {
         item(key = "netease-hero") {
             ArtworkHeroBackdrop(
-                current.coverPath,
+                heroCoverPath,
                 Modifier.fillMaxWidth(),
                 onDominantColorChanged = onHeroColorChanged,
                 reduceTransparency = reduceTransparency,
@@ -192,7 +224,7 @@ internal fun NeteasePlaylistDetailsContent(
                     playLabel = stringResource(R.string.player_play),
                     shuffleLabel = stringResource(R.string.player_shuffle),
                     moreLabel = stringResource(R.string.album_row_more_options),
-                    artworkPath = current.coverPath,
+                    artworkPath = heroCoverPath,
                     fallbackSymbol = MaterialSymbols.QueueMusic,
                     reduceTransparency = reduceTransparency,
                     modifier = Modifier.fillMaxWidth().padding(
@@ -218,9 +250,9 @@ internal fun NeteasePlaylistDetailsContent(
             }
         }
         itemsIndexed(current.entries, key = { _, entry -> entry.songId }) { index, entry ->
-            val matched = entry.matchedTrackId?.let(libraryById::get)
-            val downloaded = entry.downloadedFile?.let(::File)?.isFile == true
-            val baseTrack = NeteaseRepository.entryTrack(entry)
+            val downloaded = entry.songId in entryFiles.downloaded
+            // 按条目缓存，避免每次重组都重新物化曲目/排封面下载。
+            val baseTrack = remember(entry.songId) { NeteaseRepository.entryTrack(entry) }
             // 菜单读取 store 里的最新曲目：收藏状态切换后能立刻刷新。
             val track = playableById[baseTrack.id] ?: baseTrack
             TrackContextMenu(
@@ -235,7 +267,6 @@ internal fun NeteasePlaylistDetailsContent(
                     scope.launch { AndroidSyncRuntime.syncStore.setFavorite(item.id, favorite) }
                 },
                 onDownload = { downloadOnly(entry) },
-                onMatchSong = { matchEntry = entry },
                 onGoToAlbum = { item -> if (item.albumId.isNotBlank()) onOpenAlbum(item.albumId) },
                 onGoToArtist = { artist -> onOpenArtist(artist.id) },
                 playlists = localPlaylists.filter { it.id != FavoritesPlaylistId },
@@ -258,10 +289,9 @@ internal fun NeteasePlaylistDetailsContent(
                 anchor = {
                     TrackRow(
                         title = entry.title,
-                        artist = entry.artists.ifBlank { "未知歌手" },
-                        artworkPath = matched?.artworkPath
-                            ?: entry.coverPath?.let(::File)?.takeIf { it.isFile }?.absolutePath
-                            ?: entry.downloadedFile?.let { File(it).parentFile }?.let { File(it, "${entry.songId}.cover.jpg") }?.takeIf { it.isFile }?.absolutePath,
+                        artist = entry.artists.ifBlank { stringResource(R.string.common_unknown_artist) },
+                        artworkPath = entryFiles.artwork[entry.songId],
+                        artworkUrl = entry.coverUrl,
                         contentPadding = appleRowPadding,
                         artworkCornerRadius = 4.dp,
                         titleStyle = appleTitleStyle,
@@ -274,21 +304,15 @@ internal fun NeteasePlaylistDetailsContent(
                             if (busyId == entry.songId) {
                                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                             } else {
+                                // 网易云歌单只看自己的下载状态：已下载=音符，未下载=下载标志。
+                                // 本地/电脑曲库的匹配与这里无关，不再显示打勾。
                                 MaterialSymbol(
-                                    symbol = when {
-                                        matched != null -> MaterialSymbols.Check
-                                        downloaded -> MaterialSymbols.MusicNote
-                                        else -> MaterialSymbols.ArrowDownward
-                                    },
+                                    symbol = if (downloaded) MaterialSymbols.MusicNote else MaterialSymbols.ArrowDownward,
                                     contentDescription = stringResource(
-                                        when {
-                                            matched != null -> R.string.netease_state_local
-                                            downloaded -> R.string.netease_state_downloaded
-                                            else -> R.string.netease_state_missing
-                                        },
+                                        if (downloaded) R.string.netease_state_downloaded else R.string.netease_state_missing,
                                     ),
                                     size = 18.dp,
-                                    tint = if (matched != null || downloaded) colors.primary else colors.textMuted,
+                                    tint = if (downloaded) colors.primary else colors.textMuted,
                                 )
                             }
                             IconButton(
@@ -344,7 +368,8 @@ internal fun NeteasePlaylistDetailsContent(
             },
         )
     }
-    if (heroMenu) {
+    // 已下载的音乐是本机文件生成的列表，刷新/下载全部/保存快照都没有意义。
+    if (heroMenu && !NeteaseRepository.isDownloadsPage(current.id)) {
         TuneBottomSheet(
             title = { Text(current.name, color = colors.textMain) },
             onDismiss = { heroMenu = false },
@@ -357,7 +382,11 @@ internal fun NeteasePlaylistDetailsContent(
                             leadingSymbol = MaterialSymbols.Refresh,
                             onClick = {
                                 heroMenu = false
-                                scope.launch { NeteaseRepository.refresh(context, current.id) }
+                                status = context.getString(R.string.netease_refreshing)
+                                scope.launch {
+                                    status = NeteaseRepository.refresh(context, current.id)
+                                        .fold(onSuccess = { "" }, onFailure = { it.message ?: context.getString(R.string.netease_refresh_failed) })
+                                }
                             },
                         ),
                     )
@@ -367,7 +396,19 @@ internal fun NeteasePlaylistDetailsContent(
                             leadingSymbol = MaterialSymbols.ArrowDownward,
                             onClick = {
                                 heroMenu = false
-                                scope.launch { NeteaseRepository.downloadAll(context, current.id) }
+                                status = context.getString(R.string.netease_download_in_progress)
+                                scope.launch {
+                                    val result = NeteaseRepository.downloadAll(context, current.id)
+                                    status = if (result.total == 0) {
+                                        context.getString(R.string.netease_download_none)
+                                    } else {
+                                        context.getString(
+                                            R.string.netease_download_result,
+                                            result.succeeded,
+                                            result.total,
+                                        )
+                                    }
+                                }
                             },
                         ),
                     )
@@ -378,9 +419,11 @@ internal fun NeteasePlaylistDetailsContent(
                                 leadingSymbol = MaterialSymbols.FavoriteBorder,
                                 onClick = {
                                     heroMenu = false
-                                    status = NeteaseRepository.saveSnapshot(current.id)
-                                        ?.let { "已保存到播放列表" }
-                                        ?: "保存失败"
+                                    scope.launch {
+                                        status = NeteaseRepository.saveSnapshot(current.id)
+                                            ?.let { context.getString(R.string.netease_saved_to_playlists) }
+                                            ?: context.getString(R.string.netease_save_failed)
+                                    }
                                 },
                             ),
                         )
@@ -390,72 +433,57 @@ internal fun NeteasePlaylistDetailsContent(
             )
         }
     }
-    matchEntry?.let { entry ->
-        MatchTrackSheet(
-            entry = entry,
-            tracks = libraryTracks,
-            boundTrackId = entry.matchedTrackId,
-            onDismiss = { matchEntry = null },
-            onSelect = { trackId ->
-                NeteaseRepository.bindTrack(current.id, entry.songId, trackId)
-                matchEntry = null
-            },
-        )
-    }
 }
 
-@Composable
-private fun MatchTrackSheet(
-    entry: NeteaseEntryRecord,
-    tracks: List<LibraryTrack>,
-    boundTrackId: String?,
-    onDismiss: () -> Unit,
-    onSelect: (String?) -> Unit,
-) {
-    val colors = LocalTuneColors.current
-    var query by remember { mutableStateOf("") }
-    val filtered = remember(tracks, query) {
-        val text = query.trim()
-        val list = if (text.isBlank()) tracks else tracks.filter {
-            it.title.contains(text, true) || it.artists.contains(text, true)
-        }
-        list.take(80)
+private data class DetailEntryFiles(
+    val downloaded: Set<Long> = emptySet(),
+    val artwork: Map<Long, String> = emptyMap(),
+)
+
+/** 先按歌单记录做纯内存判断，界面首帧不必等磁盘。 */
+private fun optimisticEntryFiles(
+    entries: List<NeteaseEntryRecord>,
+    libraryById: Map<String, LibraryTrack>,
+): DetailEntryFiles {
+    val downloaded = HashSet<Long>()
+    val artwork = HashMap<Long, String>()
+    entries.forEach { entry ->
+        val imported = libraryById["netease:${entry.songId}"]
+        if (entry.downloadedFile != null || imported?.audioPath != null) downloaded += entry.songId
+        val path = entry.coverPath
+        if (!path.isNullOrBlank()) artwork[entry.songId] = path
     }
-    TuneBottomSheet(
-        title = { Text(stringResource(R.string.netease_match_title, entry.title), color = colors.textMain) },
-        onDismiss = onDismiss,
-    ) {
-        LazyColumn(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-            item {
-                TuneTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = stringResource(R.string.netease_match_search),
-                    size = TuneTextFieldSize.Medium,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                )
-            }
-            if (boundTrackId != null) {
-                item {
-                    Text(
-                        text = stringResource(R.string.netease_clear_binding),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.primary,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp),
-                    )
-                }
-            }
-            itemsIndexed(filtered, key = { _, track -> track.id }) { _, track ->
-                TrackRow(
-                    title = trackDisplayTitle(track),
-                    artist = trackDisplayArtists(track),
-                    artworkPath = track.artworkPath,
-                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
-                    onClick = { onSelect(track.id) },
-                )
-            }
-        }
+    return DetailEntryFiles(downloaded, artwork)
+}
+
+/** 一次性校验真实文件；之后行内只查集合，不再逐行 stat。 */
+private fun verifyEntryFiles(
+    entries: List<NeteaseEntryRecord>,
+    libraryById: Map<String, LibraryTrack>,
+    filesDir: File,
+): DetailEntryFiles {
+    val downloaded = HashSet<Long>()
+    val artwork = HashMap<Long, String>()
+    entries.forEach { entry ->
+        val imported = libraryById["netease:${entry.songId}"]
+        val entryFile = existingAbsolutePath(entry.downloadedFile, filesDir)
+        val importedFile = existingAbsolutePath(
+            imported?.audioPath?.takeIf { !it.startsWith("netease://") },
+            filesDir,
+        )
+        if (entryFile != null || importedFile != null) downloaded += entry.songId
+        val downloadedCover = entry.downloadedFile
+            ?.let { audio -> File(audio).parentFile?.let { dir -> File(dir, "${entry.songId}.cover.jpg").path } }
+        val cover = existingAbsolutePath(entry.coverPath, filesDir)
+            ?: existingAbsolutePath(downloadedCover, filesDir)
+        if (cover != null) artwork[entry.songId] = cover
     }
+    return DetailEntryFiles(downloaded, artwork)
+}
+
+private fun existingAbsolutePath(path: String?, filesDir: File): String? {
+    if (path.isNullOrBlank()) return null
+    val file = File(path)
+    val absolute = if (file.isAbsolute) file else File(filesDir, path)
+    return absolute.takeIf { it.isFile }?.absolutePath
 }

@@ -74,13 +74,7 @@ val subsetMaterialSymbolsFont =
         localProperties.getProperty("python3")?.let { python3Executable = it }
     }
 
-val romanizationAssets = tasks.register<Sync>("romanizationAssets") {
-    from(rootProject.file("tools/romanization/ATTRIBUTION.md"))
-    from(rootProject.file("tools/romanization/LICENSE-OpenCC.txt"))
-    into(layout.buildDirectory.dir("generated/romanizationAssets/romanization"))
-}
-
-tasks.named("preBuild") { dependsOn(subsetMaterialSymbolsFont, romanizationAssets) }
+tasks.named("preBuild") { dependsOn(subsetMaterialSymbolsFont) }
 
 kotlin {
     compilerOptions {
@@ -104,7 +98,10 @@ dependencies {
     implementation(libs.haze.core)
     implementation(libs.haze.blur)
     implementation(libs.androidx.palette)
+    implementation(libs.androidx.webkit)
     implementation(libs.zxing.core)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.network.okhttp)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.room.runtime)
@@ -123,7 +120,6 @@ dependencies {
 }
 
 android {
-    sourceSets.getByName("main").assets.directories.add(layout.buildDirectory.dir("generated/romanizationAssets").get().asFile.path)
     namespace = "com.exodidio.tune"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
     ndkVersion = "30.0.16248370"
@@ -134,17 +130,6 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 10
         versionName = "1.2.0-beta"
-
-        val lastFmApiKey = localProperties.getProperty("LASTFM_API_KEY")
-            ?: providers.environmentVariable("LASTFM_API_KEY").getOrElse("")
-        val lastFmApiSecret = localProperties.getProperty("LASTFM_API_SECRET")
-            ?: providers.environmentVariable("LASTFM_API_SECRET").getOrElse("")
-        buildConfigField("String", "LASTFM_API_KEY", "\"${lastFmApiKey.replace("\"", "\\\"")}\"")
-        buildConfigField(
-            "String",
-            "LASTFM_API_SECRET",
-            "\"${lastFmApiSecret.replace("\"", "\\\"")}\""
-        )
 
         externalNativeBuild {
             cmake {

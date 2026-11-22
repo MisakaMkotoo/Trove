@@ -184,11 +184,8 @@ fun TuneTrackSlider(
                 .background(inactiveTrackColor ?: colors.sliderInactive)
                 .testTag(TuneTrackSliderTrackTestTag),
         ) {
-            // A disabled control remains discoverable; only its interaction and
-            // filled value are muted, never the frosted-glass track itself.
-            if (enabled) {
-                drawTrack(filledTrackColor, fraction)
-            }
+            // 无论是否可交互都按当前进度绘制，填充不因禁用态消失或变色。
+            drawTrack(filledTrackColor, fraction)
         }
     }
 }

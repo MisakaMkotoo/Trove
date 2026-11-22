@@ -103,6 +103,36 @@ internal class AndroidLyricsService(
         // 网易云优先：任何歌曲都先试网易云（ID 直取或搜索匹配），失败再并发回退其他来源。
         val netease = active.filterIsInstance<NeteaseLyricsProvider>().firstOrNull()
             ?: active.firstOrNull { it::class.simpleName == "NeteaseLyricsProvider" }
+        // 网易云曲目只允许使用网易云歌词：禁止回退到其它来源；抓取失败会重试，不一次放弃。
+        if (trackId.startsWith("netease:")) {
+            if (netease == null) {
+                System.err.println("LYR none(netease-only-disabled) track=$trackId")
+                return
+            }
+            var result: FetchedLyric? = null
+            for (attempt in 1..NeteaseLyricAttempts) {
+                val started = android.os.SystemClock.elapsedRealtime()
+                result = runCatching {
+                    kotlinx.coroutines.withTimeoutOrNull(NeteasePriorityTimeoutMs) { netease.fetch(lyricsTrack) }
+                }.getOrNull()
+                Log.d(
+                    "TuneLyrics",
+                    "Provider Netease(only) attempt=$attempt took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${result != null}",
+                )
+                if (result != null) break
+                if (attempt < NeteaseLyricAttempts) kotlinx.coroutines.delay(NeteaseLyricRetryDelayMs * attempt)
+            }
+            result?.let {
+                library.saveProviderLyrics(trackId, it.content, it.source)
+                System.err.println(
+                    "LYR source=${it.source} track=$trackId chars=${it.content.length} lines=${countTimedLyricLines(it.content)} " +
+                        "first=${firstLyricTimestamp(it.content)} last=${lastLyricTimestamp(it.content)} duration=${lyricsTrack.duration}",
+                )
+            } ?: System.err.println(
+                "LYR none(netease-only) track=$trackId title=${lyricsTrack.title} duration=${lyricsTrack.duration}",
+            )
+            return
+        }
         var lyric: FetchedLyric? = null
         if (netease != null) {
             val started = android.os.SystemClock.elapsedRealtime()
@@ -377,6 +407,8 @@ private suspend fun request(base: String, params: Map<String, String>): String? 
 
 private const val ProviderTimeoutMs = 8_000L
 private const val NeteasePriorityTimeoutMs = 10_000L
+private const val NeteaseLyricAttempts = 3
+private const val NeteaseLyricRetryDelayMs = 600L
 private const val MissCacheMs = 10 * 60_000L
 
 private val Brackets = Regex("[(（【〔\\[{｛][^)）】〕\\]}｝]*[)）】〕\\]}｝]")

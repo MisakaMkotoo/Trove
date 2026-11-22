@@ -1,17 +1,29 @@
 package com.exodidio.tune.netease
 
 import android.content.Context
+import android.webkit.CookieManager
+import android.webkit.WebStorage
+import com.exodidio.tune.sync.AndroidLibrarySyncStore
 import com.exodidio.tune.sync.AndroidSyncRuntime
 import com.exodidio.tune.sync.LibrarySyncProtocol
 import com.exodidio.tune.sync.LibraryTrack
 import com.exodidio.tune.sync.albumIdFor
 import com.exodidio.tune.sync.artistIdFor
 import com.exodidio.tune.sync.metadataObject
+import com.exodidio.tune.sync.writeTextAtomically
 import java.io.File
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -40,6 +53,9 @@ internal data class NeteaseEntryRecord(
     val matchedTrackId: String? = null,
     val downloadedFile: String? = null,
     val downloadFormat: String? = null,
+    /** 网易云专辑/歌手 ID：用于“前往专辑/歌手”打开在线实体页。 */
+    val albumId: Long = 0L,
+    val artistIds: List<Long> = emptyList(),
 )
 
 @Serializable
@@ -56,6 +72,10 @@ internal data class NeteasePlaylistRecord(
     val sourceUrl: String = "",
     /** 远端歌单的歌曲数量；条目未加载时首页用它显示数量。 */
     val remoteTrackCount: Int = 0,
+    /** 歌单介绍，首页卡片副标题使用。 */
+    val description: String = "",
+    /** 从“我的”点开过的歌单：条目写盘缓存，重启后仍在，但不进播放列表。 */
+    val persistCache: Boolean = false,
     val entries: List<NeteaseEntryRecord> = emptyList(),
 )
 
@@ -84,11 +104,18 @@ data class OnlineAlbumInfo(
     val artworkPath: String? = null,
 )
 
+/** 一键下载结果：total=开始时待下载数，succeeded=实际下载成功数。 */
+data class DownloadAllResult(val total: Int, val succeeded: Int)
+
 internal data class OnlineSearchResult(
     val songs: List<LibraryTrack> = emptyList(),
     val playlists: List<OnlinePlaylistInfo> = emptyList(),
     val artists: List<OnlineArtistInfo> = emptyList(),
     val albums: List<OnlineAlbumInfo> = emptyList(),
+    /** 分区级失败：非空表示该分区请求失败，界面必须区别于“真的没有结果”。 */
+    val playlistError: String? = null,
+    val artistError: String? = null,
+    val albumError: String? = null,
 )
 
 /** 心动/漫游卡片预览：启动时先取第一首（或一批），只展示封面，不播放。 */
@@ -96,6 +123,72 @@ data class NeteaseModePreview(
     val trackIds: List<String> = emptyList(),
     val artworkPath: String? = null,
     val seed: Long? = null,
+)
+
+/** 新发现页的歌单卡片数据（榜单/甄选/推荐/我的歌单共用）。 */
+@Serializable
+data class DiscoverPlaylist(
+    val id: String,
+    val name: String,
+    val subtitle: String = "",
+    val coverUrl: String = "",
+    val coverPath: String? = null,
+    val trackCount: Int = 0,
+)
+
+/** 新发现页数据：歌单分区 + 新歌；封面缺失的随后在后台补齐。 */
+data class DiscoverData(
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val rankings: List<DiscoverPlaylist> = emptyList(),
+    val curated: List<DiscoverPlaylist> = emptyList(),
+    val newSongs: List<LibraryTrack> = emptyList(),
+    val rankingsError: String? = null,
+    val curatedError: String? = null,
+    val newSongsError: String? = null,
+)
+
+/** 首页动态分区（曲风精选/歌曲推荐/艺人新动向）：标题和内容都由服务端下发。 */
+data class HomeSongSection(
+    val title: String,
+    /** 服务端没给标题时使用的本地文案（如“根据你喜爱的歌曲推荐”）。 */
+    @androidx.annotation.StringRes val titleRes: Int? = null,
+    val songs: List<LibraryTrack> = emptyList(),
+)
+
+data class HomeFeedData(
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val sections: List<HomeSongSection> = emptyList(),
+    val artistNew: HomeSongSection? = null,
+    val recommended: List<DiscoverPlaylist> = emptyList(),
+    val error: String? = null,
+)
+
+/** “我的”页关注的歌手。 */
+@Serializable
+data class MineArtist(
+    val id: String,
+    val name: String,
+    val coverUrl: String = "",
+)
+
+/** “我的”页数据：云端自建/收藏歌单 + 关注歌手（最近播放走本地）。 */
+data class MineData(
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val created: List<DiscoverPlaylist> = emptyList(),
+    val saved: List<DiscoverPlaylist> = emptyList(),
+    val artists: List<MineArtist> = emptyList(),
+    val error: String? = null,
+)
+
+/** “我的”页磁盘缓存：资料头、歌单列表、关注歌手启动时先用缓存渲染。 */
+@Serializable
+private data class MineCache(
+    val created: List<DiscoverPlaylist> = emptyList(),
+    val saved: List<DiscoverPlaylist> = emptyList(),
+    val artists: List<MineArtist> = emptyList(),
 )
 
 /** 首页“雷达歌单”卡片元数据（名称/封面/数量，不含歌曲）。 */
@@ -106,11 +199,14 @@ data class NeteaseRadarSummary(
     val coverUrl: String = "",
     val coverPath: String? = null,
     val trackCount: Int = 0,
+    val description: String = "",
 )
 
 /** 官方雷达歌单目录；内容按账号在服务端个性化。 */
+internal const val RADAR_DISPLAY_NAME = "私人雷达"
+
 internal val RadarCatalog: List<Pair<String, String>> = listOf(
-    "3136952023" to "私人雷达",
+    "3136952023" to RADAR_DISPLAY_NAME,
     "10106461201" to "怀旧雷达",
     "8402996200" to "会员雷达",
     "5300458264" to "新歌雷达",
@@ -128,8 +224,13 @@ internal object NeteaseRepository {
     private const val PREFS = "netease"
     private const val KEY_COOKIE = "cookie"
     private const val PLAYLIST_FILE = "netease-playlists.json"
+    private const val CACHE_PLAYLIST_FILE = "netease-cached-playlists.json"
     private const val LIKED_FILE = "netease-liked.json"
     private const val RADAR_FILE = "netease-radars.json"
+    private const val ACCOUNT_FILE = "netease-account.json"
+    private const val MINE_FILE = "netease-mine.json"
+    /** 导入/镜像歌单的封面属于持久数据，不放进可淘汰的封面缓存目录。 */
+    private const val PLAYLIST_COVER_DIR = "netease-playlist-covers"
 
     private val _playlists = MutableStateFlow(emptyList<NeteasePlaylistRecord>())
     val playlists: StateFlow<List<NeteasePlaylistRecord>> = _playlists.asStateFlow()
@@ -156,36 +257,36 @@ internal object NeteaseRepository {
     // 流播直链（10 分钟有效，过期后重新获取）。
     private val streamUrls = ConcurrentHashMap<Long, Pair<String, Long>>()
 
+    // 歌单落盘单写者：锁内只取内存快照，编码与原子写在 IO 单协程里做。
+    private data class PersistSnapshot(
+        val version: Long,
+        val added: List<NeteasePlaylistRecord>,
+        val cached: List<NeteasePlaylistRecord>,
+    )
+    private val persistRequests = Channel<Unit>(Channel.CONFLATED)
+    private val persistMutex = Mutex()
+    private val pendingPersist = AtomicReference<PersistSnapshot?>(null)
+    private val persistVersion = AtomicLong(0L)
+    private val persistedVersion = AtomicLong(0L)
+    // 启动读盘在 IO 上完成；任何落盘都要等它，避免把空/半装状态写回磁盘。
+    private val diskLoaded = kotlinx.coroutines.CompletableDeferred<Unit>()
+
     fun initialize(context: Context) {
         val app = context.applicationContext
         appContext = app
         NeteaseStreamProxy.initialize(app)
-        if (!loaded) {
-            loaded = true
-            _loggedIn.value = !cookie(app).isNullOrBlank()
-            _playlists.value = runCatching {
-                LibrarySyncProtocol.json.decodeFromString<List<NeteasePlaylistRecord>>(
-                    File(app.filesDir, PLAYLIST_FILE).readText(),
-                )
-            }.getOrDefault(emptyList()).map { it.copy(addedToPlaylists = true) }
-            // 红心歌单单独缓存：启动直接用它，不再自动联网刷新。
-            runCatching {
-                LibrarySyncProtocol.json.decodeFromString<NeteasePlaylistRecord>(
-                    File(app.filesDir, LIKED_FILE).readText(),
-                )
-            }.getOrNull()?.let { liked ->
-                _playlists.value = _playlists.value.filterNot { it.id == LIKED_ID } +
-                    liked.copy(addedToPlaylists = false)
+        if (loaded) return
+        loaded = true
+        // 雷达目录先占位，磁盘/网络缓存就绪后覆盖；首帧不用等 6 个 JSON 解析。
+        _radars.value = RadarCatalog.map { (id, name) -> NeteaseRadarSummary(id = id, name = name) }
+        ioScope.launch {
+            try {
+                runCatching { loadFromDisk(app) }
+            } finally {
+                diskLoaded.complete(Unit)
             }
-            publishActive()
-            // 雷达卡片元数据：启动先用缓存渲染，随后 loadHome 更新一次。
-            _radars.value = runCatching {
-                LibrarySyncProtocol.json.decodeFromString<List<NeteaseRadarSummary>>(
-                    File(app.filesDir, RADAR_FILE).readText(),
-                )
-            }.getOrNull().orEmpty().ifEmpty {
-                RadarCatalog.map { (id, name) -> NeteaseRadarSummary(id = id, name = name) }
-            }
+            runCatching { AndroidSyncRuntime.syncStore.awaitLoaded() }
+            subscribeRecentTracks()
             _playlists.value.forEach { playlist ->
                 ioScope.launch {
                     ensureEntryCovers(app, playlist.id)
@@ -193,6 +294,92 @@ internal object NeteaseRepository {
                 }
             }
             ioScope.launch { backfillPlaybackCovers() }
+            ioScope.launch { backfillPlaylistCovers() }
+            ioScope.launch { NeteaseImageCache.trim(app) }
+        }
+        ioScope.launch {
+            diskLoaded.await()
+            for (ignored in persistRequests) {
+                val snapshot = pendingPersist.getAndSet(null) ?: continue
+                persistMutex.withLock { writePersist(app, snapshot) }
+            }
+        }
+    }
+
+    /** 启动读盘完成信号：首页刷新等依赖缓存的操作先等它，避免拿空歌单做匹配。 */
+    suspend fun awaitDiskLoaded() {
+        diskLoaded.await()
+    }
+
+    private fun loadFromDisk(app: Context) {
+        _loggedIn.value = !cookie(app).isNullOrBlank()
+        val merged = linkedMapOf<String, NeteasePlaylistRecord>()
+        runCatching {
+            LibrarySyncProtocol.json.decodeFromString<List<NeteasePlaylistRecord>>(
+                File(app.filesDir, PLAYLIST_FILE).readText(),
+            )
+        }.getOrDefault(emptyList()).map { it.copy(addedToPlaylists = true) }.forEach { merged[it.id] = it }
+        // 红心歌单单独缓存：启动直接用它，不再自动联网刷新。
+        runCatching {
+            LibrarySyncProtocol.json.decodeFromString<NeteasePlaylistRecord>(
+                File(app.filesDir, LIKED_FILE).readText(),
+            )
+        }.getOrNull()?.let { liked ->
+            merged.remove(LIKED_ID)
+            merged.remove(liked.id)
+            merged[liked.id] = liked.copy(addedToPlaylists = false)
+        }
+        // “我的”里点开过的歌单：独立文件缓存，加载后仍不进播放列表。
+        runCatching {
+            LibrarySyncProtocol.json.decodeFromString<List<NeteasePlaylistRecord>>(
+                File(app.filesDir, CACHE_PLAYLIST_FILE).readText(),
+            )
+        }.getOrNull()?.forEach { cached ->
+            if (!merged.containsKey(cached.id)) {
+                merged[cached.id] = cached.copy(addedToPlaylists = false, persistCache = true)
+            }
+        }
+        // 读盘期间可能已有网络写入（loadHome）：内存里的更新，保留内存版本。
+        _playlists.value.forEach { merged[it.id] = it }
+        _playlists.value = merged.values.toList()
+        publishActive()
+        // 账户资料与“我的”页列表也走磁盘缓存，启动即可先渲染；网络已回填的更新优先。
+        runCatching {
+            LibrarySyncProtocol.json.decodeFromString<NeteaseClient.AccountInfo>(
+                File(app.filesDir, ACCOUNT_FILE).readText(),
+            )
+        }.getOrNull()?.let { info ->
+            if (_accountInfo.value == null) _accountInfo.value = info
+        }
+        runCatching {
+            LibrarySyncProtocol.json.decodeFromString<MineCache>(
+                File(app.filesDir, MINE_FILE).readText(),
+            )
+        }.getOrNull()?.let { cache ->
+            val hasData = cache.created.isNotEmpty() || cache.saved.isNotEmpty() || cache.artists.isNotEmpty()
+            val current = _mine.value
+            val untouched = !current.loaded && current.created.isEmpty() && current.saved.isEmpty() && current.artists.isEmpty()
+            if (hasData && untouched) {
+                _mine.value = MineData(
+                    loaded = true,
+                    created = cache.created,
+                    saved = cache.saved,
+                    artists = cache.artists,
+                )
+            }
+        }
+        // 雷达卡片元数据：启动先用缓存渲染，随后 loadHome 更新一次。
+        val cachedRadars = runCatching {
+            LibrarySyncProtocol.json.decodeFromString<List<NeteaseRadarSummary>>(
+                File(app.filesDir, RADAR_FILE).readText(),
+            )
+        }.getOrNull().orEmpty()
+        if (cachedRadars.isNotEmpty()) {
+            val current = _radars.value
+            val placeholderIds = RadarCatalog.map { it.first }.toSet()
+            val stillPlaceholder = current.map { it.id }.toSet() == placeholderIds &&
+                current.all { it.coverUrl.isBlank() && it.trackCount == 0 }
+            if (stillPlaceholder) _radars.value = cachedRadars
         }
     }
 
@@ -211,6 +398,7 @@ internal object NeteaseRepository {
         coverPath: String?,
         trackCount: Int,
         dynamicKind: String? = null,
+        cacheToDisk: Boolean = false,
     ) {
         val existing = playlistById(playlistId)
         if (existing != null && existing.entries.isNotEmpty()) return
@@ -225,10 +413,14 @@ internal object NeteaseRepository {
             sourceUrl = existing?.sourceUrl?.ifBlank { "https://music.163.com/playlist?id=$playlistId" }
                 ?: "https://music.163.com/playlist?id=$playlistId",
             remoteTrackCount = trackCount.takeIf { it > 0 } ?: existing?.remoteTrackCount ?: 0,
+            persistCache = existing?.persistCache ?: cacheToDisk,
             entries = existing?.entries.orEmpty(),
         )
         _playlists.value = _playlists.value.filterNot { it.id == playlistId } + record
         publishActive()
+        if (record.persistCache && !record.addedToPlaylists) {
+            persistSoon()
+        }
     }
 
     /** 是否把歌单镜像到“播放列表”页；不影响设置里的导入记录。 */
@@ -237,7 +429,7 @@ internal object NeteaseRepository {
             if (playlist.id == playlistId) playlist.copy(addedToPlaylists = added) else playlist
         }
         publishActive()
-        appContext?.let(::persist)
+        persistSoon()
     }
 
     fun cookie(context: Context? = appContext): String? {
@@ -249,10 +441,27 @@ internal object NeteaseRepository {
 
     fun clearLogin(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_COOKIE).apply()
+        // 网页登录的登录态存在 WebView 的 Cookie 里：只清应用内 cookie 的话，
+        // 下次打开网页登录页会直接是已登录状态，必须把 WebView 的 Cookie/存储一起清掉。
+        runCatching {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.removeAllCookies { cookieManager.flush() }
+            WebStorage.getInstance().deleteAllData()
+        }
+        listOf(ACCOUNT_FILE, MINE_FILE, CACHE_PLAYLIST_FILE).forEach { name ->
+            File(context.filesDir, name).delete()
+        }
+        _playlists.value = _playlists.value.filterNot { it.persistCache }
+        publishActive()
         _loggedIn.value = false
+        _accountInfo.value = null
+        _homeFeed.value = HomeFeedData()
+        _discover.value = DiscoverData()
+        _mine.value = MineData()
+        _homeStatus.value = ""
     }
 
-    suspend fun createQrLogin(): Result<NeteaseLoginQr> = NeteaseClient.createQrLogin()
+    suspend fun createQrLogin(cookie: String? = null): Result<NeteaseLoginQr> = NeteaseClient.createQrLogin(cookie)
 
     suspend fun pollQrLogin(key: String, cookie: String?): Result<NeteaseQrStatus> =
         NeteaseClient.pollQrLogin(key, cookie)
@@ -261,6 +470,50 @@ internal object NeteaseRepository {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_COOKIE, cookie).apply()
         _loggedIn.value = true
+        loadAccountInfo(force = true)
+        // 登录后立刻补齐首页/新发现的个人化内容。
+        ioScope.launch {
+            runCatching { loadHome(context.applicationContext) }
+            loadHomeFeed(force = true)
+            loadDiscover(force = true)
+            loadMine(force = true)
+        }
+    }
+
+    private val _accountInfo = MutableStateFlow<NeteaseClient.AccountInfo?>(null)
+    val accountInfo: StateFlow<NeteaseClient.AccountInfo?> = _accountInfo.asStateFlow()
+    private var accountInfoJob: Job? = null
+    @Volatile private var accountLoadedAt = 0L
+
+    /** 账户页信息：进入页面时刷新一次；未登录直接清空。 */
+    fun loadAccountInfo(force: Boolean = false) {
+        val app = appContext ?: return
+        val c = cookie(app)
+        if (c.isNullOrBlank()) {
+            _accountInfo.value = null
+            return
+        }
+        if (accountInfoJob?.isActive == true) return
+        if (!force && _accountInfo.value != null &&
+            System.currentTimeMillis() - accountLoadedAt < DISCOVER_TTL_MS
+        ) {
+            return
+        }
+        accountInfoJob = ioScope.launch {
+            NeteaseClient.fetchAccountInfo(c).onFailure {
+                System.err.println("NETACCOUNT failed ${it.message}")
+            }.onSuccess { info ->
+                _accountInfo.value = info
+                accountLoadedAt = System.currentTimeMillis()
+                persistAccount(app, info)
+            }
+        }
+    }
+
+    private fun persistAccount(context: Context, info: NeteaseClient.AccountInfo) {
+        runCatching {
+            File(context.filesDir, ACCOUNT_FILE).writeTextAtomically(LibrarySyncProtocol.json.encodeToString(info))
+        }
     }
 
     /**
@@ -292,7 +545,7 @@ internal object NeteaseRepository {
         val record = if (addToPlaylists) base.copy(addedToPlaylists = true) else base
         _playlists.value = _playlists.value.filterNot { it.id == id } + record
         publishActive()
-        if (record.addedToPlaylists) persist(context)
+        if (record.addedToPlaylists) persistNow(context)
         ioScope.launch { ensureEntryCovers(context, id) }
         Result.success(id)
     }
@@ -301,6 +554,9 @@ internal object NeteaseRepository {
         if (playlistId == DAILY_ID) return@withContext loadDaily(context, force = true).map { }
         if (playlistId == RADAR_ID) return@withContext loadRadar(context, force = true).map { }
         if (playlistId == LIKED_ID) return@withContext loadLiked(context, force = true).map { }
+        if (playlistId == DOWNLOADS_ID) {
+            return@withContext Result.failure(IllegalStateException("“已下载的音乐”来自本机文件，无需刷新"))
+        }
         val existing = _playlists.value.firstOrNull { it.id == playlistId }
             ?: return@withContext Result.failure(IllegalStateException("歌单不存在"))
         // 每日推荐/私人雷达/我喜欢的音乐的本地快照：重新拉取动态列表，整体替换条目（远端删除的这里也会消失）。
@@ -324,7 +580,7 @@ internal object NeteaseRepository {
                 }
             }
             publishActive()
-            persist(context)
+            persistNow(context)
             ioScope.launch { ensureEntryCovers(context, playlistId) }
             return@withContext Result.success(Unit)
         }
@@ -346,17 +602,58 @@ internal object NeteaseRepository {
             )
             _playlists.value = _playlists.value.map { if (it.id == playlistId) updated else it }
             publishActive()
-            persist(context)
+            persistNow(context)
+            ioScope.launch { ensureEntryCovers(context, playlistId) }
+            return@withContext Result.success(Unit)
+        }
+        // 在线歌手/专辑页是虚拟歌单：刷新就是重新拉热门歌曲/专辑曲目。
+        if (playlistId.startsWith(ARTIST_PAGE_PREFIX)) {
+            val artistId = playlistId.removePrefix(ARTIST_PAGE_PREFIX).toLongOrNull()
+                ?: return@withContext Result.failure(IllegalStateException("歌手 ID 无效"))
+            val entries = NeteaseClient.fetchArtistTopSongs(artistId.toString(), cookie(context))
+                .getOrElse { return@withContext Result.failure(it) }
+            applyPayload(
+                context,
+                playlistId,
+                NeteasePlaylistPayload(
+                    id = playlistId,
+                    name = existing.name,
+                    coverUrl = entries.firstOrNull()?.coverUrl.orEmpty().ifBlank { existing.coverUrl },
+                    entries = entries,
+                ),
+                dynamicKind = "artist",
+                addedToPlaylists = existing.addedToPlaylists,
+                awaitCovers = false,
+            )
+            ioScope.launch { ensureEntryCovers(context, playlistId) }
+            return@withContext Result.success(Unit)
+        }
+        if (playlistId.startsWith(ALBUM_PAGE_PREFIX)) {
+            val albumId = playlistId.removePrefix(ALBUM_PAGE_PREFIX).toLongOrNull()
+                ?: return@withContext Result.failure(IllegalStateException("专辑 ID 无效"))
+            val payload = NeteaseClient.fetchAlbumDetail(albumId, cookie(context))
+                .getOrElse { return@withContext Result.failure(it) }
+            applyPayload(
+                context,
+                playlistId,
+                payload.copy(name = existing.name.ifBlank { payload.name }),
+                dynamicKind = "album",
+                addedToPlaylists = existing.addedToPlaylists,
+                awaitCovers = false,
+            )
             ioScope.launch { ensureEntryCovers(context, playlistId) }
             return@withContext Result.success(Unit)
         }
         val payload = NeteaseClient.fetchPlaylist(playlistId, cookie(context)).getOrElse {
             return@withContext Result.failure(it)
         }
-        val record = buildRecord(context, payload, existing)
+        val record = buildRecord(context, payload, existing).copy(
+            dynamicKind = existing.dynamicKind,
+            persistCache = existing.persistCache,
+        )
         _playlists.value = _playlists.value.map { if (it.id == playlistId) record else it }
         publishActive()
-        if (record.addedToPlaylists) persist(context)
+        if (record.addedToPlaylists) persistNow(context)
         updateRadarSummary(context, record)
         ioScope.launch { ensureEntryCovers(context, playlistId) }
         Result.success(Unit)
@@ -366,9 +663,12 @@ internal object NeteaseRepository {
      * 详情页菜单的“保存到播放列表”：普通歌单直接加入本地播放列表；
      * 每日推荐/私人雷达/漫游/雷达歌单每次保存都生成一份新的带日期快照（不覆盖旧快照）。
      */
-    fun saveSnapshot(playlistId: String): String? {
+    suspend fun saveSnapshot(playlistId: String): String? {
         val source = playlistById(playlistId) ?: return null
-        val isRadar = source.dynamicKind == "radar"
+        val isRadar = source.dynamicKind == "radar" ||
+            source.name.contains("私人雷达") ||
+            source.id == NeteaseClient.PrivateRadarPlaylistId ||
+            NeteaseClient.playlistIdFrom(source.sourceUrl) == NeteaseClient.PrivateRadarPlaylistId
         val kind = when {
             playlistId == DAILY_ID -> "daily"
             playlistId == RADAR_ID -> "radar"
@@ -380,7 +680,7 @@ internal object NeteaseRepository {
                         if (it.id == playlistId) it.copy(addedToPlaylists = true) else it
                     }
                     publishActive()
-                    appContext?.let(::persist)
+                    appContext?.let { persistNow(it) }
                 }
                 return playlistId
             }
@@ -409,7 +709,7 @@ internal object NeteaseRepository {
             },
         )
         _playlists.value = _playlists.value + snapshot
-        appContext?.let(::persist)
+        appContext?.let { persistNow(it) }
         publishActive()
         return snapshot.id
     }
@@ -419,38 +719,10 @@ internal object NeteaseRepository {
         if (_selectedPlaylistId.value == playlistId) _selectedPlaylistId.value = null
         publishActive()
         if (playlistId == LIKED_ID) appContext?.let { context -> File(context.filesDir, LIKED_FILE).delete() }
-        appContext?.let(::persist)
+        appContext?.let { persistNow(it) }
     }
 
-    fun bindTrack(playlistId: String, songId: Long, trackId: String?) {
-        val playlist = playlistById(playlistId) ?: return
-        updateRecord(
-            playlist.copy(
-                entries = playlist.entries.map { entry ->
-                    if (entry.songId == songId) entry.copy(matchedTrackId = trackId) else entry
-                },
-            ),
-        )
-        appContext?.let(::persist)
-    }
-
-    /** 重新匹配所有未绑定曲目（导入或刷新时调用）。 */
-    private fun rematchLibrary(entries: List<NeteaseEntryRecord>, previous: List<NeteaseEntryRecord>): List<NeteaseEntryRecord> {
-        val tracks = AndroidSyncRuntime.syncStore.tracks.value
-        val tracksById = tracks.associateBy { it.id }
-        // 标题索引只建一次：避免每首歌都全量扫描曲库并重复编译正则。
-        val tracksByTitle = tracks.groupBy { normalizeNeteaseMatch(it.title) }
-        return entries.map { entry ->
-            val previousBinding = previous.firstOrNull { it.songId == entry.songId }?.matchedTrackId
-            val matched = when {
-                previousBinding != null && previousBinding in tracksById -> previousBinding
-                else -> bestMatch(entry, tracksByTitle)?.id
-            }
-            entry.copy(matchedTrackId = matched)
-        }
-    }
-
-    /** 与导入完全一致的落库流程：匹配、下载歌单封面、下载曲目封面，然后发布。 */
+    /** 与导入完全一致的落库流程：下载歌单封面、下载曲目封面，然后发布。 */
     private suspend fun applyPayload(
         context: Context,
         id: String,
@@ -461,14 +733,18 @@ internal object NeteaseRepository {
     ) {
         val existing = _playlists.value.firstOrNull { it.id == id }
         val base = buildRecord(context, payload, existing)
-        val record = base.copy(id = id, dynamicKind = dynamicKind, addedToPlaylists = addedToPlaylists)
+        val record = base.copy(
+            id = id,
+            dynamicKind = dynamicKind,
+            addedToPlaylists = addedToPlaylists,
+            persistCache = existing?.persistCache ?: false,
+        )
         _playlists.value = _playlists.value.filterNot { it.id == id } + record
         publishActive()
-        if (record.addedToPlaylists) persist(context)
         // 与导入一致；等待封面补齐，保证首页/详情一出现就带封面。大歌单可改为后台补齐。
         if (awaitCovers) ensureEntryCovers(context, id)
         publishActive()
-        persist(context)
+        persistSoon()
     }
 
     private suspend fun buildRecord(
@@ -488,12 +764,13 @@ internal object NeteaseRepository {
                 coverUrl = entry.coverUrl,
                 // 复用已有封面文件（之前会话下载过），打开列表就能显示。
                 coverPath = previous?.coverPath ?: NeteaseCoverStore.cached(context, entry.songId)?.absolutePath,
-                matchedTrackId = previous?.matchedTrackId,
+                matchedTrackId = null,
                 downloadedFile = previous?.downloadedFile,
                 downloadFormat = previous?.downloadFormat,
+                albumId = entry.albumId,
+                artistIds = entry.artistIds,
             )
         }
-        val rematched = rematchLibrary(fresh, existing?.entries.orEmpty())
         return NeteasePlaylistRecord(
             id = payload.id,
             name = payload.name,
@@ -504,8 +781,10 @@ internal object NeteaseRepository {
                 ?: existing?.coverPath,
             // 保持原状态；首次创建由调用方决定是否加入播放列表。
             addedToPlaylists = existing?.addedToPlaylists ?: false,
+            persistCache = existing?.persistCache ?: false,
             sourceUrl = sourceUrl ?: existing?.sourceUrl.orEmpty(),
-            entries = rematched,
+            description = payload.description.ifBlank { existing?.description.orEmpty() },
+            entries = fresh,
         )
     }
 
@@ -516,12 +795,43 @@ internal object NeteaseRepository {
         previousUrl: String? = null,
     ): String? {
         if (url.isBlank()) return null
-        val dir = File(context.filesDir, "netease-covers").apply { mkdirs() }
+        // 持久目录：歌单封面视同本地歌单数据，不参与封面缓存的 LRU 淘汰。
+        val dir = File(context.filesDir, PLAYLIST_COVER_DIR).apply { mkdirs() }
         val suffix = url.hashCode().toUInt().toString(16)
-        val target = File(dir, "${playlistId}_$suffix.img")
+        val fileName = "${playlistId}_$suffix.img"
+        val target = File(dir, fileName)
         // URL 没变且文件有效就直接复用；URL 变了就重新下载到新文件名。
         if (previousUrl == url && target.isFile && target.length() > 0) return target.absolutePath
-        return NeteaseClient.download(url, cookie(context), target).getOrNull()?.let { target.absolutePath }
+        // 老版本把歌单封面存在会被清理的封面缓存目录：先搬过来，搬不到再重新下载。
+        val legacy = File(context.filesDir, "netease-covers/$fileName")
+        if (legacy.isFile && legacy.length() > 0) {
+            legacy.renameTo(target)
+            if (target.isFile && target.length() > 0) return target.absolutePath
+        }
+        val saved = NeteaseClient.download(url, cookie(context), target)
+        val path = saved.getOrNull()?.let { target.takeIf(File::isFile)?.absolutePath }
+        if (path == null) System.err.println("PLAYLISTCOVER failed id=$playlistId")
+        return path
+    }
+
+    /** 启动时补齐“导入/镜像歌单”缺失的持久封面（限 30 个，避免一次拉太多）。 */
+    private fun backfillPlaylistCovers() {
+        val app = appContext ?: return
+        ioScope.launch {
+            val pending = _playlists.value.filter { record ->
+                (record.addedToPlaylists || record.persistCache) &&
+                    record.coverUrl.isNotBlank() &&
+                    record.coverPath?.let { File(it).isFile } != true
+            }.take(30)
+            if (pending.isEmpty()) return@launch
+            pending.forEach { record ->
+                val path = downloadPlaylistCover(app, record.id, record.coverUrl, record.coverUrl) ?: return@forEach
+                _playlists.value = _playlists.value.map { if (it.id == record.id) it.copy(coverPath = path) else it }
+                publishActive()
+            }
+            persistSoon()
+            System.err.println("PLAYLISTCOVER backfill=${pending.size}")
+        }
     }
 
     /** 下载并按需登记为“仅播放”曲目，返回可交给播放器的曲目 ID。 */
@@ -541,7 +851,7 @@ internal object NeteaseRepository {
                 NeteaseClient.download(url.url, cookie(context), file).getOrThrow()
                 entry = entry.copy(downloadedFile = file.absolutePath, downloadFormat = url.type)
                 updateRecord(playlist.copy(entries = playlist.entries.map { if (it.songId == songId) entry else it }))
-                persist(context)
+                persistNow(context)
             }
             val cover = downloadCover(context, audioDir, entry)
             val track = buildPlaybackTrack(entry, file, cover)
@@ -553,8 +863,10 @@ internal object NeteaseRepository {
     }
 
     /** 交给 FFmpeg 的本地代理地址；缓存命中时完全不访问网络。 */
-    fun playbackStreamUrl(songId: Long): String {
+    suspend fun playbackStreamUrl(songId: Long): String {
         NeteaseStreamProxy.initialize(appContext ?: error("repository not initialized"))
+        // 代理初始化为非阻塞；真正播放前在这里等它就绪。
+        NeteaseStreamProxy.awaitReady()
         return NeteaseStreamProxy.localUrl(songId)
     }
 
@@ -562,6 +874,11 @@ internal object NeteaseRepository {
 
     fun cachedStreamUrl(songId: Long): String? =
         streamUrls[songId]?.takeIf { it.second > System.currentTimeMillis() }?.first
+
+    /** 打开流失败时丢弃缓存直链，下一次会重新向网易云取。 */
+    fun invalidateStreamUrl(songId: Long) {
+        streamUrls.remove(songId)
+    }
 
     suspend fun streamUrl(context: Context, songId: Long): String? = withContext(Dispatchers.IO) {
         cachedStreamUrl(songId)?.let { return@withContext it }
@@ -609,21 +926,30 @@ internal object NeteaseRepository {
     }
 
     /**
-     * 可播放条目：优先本地匹配/已下载文件；否则登记一条仅播放的流式曲目
-     * （audioPath = netease://songId），供播放服务按需取直链。
+     * 可播放条目：网易云侧只认自己的曲目。已下载就复用本曲目下载文件，
+     * 否则登记一条仅播放的流式曲目（audioPath = netease://songId）。
+     * 不再绑定本地/电脑曲库的同名曲目——两个来源保持单向关系。
      */
-    fun entryTrack(entry: NeteaseEntryRecord): LibraryTrack {
-        entry.matchedTrackId?.let { id -> AndroidSyncRuntime.syncStore.trackForPlayback(id)?.let { return it } }
+    fun entryTrack(entry: NeteaseEntryRecord, ensureCover: Boolean = true): LibraryTrack {
         val existing = AndroidSyncRuntime.syncStore.trackForPlayback("netease:${entry.songId}")
-        if (existing != null && existing.audioPath?.startsWith("netease://") != true) return existing
-        return materializeStreamingTrack(entry)
+        if (existing != null) {
+            // 已经物化过就直接复用；只在补到新封面时更新一次，避免每次组合重复写 store / 排下载。
+            val cachedCover = appContext?.let { NeteaseCoverStore.cached(it, entry.songId) }?.absolutePath
+            if (cachedCover != null && existing.artworkPath != cachedCover) {
+                val updated = existing.copy(artworkPath = cachedCover)
+                AndroidSyncRuntime.syncStore.putPlaybackOnlyTrack(updated)
+                return updated
+            }
+            return existing
+        }
+        return materializeStreamingTrack(entry, scheduleCover = ensureCover)
     }
 
     /**
      * 唯一的流式曲目物化入口：先带已缓存的封面，再在后台补齐缺失封面并回写。
      * 所有歌曲列表（导入、动态歌单、心动模式、在线搜索）都必须走这里。
      */
-    private fun materializeStreamingTrack(entry: NeteaseEntryRecord): LibraryTrack {
+    private fun materializeStreamingTrack(entry: NeteaseEntryRecord, scheduleCover: Boolean = true): LibraryTrack {
         val cover = appContext?.let { NeteaseCoverStore.cached(it, entry.songId) }
             ?: entry.coverPath?.let(::File)?.takeIf { it.isFile }
             ?: entry.downloadedFile?.let { File(it).parentFile }
@@ -631,11 +957,11 @@ internal object NeteaseRepository {
                 ?.takeIf { it.isFile }
         val track = buildStreamingTrack(entry, cover)
         AndroidSyncRuntime.syncStore.putPlaybackOnlyTrack(track)
-        scheduleCover(entry)
+        if (scheduleCover) scheduleCover(entry)
         return track
     }
 
-    /** 后台补封面：完成后把仅播放曲目的封面回写，列表/播放器自动刷新。 */
+    /** 后台补封面：完成后批量回写仅播放曲目，列表/播放器自动刷新。 */
     private fun scheduleCover(entry: NeteaseEntryRecord) {
         if (entry.coverUrl.isBlank()) {
             System.err.println("COVER missing url song=${entry.songId} title=${entry.title}")
@@ -648,9 +974,25 @@ internal object NeteaseRepository {
             val store = AndroidSyncRuntime.syncStore
             val current = store.trackForPlayback("netease:${entry.songId}") ?: return@launch
             if (current.artworkPath != file.absolutePath) {
-                store.putPlaybackOnlyTrack(current.copy(artworkPath = file.absolutePath))
-                System.err.println("COVER filled song=${entry.songId} path=${file.absolutePath}")
+                queueCoverUpdate(current.copy(artworkPath = file.absolutePath))
             }
+        }
+    }
+
+    private val pendingCoverUpdates = ConcurrentHashMap<String, LibraryTrack>()
+    private var coverFlushJob: Job? = null
+
+    /** 封面回写攒 150ms 合并成一批：整份歌单补图时不再逐首触发 UI 重组。 */
+    private fun queueCoverUpdate(track: LibraryTrack) {
+        pendingCoverUpdates[track.id] = track
+        if (coverFlushJob?.isActive == true) return
+        coverFlushJob = ioScope.launch {
+            delay(150)
+            val batch = pendingCoverUpdates.values.toList()
+            pendingCoverUpdates.clear()
+            if (batch.isEmpty()) return@launch
+            AndroidSyncRuntime.syncStore.putPlaybackOnlyTracks(batch)
+            System.err.println("COVER batch=${batch.size}")
         }
     }
 
@@ -702,24 +1044,40 @@ internal object NeteaseRepository {
                             album = song.album,
                             durationMs = song.durationMs,
                             coverUrl = song.coverUrl,
+                            albumId = song.albumId,
+                            artistIds = song.artistIds,
                         ),
                     )
                 }
                 fun artwork(url: String): String? =
                     NeteaseImageStore.cached(app, url)?.absolutePath
-                val playlists = playlistsJob.await().getOrDefault(emptyList()).map {
+                val playlistsResult = playlistsJob.await()
+                val artistsResult = artistsJob.await()
+                val albumsResult = albumsJob.await()
+                val playlists = playlistsResult.getOrDefault(emptyList()).map {
                     OnlinePlaylistInfo(it.id, it.name, it.creator, it.trackCount, it.coverUrl, artwork(it.coverUrl))
                 }
-                val artists = artistsJob.await().getOrDefault(emptyList()).map {
+                val artists = artistsResult.getOrDefault(emptyList()).map {
                     OnlineArtistInfo(it.id, it.name, it.coverUrl, artwork(it.coverUrl))
                 }
-                val albums = albumsJob.await().getOrDefault(emptyList()).map {
+                val albums = albumsResult.getOrDefault(emptyList()).map {
                     OnlineAlbumInfo(it.id, it.name, it.artist, it.coverUrl, artwork(it.coverUrl))
                 }
+                fun Result<*>.sectionError(): String? =
+                    exceptionOrNull()?.message?.ifBlank { "请稍后重试" }
                 System.err.println(
-                    "NETSEARCH q=$query songs=${songs.size} playlists=${playlists.size} artists=${artists.size} albums=${albums.size}",
+                    "NETSEARCH q=$query songs=${songs.size} playlists=${playlists.size} artists=${artists.size} albums=${albums.size} " +
+                        "err=${listOf(playlistsResult, artistsResult, albumsResult).map { it.exceptionOrNull()?.message }}",
                 )
-                OnlineSearchResult(songs, playlists, artists, albums)
+                OnlineSearchResult(
+                    songs = songs,
+                    playlists = playlists,
+                    artists = artists,
+                    albums = albums,
+                    playlistError = playlistsResult.sectionError(),
+                    artistError = artistsResult.sectionError(),
+                    albumError = albumsResult.sectionError(),
+                )
             }
         }.onFailure { System.err.println("NETSEARCH failed q=$query err=${it.message}") }
     }
@@ -733,6 +1091,352 @@ internal object NeteaseRepository {
             onReady(file.absolutePath)
         }
     }
+
+    private val _discover = MutableStateFlow(DiscoverData())
+    val discover: StateFlow<DiscoverData> = _discover.asStateFlow()
+    private var discoverJob: Job? = null
+    @Volatile private var discoverLoadedAt = 0L
+
+    private val _homeFeed = MutableStateFlow(HomeFeedData())
+    val homeFeed: StateFlow<HomeFeedData> = _homeFeed.asStateFlow()
+    private var homeFeedJob: Job? = null
+    @Volatile private var homeFeedLoadedAt = 0L
+
+    /**
+     * 新发现页：排行榜 + 甄选歌单（首页整页块）+ 新歌一次并行拉取。
+     * 歌单封面与歌曲封面都走已有缓存管线；同一批数据 10 分钟内不重复请求。
+     */
+    fun loadDiscover(force: Boolean = false) {
+        val app = appContext ?: return
+        if (discoverJob?.isActive == true) return
+        if (!force && _discover.value.loaded &&
+            System.currentTimeMillis() - discoverLoadedAt < DISCOVER_TTL_MS
+        ) {
+            return
+        }
+        discoverJob = ioScope.launch {
+            _discover.update { it.copy(loading = true) }
+            val cookie = cookie(app)
+            val rankingsJob = async { NeteaseClient.fetchToplists(cookie) }
+            // 甄选来自整页块，必须登录；未登录不发请求，页面显示登录引导。
+            val blocksJob = cookie?.let { session -> async { NeteaseClient.fetchHomeBlocks(session) } }
+            val newSongsJob = async { NeteaseClient.fetchNewSongs(cookie, limit = 12) }
+
+            val rankingsResult = rankingsJob.await()
+            val blocksResult = blocksJob?.await()
+            val newSongsResult = newSongsJob.await()
+
+            val rankings = rankingsResult.getOrNull().orEmpty().take(10).map { list ->
+                DiscoverPlaylist(
+                    id = list.id,
+                    name = list.name,
+                    subtitle = list.updateFrequency,
+                    coverUrl = list.coverUrl,
+                    coverPath = NeteaseImageStore.cached(app, list.coverUrl)?.absolutePath,
+                )
+            }
+            val curated = blocksResult?.getOrNull().orEmpty()
+                .firstOrNull { it.code.contains("OFFICIAL_PLAYLIST", true) || it.title.contains("甄选") }
+                ?.playlists.orEmpty()
+                .take(10)
+                .map { payload ->
+                    DiscoverPlaylist(
+                        id = payload.id,
+                        name = payload.name,
+                        subtitle = payload.description,
+                        coverUrl = payload.coverUrl,
+                        coverPath = NeteaseImageStore.cached(app, payload.coverUrl)?.absolutePath,
+                    )
+                }
+            val songs = materializeEntries(newSongsResult.getOrNull().orEmpty())
+
+            _discover.value = DiscoverData(
+                loading = false,
+                loaded = true,
+                rankings = rankings,
+                curated = curated,
+                newSongs = songs,
+                rankingsError = rankingsResult.exceptionOrNull()?.message,
+                curatedError = blocksResult?.exceptionOrNull()?.message,
+                newSongsError = newSongsResult.exceptionOrNull()?.message,
+            )
+            discoverLoadedAt = System.currentTimeMillis()
+            System.err.println(
+                "NETDISCOVER rankings=${rankings.size} curated=${curated.size} songs=${songs.size} " +
+                    "errors=${listOfNotNull(rankingsResult.exceptionOrNull()?.message, blocksResult?.exceptionOrNull()?.message).size}",
+            )
+            fillCovers(app, cookie, rankings + curated)
+        }
+    }
+
+    /**
+     * 首页动态分区：整页块里的歌曲分区 + 推荐歌单（30 个）。
+     * 分区标题/内容由服务端按账号下发，10 分钟内不重复请求。
+     */
+    fun loadHomeFeed(force: Boolean = false) {
+        val app = appContext ?: return
+        if (homeFeedJob?.isActive == true) return
+        if (!force && _homeFeed.value.loaded &&
+            System.currentTimeMillis() - homeFeedLoadedAt < DISCOVER_TTL_MS
+        ) {
+            return
+        }
+        homeFeedJob = ioScope.launch {
+            _homeFeed.update { it.copy(loading = true) }
+            val cookie = cookie(app)
+            val blocksJob = async { NeteaseClient.fetchHomeBlocks(cookie) }
+            val recommendedJob = async { NeteaseClient.fetchRecommendedResources(cookie) }
+            val recommendSongsJob = async { NeteaseClient.fetchRecommendSongs(cookie, limit = 30) }
+
+            val blocksResult = blocksJob.await()
+            val recommendedResult = recommendedJob.await()
+            val recommendSongsResult = recommendSongsJob.await()
+            val blocks = blocksResult.getOrNull().orEmpty()
+
+            val blockSections = blocks
+                .filter { block ->
+                    block.songs.isNotEmpty() &&
+                        !block.code.contains("NEW_ALBUM", ignoreCase = true) &&
+                        !block.code.contains("SUBSCRIBE", ignoreCase = true)
+                }
+                .map { block -> HomeSongSection(block.title, songs = materializeEntries(block.songs).take(18)) }
+                .filter { it.songs.isNotEmpty() }
+            // “根据你喜爱的歌曲推荐”：整页块里没有对应分区，用登录态的每日推荐歌曲补上。
+            val favoriteSongs = materializeEntries(recommendSongsResult.getOrNull().orEmpty()).take(30)
+            val favoriteSection = favoriteSongs.takeIf { it.isNotEmpty() }?.let { songs ->
+                HomeSongSection(
+                    title = "",
+                    titleRes = com.exodidio.tune.R.string.home_section_favorite_rec,
+                    songs = songs,
+                )
+            }
+            val sections = blockSections + listOfNotNull(favoriteSection)
+            val artistBlock = blocks.firstOrNull {
+                it.code.contains("SUBSCRIBE", ignoreCase = true) || it.title.contains("关注")
+            }
+            val artistNew = artistBlock?.takeIf { it.songs.isNotEmpty() }?.let { block ->
+                HomeSongSection(block.title, songs = materializeEntries(block.songs).take(18))
+            }
+            val recommended = recommendedResult.getOrNull().orEmpty().map { payload ->
+                DiscoverPlaylist(
+                    id = payload.id,
+                    name = payload.name,
+                    subtitle = payload.description,
+                    coverUrl = payload.coverUrl,
+                    coverPath = NeteaseImageStore.cached(app, payload.coverUrl)?.absolutePath,
+                )
+            }
+
+            _homeFeed.value = HomeFeedData(
+                loading = false,
+                loaded = true,
+                sections = sections,
+                artistNew = artistNew,
+                recommended = recommended,
+                error = blocksResult.exceptionOrNull()?.message
+                    ?: recommendSongsResult.exceptionOrNull()?.message
+                    ?: recommendedResult.exceptionOrNull()?.message,
+            )
+            homeFeedLoadedAt = System.currentTimeMillis()
+            System.err.println(
+                "NETHOMEFEED sections=${sections.map { "${it.title.ifBlank { it.titleRes }}:${it.songs.size}" }} " +
+                    "artist=${artistNew?.songs?.size} recommended=${recommended.size} " +
+                    "err=${blocksResult.exceptionOrNull()?.message ?: recommendSongsResult.exceptionOrNull()?.message ?: recommendedResult.exceptionOrNull()?.message}",
+            )
+            fillCovers(app, cookie, recommended)
+        }
+    }
+
+    private val _mine = MutableStateFlow(MineData())
+    val mine: StateFlow<MineData> = _mine.asStateFlow()
+    private var mineJob: Job? = null
+    @Volatile private var mineLoadedAt = 0L
+
+    private val _recentTracks = MutableStateFlow(emptyList<LibraryTrack>())
+    /** “最近播放”：本地历史，可为本地曲目或在线曲目；封面晚到会自动回填。 */
+    val recentTracks: StateFlow<List<LibraryTrack>> = _recentTracks.asStateFlow()
+    @Volatile private var recentSubscribed = false
+
+    private fun subscribeRecentTracks() {
+        if (recentSubscribed) return
+        recentSubscribed = true
+        val store = AndroidSyncRuntime.syncStore
+        ioScope.launch {
+            combine(
+                store.recentlyPlayed,
+                store.playbackOnlyTracksFlow,
+                store.tracks,
+            ) { records, _, _ -> records }
+                .collect { records ->
+                    restoreRecentTracks(records)
+                    publishRecentTracks()
+                }
+        }
+    }
+
+    /** 重启后仅播放曲目不在内存里：按历史快照恢复，播放与封面都走正常流式管线。 */
+    private fun restoreRecentTracks(records: List<AndroidLibrarySyncStore.RecentPlayRecord>) {
+        val store = AndroidSyncRuntime.syncStore
+        records.forEach { record ->
+            if (store.trackForPlayback(record.trackId) != null) return@forEach
+            if (!record.trackId.startsWith("netease:")) return@forEach
+            val songId = record.trackId.removePrefix("netease:").toLongOrNull() ?: return@forEach
+            if (record.title.isBlank()) return@forEach
+            runCatching {
+                materializeStreamingTrack(
+                    NeteaseEntryRecord(
+                        songId = songId,
+                        title = record.title,
+                        artists = record.artists,
+                        album = record.album,
+                        coverUrl = record.coverUrl,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun publishRecentTracks() {
+        val app = appContext
+        val store = AndroidSyncRuntime.syncStore
+        _recentTracks.value = store.recentlyPlayed.value.mapNotNull { record ->
+            val track = store.trackForPlayback(record.trackId) ?: return@mapNotNull null
+            val cover = track.artworkPath ?: songIdForTrack(track.id)?.let { songId ->
+                app?.let { NeteaseCoverStore.cached(it, songId)?.absolutePath }
+            }
+            if (cover != null && cover != track.artworkPath) track.copy(artworkPath = cover) else track
+        }.take(30)
+    }
+
+    /**
+     * “我的”页：自建歌单 / 收藏歌单 / 关注歌手。
+     * 我喜欢的音乐固定作为自建歌单第一张；10 分钟内不重复请求。
+     */
+    fun loadMine(force: Boolean = false) {
+        val app = appContext ?: return
+        val session = cookie(app)
+        if (session.isNullOrBlank()) {
+            _mine.value = MineData()
+            return
+        }
+        if (mineJob?.isActive == true) return
+        if (!force && _mine.value.loaded &&
+            System.currentTimeMillis() - mineLoadedAt < DISCOVER_TTL_MS
+        ) {
+            return
+        }
+        mineJob = ioScope.launch {
+            _mine.update { it.copy(loading = true) }
+            val accountResult = NeteaseClient.fetchAccountInfo(session)
+            accountResult.getOrNull()?.let { _accountInfo.value = it }
+            val playlistsResult = accountResult.getOrNull()?.let { info ->
+                NeteaseClient.fetchUserPlaylists(info.uid, session)
+            }
+            val artistsResult = NeteaseClient.fetchSubscribedArtists(session)
+            val uid = accountResult.getOrNull()?.uid.orEmpty()
+            val playlists = playlistsResult?.getOrNull().orEmpty()
+
+            fun convert(payload: NeteaseClient.UserPlaylistInfo) = DiscoverPlaylist(
+                id = payload.id,
+                name = payload.name,
+                coverUrl = payload.coverUrl,
+                trackCount = payload.trackCount,
+            )
+
+            val likedCard = playlistById(LIKED_ID)?.let { record ->
+                DiscoverPlaylist(
+                    id = record.id,
+                    name = record.name.ifBlank { "我喜欢的音乐" },
+                    coverUrl = record.coverUrl,
+                    coverPath = record.coverPath,
+                    trackCount = record.entries.size.takeIf { it > 0 } ?: record.remoteTrackCount,
+                )
+            } ?: playlists.firstOrNull { it.specialType == 5 }?.let { payload ->
+                DiscoverPlaylist(
+                    id = payload.id,
+                    name = payload.name,
+                    coverUrl = payload.coverUrl,
+                    trackCount = payload.trackCount,
+                )
+            }
+            val created = playlists
+                .filter { it.specialType == 0 && !it.subscribed && it.creatorId == uid }
+                .sortedByDescending { it.updateTimeMillis }
+                .map(::convert)
+            val saved = playlists
+                .filter { it.specialType == 0 && (it.subscribed || it.creatorId != uid) }
+                .sortedByDescending { it.updateTimeMillis }
+                .map(::convert)
+            val artists = artistsResult.getOrNull().orEmpty().map { MineArtist(it.id, it.name, it.coverUrl) }
+
+            _mine.value = MineData(
+                loading = false,
+                loaded = true,
+                created = listOfNotNull(likedCard) + created,
+                saved = saved,
+                artists = artists,
+                error = accountResult.exceptionOrNull()?.message
+                    ?: playlistsResult?.exceptionOrNull()?.message
+                    ?: artistsResult.exceptionOrNull()?.message,
+            )
+            mineLoadedAt = System.currentTimeMillis()
+            persistMine(app, _mine.value)
+            System.err.println(
+                "NETMINE created=${_mine.value.created.size} saved=${saved.size} artists=${artists.size} " +
+                    "err=${_mine.value.error}",
+            )
+        }
+    }
+
+    private fun persistMine(context: Context, data: MineData) {
+        runCatching {
+            File(context.filesDir, MINE_FILE).writeTextAtomically(
+                LibrarySyncProtocol.json.encodeToString(
+                    MineCache(created = data.created, saved = data.saved, artists = data.artists),
+                ),
+            )
+        }
+    }
+
+    /** 统一的流式曲目物化：失败的单条直接跳过，不影响整块。 */
+    private fun materializeEntries(entries: List<NeteaseEntryPayload>): List<LibraryTrack> =
+        entries.mapNotNull { song ->
+            runCatching {
+                materializeStreamingTrack(
+                    NeteaseEntryRecord(
+                        songId = song.songId,
+                        title = song.title,
+                        artists = song.artists,
+                        album = song.album,
+                        durationMs = song.durationMs,
+                        coverUrl = song.coverUrl,
+                        albumId = song.albumId,
+                        artistIds = song.artistIds,
+                    ),
+                )
+            }.getOrNull()
+        }
+
+    /** 歌单封面按缓存顺序逐个补齐，避免一次并发几十个下载。 */
+    private suspend fun fillCovers(app: Context, cookie: String?, playlists: List<DiscoverPlaylist>) {
+        playlists.distinctBy { it.coverUrl }.forEach { playlist ->
+            if (playlist.coverPath != null || playlist.coverUrl.isBlank()) return@forEach
+            val file = NeteaseImageStore.ensure(app, playlist.coverUrl, cookie).await() ?: return@forEach
+            val path = file.absolutePath
+            _discover.update { data ->
+                data.copy(
+                    rankings = data.rankings.withCover(playlist.id, path),
+                    curated = data.curated.withCover(playlist.id, path),
+                )
+            }
+            _homeFeed.update { data ->
+                data.copy(recommended = data.recommended.withCover(playlist.id, path))
+            }
+        }
+    }
+
+    private fun List<DiscoverPlaylist>.withCover(id: String, path: String): List<DiscoverPlaylist> =
+        map { if (it.id == id && it.coverPath == null) it.copy(coverPath = path) else it }
 
     private fun buildStreamingTrack(entry: NeteaseEntryRecord, cover: File?): LibraryTrack {
         val albumTitle = entry.album.ifBlank { "未知专辑" }
@@ -748,6 +1452,12 @@ internal object NeteaseRepository {
                 JsonArray(artistNames.map { name -> buildJsonObject { put("id", artistIdFor(name)); put("name", name) } }),
             )
             put("album", buildJsonObject { put("id", albumId); put("title", albumTitle) })
+            // 网易云实体 ID：歌曲菜单“前往专辑/歌手”据此打开在线页。
+            if (entry.albumId > 0) put("neteaseAlbumId", entry.albumId)
+            if (entry.artistIds.isNotEmpty()) {
+                put("neteaseArtistId", entry.artistIds.first())
+                put("neteaseArtistIds", JsonArray(entry.artistIds.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            }
             // 保留封面地址：封面缓存补齐后可以直接回填，重进列表时无需再查接口。
             if (entry.coverUrl.isNotBlank()) put("coverUrl", entry.coverUrl)
         }.toString()
@@ -772,6 +1482,7 @@ internal object NeteaseRepository {
     private const val RADAR_ID = "dynamic:radar"
     private const val LIKED_ID = "dynamic:liked"
     private const val SNAPSHOT_PREFIX = "snapshot:"
+    private const val DISCOVER_TTL_MS = 10 * 60 * 1000L
 
     private val _activePlaylists = MutableStateFlow(emptyList<NeteasePlaylistRecord>())
     /** 持久化歌单 + 动态歌单（每日推荐/雷达/我喜欢的音乐），详情页共用。 */
@@ -785,6 +1496,18 @@ internal object NeteaseRepository {
         _playlists.value.firstOrNull { it.id == id }
 
     fun isDynamic(id: String): Boolean = id == DAILY_ID || id == RADAR_ID || id == LIKED_ID
+
+    fun isDownloadsPage(id: String): Boolean = id == DOWNLOADS_ID
+
+    /** 是否值得“每次打开都刷新”的实时雷达（8 个固定 ID / 首页私人雷达；日期快照不算）。 */
+    fun isRadarPlaylist(record: NeteasePlaylistRecord): Boolean {
+        if (record.id.startsWith(SNAPSHOT_PREFIX)) return false
+        if (record.name.contains("私人雷达")) return true
+        if (record.id == RADAR_ID) return true
+        if (RadarCatalog.any { it.first == record.id }) return true
+        val sourceId = NeteaseClient.playlistIdFrom(record.sourceUrl) ?: return false
+        return RadarCatalog.any { it.first == sourceId }
+    }
 
     private fun updateRecord(record: NeteasePlaylistRecord) {
         _playlists.value = _playlists.value.map { if (it.id == record.id) record else it }
@@ -858,6 +1581,7 @@ internal object NeteaseRepository {
             dynamicKind = "liked",
             sourceUrl = "https://music.163.com/playlist?id=${summary.id}",
             remoteTrackCount = summary.trackCount,
+            description = summary.description.ifBlank { previous?.description.orEmpty() },
         )
         _playlists.value = _playlists.value.filterNot { it.id == LIKED_ID } + record
         publishActive()
@@ -868,13 +1592,34 @@ internal object NeteaseRepository {
     private fun persistLiked(context: Context) {
         val record = _playlists.value.firstOrNull { it.id == LIKED_ID } ?: return
         runCatching {
-            File(context.filesDir, LIKED_FILE).writeText(
+            File(context.filesDir, LIKED_FILE).writeTextAtomically(
                 LibrarySyncProtocol.json.encodeToString(record),
             )
         }
     }
 
     private const val RECO_PREFIX = "dynamic:rec:"
+    private const val ARTIST_PAGE_PREFIX = "artist:"
+    private const val ALBUM_PAGE_PREFIX = "album:"
+    private const val DOWNLOADS_ID = "dynamic:downloads"
+
+    /** 在线歌手页：复用播放列表界面，先占位进入，页内再拉热门歌曲。 */
+    fun stageArtistPage(artistId: Long, name: String, coverUrl: String = "") {
+        if (artistId <= 0) return
+        System.err.println("NETENTITY artist=$artistId name=$name")
+        val id = "$ARTIST_PAGE_PREFIX$artistId"
+        stagePlaylist(id, name.ifBlank { "歌手" }, coverUrl, null, 0, dynamicKind = "artist")
+        select(id)
+    }
+
+    /** 在线专辑页：同样复用播放列表界面。 */
+    fun stageAlbumPage(albumId: Long, name: String, coverUrl: String = "") {
+        if (albumId <= 0) return
+        System.err.println("NETENTITY album=$albumId name=$name")
+        val id = "$ALBUM_PAGE_PREFIX$albumId"
+        stagePlaylist(id, name.ifBlank { "专辑" }, coverUrl, null, 0, dynamicKind = "album")
+        select(id)
+    }
 
     /** 启动时更新一次雷达卡片元数据（只取摘要，不拉歌曲）。 */
     suspend fun refreshRadarSummaries(context: Context) = withContext(Dispatchers.IO) {
@@ -895,6 +1640,8 @@ internal object NeteaseRepository {
                             previous[id]?.coverPath
                         },
                         trackCount = summary?.trackCount?.takeIf { it > 0 } ?: previous[id]?.trackCount ?: 0,
+                        description = summary?.description?.takeIf { it.isNotBlank() }
+                            ?: previous[id]?.description.orEmpty(),
                     )
                 }
             }.map { it.await() }
@@ -924,7 +1671,7 @@ internal object NeteaseRepository {
 
     private fun persistRadars(context: Context) {
         runCatching {
-            File(context.filesDir, RADAR_FILE).writeText(
+            File(context.filesDir, RADAR_FILE).writeTextAtomically(
                 LibrarySyncProtocol.json.encodeToString(_radars.value),
             )
         }
@@ -954,6 +1701,8 @@ internal object NeteaseRepository {
         ioScope.launch { prefetchRoamPreview(context) }
         // 雷达歌单：启动更新一次元数据。
         ioScope.launch { refreshRadarSummaries(context) }
+        // 首页动态分区（曲风精选/歌曲推荐/艺人新动向/推荐歌单）：启动后台加载。
+        ioScope.launch { loadHomeFeed() }
         System.err.println(
             "NETHOME loaded daily=${playlistById(DAILY_ID)?.entries?.size} " +
                 "radar=${playlistById(RADAR_ID)?.entries?.size} liked=${playlistById(LIKED_ID)?.entries?.size} errors=$errors",
@@ -989,6 +1738,42 @@ internal object NeteaseRepository {
                 playlistId == DAILY_ID -> loadDaily(context, force = true).map { }
                 playlistId == RADAR_ID -> loadRadar(context, force = true).map { }
                 playlistId == LIKED_ID -> loadLiked(context, force = true).map { }
+                playlistId.startsWith(ARTIST_PAGE_PREFIX) -> runCatching {
+                    val artistId = playlistId.removePrefix(ARTIST_PAGE_PREFIX).toLongOrNull()
+                        ?: error("歌手 ID 无效")
+                    val entries = NeteaseClient.fetchArtistTopSongs(artistId.toString(), cookie(context)).getOrThrow()
+                    val cover = entries.firstOrNull()?.coverUrl.orEmpty()
+                    applyPayload(
+                        context,
+                        playlistId,
+                        NeteasePlaylistPayload(
+                            id = playlistId,
+                            name = existing.name,
+                            coverUrl = cover.ifBlank { existing.coverUrl },
+                            entries = entries,
+                        ),
+                        dynamicKind = "artist",
+                        addedToPlaylists = false,
+                        awaitCovers = false,
+                    )
+                    ioScope.launch { ensureEntryCovers(context, playlistId) }
+                    Unit
+                }
+                playlistId.startsWith(ALBUM_PAGE_PREFIX) -> runCatching {
+                    val albumId = playlistId.removePrefix(ALBUM_PAGE_PREFIX).toLongOrNull()
+                        ?: error("专辑 ID 无效")
+                    val payload = NeteaseClient.fetchAlbumDetail(albumId, cookie(context)).getOrThrow()
+                    applyPayload(
+                        context,
+                        playlistId,
+                        payload.copy(name = existing.name.ifBlank { payload.name }),
+                        dynamicKind = "album",
+                        addedToPlaylists = false,
+                        awaitCovers = false,
+                    )
+                    ioScope.launch { ensureEntryCovers(context, playlistId) }
+                    Unit
+                }
                 playlistId.startsWith(RECO_PREFIX) -> runCatching {
                     val sourceId = playlistId.removePrefix(RECO_PREFIX)
                     val payload = NeteaseClient.fetchPlaylist(sourceId, cookie(context)).getOrThrow()
@@ -1032,9 +1817,10 @@ internal object NeteaseRepository {
                 album = entry.album,
                 durationMs = entry.durationMs,
                 coverUrl = entry.coverUrl,
+                albumId = entry.albumId,
+                artistIds = entry.artistIds,
             )
         }
-        val matched = rematchLibrary(entries, emptyList())
         return NeteasePlaylistRecord(
             id = id,
             name = payload.name.ifBlank { if (id == DAILY_ID) "每日推荐" else "私人雷达" },
@@ -1042,7 +1828,7 @@ internal object NeteaseRepository {
             importedAt = Instant.now().toString(),
             addedToPlaylists = false,
             coverPath = downloadPlaylistCover(context, id.replace(':', '_'), payload.coverUrl),
-            entries = matched,
+            entries = entries,
         )
     }
 
@@ -1194,8 +1980,19 @@ internal object NeteaseRepository {
                 _heartbeatPreview.value = preview.copy(trackIds = emptyList())
                 // 没有可用的当前歌曲（本地歌/没在播）时，用红心歌单最新添加的一首当种子。
                 val seed = seedSongId ?: likedNewestSongId(context) ?: error("没有可用的种子歌曲")
-                val entry = fetchNextHeartbeat(context, seed, startSongId = seed) ?: error("心动模式暂时没有推荐")
-                entryTrack(entry).id
+                // 当前种子拿不到推荐时，依次回退到红心最新、每日推荐第一首，避免官方有推荐我们却没有。
+                var entry = fetchNextHeartbeat(context, seed, startSongId = seed)
+                if (entry == null) {
+                    val likedSeed = likedNewestSongId(context)?.takeIf { it != seed }
+                    if (likedSeed != null) entry = fetchNextHeartbeat(context, likedSeed, startSongId = likedSeed)
+                }
+                if (entry == null) {
+                    val dailySeed = playlistById(DAILY_ID)?.entries?.firstOrNull()?.songId
+                        ?.takeIf { it != seed }
+                    if (dailySeed != null) entry = fetchNextHeartbeat(context, dailySeed, startSongId = dailySeed)
+                }
+                val resolved = entry ?: error("心动模式暂时没有推荐")
+                entryTrack(resolved).id
             }.onFailure { _heartbeatEnabled.value = false }
         }
 
@@ -1225,15 +2022,29 @@ internal object NeteaseRepository {
     }
 
     private suspend fun fetchNextHeartbeat(context: Context, seed: Long, startSongId: Long): NeteaseEntryRecord? {
-        val sourcePlaylistId = heartbeatPlaylistId(context, seed)
-        val list = NeteaseClient.fetchHeartbeatNext(seed, startSongId, sourcePlaylistId, cookie(context))
-            .onFailure { System.err.println("NETHB repository failed: ${it.message}") }
-            .getOrNull()
-            .orEmpty()
+        val primaryPid = heartbeatPlaylistId(context, seed)
+        val fallbackPid = cachedHeartbeatPlaylistId?.takeIf { it != primaryPid }
+            ?: NeteaseClient.fetchLikedPlaylistId(cookie(context)).getOrNull()
+                ?.takeIf { it != primaryPid }
+                ?.also { cachedHeartbeatPlaylistId = it }
+        val pids = listOfNotNull(primaryPid, fallbackPid).ifEmpty { listOf(null) }
+        var list: List<NeteaseEntryPayload> = emptyList()
+        for (round in 0 until 2) {
+            for (pid in pids) {
+                list = NeteaseClient.fetchHeartbeatNext(seed, startSongId, pid, cookie(context), count = 10)
+                    .onFailure { System.err.println("NETHB repository failed pid=$pid: ${it.message}") }
+                    .getOrNull()
+                    .orEmpty()
+                if (list.isNotEmpty()) break
+            }
+            if (list.isNotEmpty()) break
+            delay(300)
+        }
         val entry = list.firstOrNull { payload ->
             payload.songId !in recentHeartbeatIds &&
                 AndroidSyncRuntime.syncStore.trackForPlayback("netease:${payload.songId}") == null
         } ?: list.firstOrNull { it.songId !in recentHeartbeatIds }
+            ?: list.firstOrNull()
         if (entry == null) return null
         lastHeartbeatSongId = entry.songId
         recentHeartbeatIds.addLast(entry.songId)
@@ -1278,73 +2089,246 @@ internal object NeteaseRepository {
         return liked?.takeIf(::isSupportedHeartbeatPid)
     }
 
-    /** 播放曲目对应的网易云歌曲 ID（用于歌词等按 ID 查询）。 */
-    fun songIdForTrack(trackId: String): Long? {
-        if (trackId.startsWith("netease:")) return trackId.removePrefix("netease:").toLongOrNull()
+    /** 播放曲目对应的网易云歌曲 ID（用于歌词等按 ID 查询）；仅网易云自己的曲目有映射。 */
+    fun songIdForTrack(trackId: String): Long? =
+        if (trackId.startsWith("netease:")) trackId.removePrefix("netease:").toLongOrNull() else null
+
+    /** 当前播放曲目需要文件封面时按需补一张，不随整单队列批量下载。 */
+    fun ensurePlaybackCover(trackId: String) {
+        val app = appContext ?: return
+        val songId = songIdForTrack(trackId) ?: return
+        val cached = NeteaseCoverStore.cached(app, songId)
+        if (cached != null) {
+            // 文件已在盘上但队列条目还没带上封面（预取过的曲目）：直接回写，播放器立刻能显示。
+            val track = AndroidSyncRuntime.syncStore.trackForPlayback(trackId) ?: return
+            if (track.artworkPath != cached.absolutePath) {
+                queueCoverUpdate(track.copy(artworkPath = cached.absolutePath))
+            }
+            return
+        }
+        val track = AndroidSyncRuntime.syncStore.trackForPlayback(trackId) ?: return
+        val coverUrl = coverUrlForTrackId(trackId, songId) ?: return
+        scheduleCover(
+            NeteaseEntryRecord(
+                songId = songId,
+                title = track.title,
+                artists = track.artists,
+                album = track.album,
+                coverUrl = coverUrl,
+            ),
+        )
+    }
+
+    /** 播放页封面信息：URL 给 Coil 直接取图（与列表共用缓存），key 用于判断 600/1600 是否同一首。 */
+    data class PlaybackCoverInfo(val url: String?, val key: String)
+
+    suspend fun playbackCoverInfo(trackId: String): PlaybackCoverInfo = withContext(Dispatchers.IO) {
+        val songId = songIdForTrack(trackId)
+        PlaybackCoverInfo(
+            url = songId?.let { coverUrlForTrackId(trackId, it) },
+            key = songId?.let { "netease:$it" } ?: trackId,
+        )
+    }
+
+    /** 曲目的网易云封面地址：先看曲目元数据，再回查歌单条目（本地匹配曲目）。 */
+    private fun coverUrlForTrackId(trackId: String, songId: Long): String? =
+        AndroidSyncRuntime.syncStore.trackForPlayback(trackId)?.let(::coverUrlForTrack)
+            ?: activePlaylists.value.asSequence()
+                .flatMap { it.entries.asSequence() }
+                .firstOrNull { it.songId == songId }
+                ?.coverUrl
+                ?.takeIf { it.isNotBlank() }
+
+    /** 用户明确点过下载的网易云歌曲（本地文件，不是流缓存）。 */
+    fun isExplicitlyDownloaded(track: LibraryTrack): Boolean =
+        track.id.startsWith("netease:") &&
+            track.audioPath?.let { path -> !path.startsWith("netease://") && File(path).isFile } == true
+
+    fun downloadedTracks(): List<LibraryTrack> =
+        AndroidSyncRuntime.syncStore.tracks.value
+            .filter(::isExplicitlyDownloaded)
+            .sortedByDescending { it.updatedAt }
+
+    /** “已下载的音乐”复用播放列表页：把下载曲目映射成临时歌单，不写盘、不进播放列表。 */
+    fun stageDownloadsPage(name: String) {
+        val tracks = downloadedTracks()
+        if (tracks.isEmpty()) return
+        val entries = tracks.mapNotNull { track ->
+            val songId = track.id.removePrefix("netease:").toLongOrNull() ?: return@mapNotNull null
+            NeteaseEntryRecord(
+                songId = songId,
+                title = track.title,
+                artists = track.artists,
+                album = track.album,
+                coverUrl = coverUrlForTrack(track).orEmpty(),
+                coverPath = track.artworkPath,
+                downloadedFile = track.audioPath,
+                albumId = neteaseAlbumIdForTrack(track) ?: 0L,
+                artistIds = listOfNotNull(neteaseArtistIdForTrack(track)),
+            )
+        }
+        if (entries.isEmpty()) return
+        val record = NeteasePlaylistRecord(
+            id = DOWNLOADS_ID,
+            name = name,
+            coverUrl = "",
+            coverPath = entries.firstOrNull()?.coverPath,
+            importedAt = Instant.now().toString(),
+            addedToPlaylists = false,
+            dynamicKind = "downloads",
+            entries = entries,
+        )
+        _playlists.value = _playlists.value.filterNot { it.id == DOWNLOADS_ID } + record
+        publishActive()
+        select(DOWNLOADS_ID)
+    }
+
+    /** 删除一首已下载的网易云歌曲：移除导入曲目与本地文件，并把歌单条目改回未下载。 */
+    suspend fun deleteDownload(context: Context, trackId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val songId = trackId.removePrefix("netease:").toLongOrNull()
+                ?: error("不是网易云曲目")
+            val store = AndroidSyncRuntime.syncStore
+            val track = store.trackForPlayback(trackId) ?: error("曲目不存在")
+            track.audioPath
+                ?.takeIf { !it.startsWith("netease://") }
+                ?.let(::File)
+                ?.delete()
+            store.setImportedTracks(store.importedTracksSnapshot().filterNot { it.id == trackId })
+            _playlists.value = _playlists.value.map { playlist ->
+                if (playlist.id == DOWNLOADS_ID) {
+                    playlist.copy(entries = playlist.entries.filterNot { it.songId == songId })
+                } else {
+                    playlist.copy(
+                        entries = playlist.entries.map { entry ->
+                            if (entry.songId == songId) entry.copy(downloadedFile = null, downloadFormat = null) else entry
+                        },
+                    )
+                }
+            }
+            publishActive()
+            persistNow(context)
+            Unit
+        }.onFailure { System.err.println("NETDELETE download track=$trackId err=${it.message}") }
+    }
+
+    /** 曲目可用的远端封面地址（供图片加载器直接按尺寸请求）。 */
+    fun coverUrlForTrack(track: LibraryTrack): String? =
+        track.metadataObject()?.get("coverUrl")
+            ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?.takeIf { it.isNotBlank() }
+
+    /** 全屏播放器用的高清封面：命中缓存时直接返回路径。 */
+    fun cachedHiResCover(trackId: String): String? {
+        val app = appContext ?: return null
+        val songId = songIdForTrack(trackId) ?: return null
+        return NeteaseHiResCoverStore.cached(app, songId)?.absolutePath
+    }
+
+    /** 打开全屏播放器时按需补一张 1600² 封面；失败返回 null，界面继续用 600² 图。 */
+    suspend fun ensureHiResCover(trackId: String): String? = withContext(Dispatchers.IO) {
+        val app = appContext ?: return@withContext null
+        val songId = songIdForTrack(trackId) ?: return@withContext null
+        val cached = NeteaseHiResCoverStore.cached(app, songId)
+        if (cached != null) return@withContext cached.absolutePath
+        val coverUrl = coverUrlForTrackId(trackId, songId) ?: return@withContext null
+        NeteaseHiResCoverStore.ensure(app, songId, coverUrl, cookie(app))?.absolutePath
+    }
+
+    /** 曲目关联的网易云专辑 ID（有则菜单可进在线专辑页）。 */
+    fun neteaseAlbumIdForTrack(track: LibraryTrack): Long? {
+        track.metadataObject()?.get("neteaseAlbumId")
+            ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?.toLongOrNull()
+            ?.let { return it }
+        // 匹配到本地的曲目本身没有网络元数据：按 songId 回查歌单条目。
+        val songId = songIdForTrack(track.id) ?: return null
         activePlaylists.value.forEach { playlist ->
-            playlist.entries.firstOrNull { it.matchedTrackId == trackId }?.let { return it.songId }
+            playlist.entries.firstOrNull { it.songId == songId && it.albumId > 0 }?.let { return it.albumId }
         }
         return null
     }
 
-    /** 该歌单当前可加入播放队列的曲目（已匹配本地或已下载）。 */
+    /** 曲目关联的第一个网易云歌手 ID（含本地匹配曲目的回查）。 */
+    fun neteaseArtistIdForTrack(track: LibraryTrack): Long? {
+        track.metadataObject()?.get("neteaseArtistId")
+            ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?.toLongOrNull()
+            ?.let { return it }
+        val songId = songIdForTrack(track.id) ?: return null
+        activePlaylists.value.forEach { playlist ->
+            playlist.entries.firstOrNull { it.songId == songId && it.artistIds.isNotEmpty() }
+                ?.let { return it.artistIds.first() }
+        }
+        return null
+    }
+
+    /** 该歌单当前可加入播放队列的曲目（已匹配本地或已下载）。结果按歌单条目缓存，避免组合期重复全量遍历。 */
+    private data class PlayableIdsCache(val entries: List<NeteaseEntryRecord>, val ids: List<String>)
+    private val playableIdsCache = ConcurrentHashMap<String, PlayableIdsCache>()
+
     fun playableTrackIds(playlistId: String): List<String> {
         val playlist = playlistById(playlistId) ?: return emptyList()
-        return playlist.entries.map { entry -> entryTrack(entry).id }.distinct()
+        playableIdsCache[playlistId]?.takeIf { it.entries === playlist.entries }?.let { return it.ids }
+        val ids = playlist.entries.map { entry -> entryTrack(entry, ensureCover = false).id }.distinct()
+        playableIdsCache[playlistId] = PlayableIdsCache(playlist.entries, ids)
+        return ids
     }
 
-    /** 一键下载歌单里所有未匹配本地、未下载的歌；下载就是本地保存，不再需要转存。 */
-    suspend fun downloadAll(context: Context, playlistId: String) = withContext(Dispatchers.IO) {
-        val playlist = playlistById(playlistId) ?: return@withContext
-        val libraryIds = AndroidSyncRuntime.syncStore.tracks.value.mapTo(mutableSetOf()) { it.id }
-        val pending = playlist.entries.filter { entry ->
-            entry.matchedTrackId !in libraryIds && entry.downloadedFile?.let(::File)?.isFile != true
+    /** 一键下载歌单里尚未下载的歌；下载就是本地保存，不再需要转存。 */
+    suspend fun downloadAll(context: Context, playlistId: String): DownloadAllResult =
+        withContext(Dispatchers.IO) {
+            val playlist = playlistById(playlistId) ?: return@withContext DownloadAllResult(0, 0)
+            val pending = playlist.entries.filter { entry ->
+                entry.downloadedFile?.let(::File)?.isFile != true
+            }
+            if (pending.isEmpty()) return@withContext DownloadAllResult(0, 0)
+            _downloadProgress.update { it + (playlistId to (0 to pending.size)) }
+            var done = 0
+            var succeeded = 0
+            for (entry in pending) {
+                if (runCatching { ensureDownloaded(context, playlistId, entry.songId) }.isSuccess) succeeded++
+                done++
+                _downloadProgress.update { it + (playlistId to (done to pending.size)) }
+            }
+            _downloadProgress.update { it - playlistId }
+            DownloadAllResult(total = pending.size, succeeded = succeeded)
         }
-        if (pending.isEmpty()) return@withContext
-        _downloadProgress.update { it + (playlistId to (0 to pending.size)) }
-        var done = 0
-        for (entry in pending) {
-            runCatching { ensureDownloaded(context, playlistId, entry.songId) }
-            done++
-            _downloadProgress.update { it + (playlistId to (done to pending.size)) }
-        }
-        _downloadProgress.update { it - playlistId }
-    }
 
     /** 导入后按需补齐每首歌的封面（限制并发，失败忽略，不阻塞界面）。 */
-    private suspend fun ensureEntryCovers(context: Context, playlistId: String) {
-        val dir = File(context.filesDir, "netease-covers").apply { mkdirs() }
+    private suspend fun ensureEntryCovers(context: Context, playlistId: String, limit: Int = 20) {
         val playlist = _playlists.value.firstOrNull { it.id == playlistId } ?: return
         val pending = playlist.entries.filter { entry ->
             entry.coverPath?.let { File(it).isFile } != true && entry.coverUrl.isNotBlank()
-        }
+        }.take(limit)
         if (pending.isEmpty()) return
-        var done = 0
-        pending.chunked(4).forEach { chunk ->
-            kotlinx.coroutines.coroutineScope {
-                chunk.forEach { entry ->
-                    launch {
-                        val target = File(dir, "${entry.songId}.jpg")
-                        if (!(target.isFile && target.length() > 0)) {
-                            NeteaseClient.download(entry.coverUrl, cookie(context), target)
-                        }
-                        if (target.isFile && target.length() > 0) {
-                            synchronized(this@NeteaseRepository) {
-                                val current = playlistById(playlistId) ?: return@synchronized
-                                updateRecord(current.copy(
-                                    entries = current.entries.map {
-                                        if (it.songId == entry.songId) it.copy(coverPath = target.absolutePath) else it
-                                    },
-                                ))
-                            }
-                        }
+        pending.chunked(4).forEachIndexed { index, chunk ->
+            // 统一走 NeteaseCoverStore：同一首歌的封面下载不会和播放器补图互相覆盖。
+            val resolved = kotlinx.coroutines.coroutineScope {
+                chunk.map { entry ->
+                    async {
+                        entry.songId to NeteaseCoverStore
+                            .ensure(context, entry.songId, entry.coverUrl, cookie(context))
+                            .await()
+                            ?.absolutePath
                     }
-                }
+                }.awaitAll()
             }
-            done += chunk.size
-            if (done % 8 == 0) appContext?.let(::persist)
+            val paths = resolved.filter { it.second != null }.associate { it.first to it.second!! }
+            if (paths.isEmpty()) return@forEachIndexed
+            synchronized(this@NeteaseRepository) {
+                val current = playlistById(playlistId) ?: return@synchronized
+                updateRecord(
+                    current.copy(
+                        entries = current.entries.map { entry ->
+                            paths[entry.songId]?.let { entry.copy(coverPath = it) } ?: entry
+                        },
+                    ),
+                )
+            }
         }
-        appContext?.let(::persist)
+        // 单写者会合并多次请求：这里只需在结束时投递一次最新快照。
+        persistSoon()
     }
 
     private suspend fun downloadCover(context: Context, dir: File, entry: NeteaseEntryRecord): File? {
@@ -1374,6 +2358,12 @@ internal object NeteaseRepository {
                 JsonArray(artistNames.map { name -> buildJsonObject { put("id", artistIdFor(name)); put("name", name) } }),
             )
             put("album", buildJsonObject { put("id", albumId); put("title", albumTitle) })
+            // 网易云实体 ID：歌曲菜单“前往专辑/歌手”据此打开在线页。
+            if (entry.albumId > 0) put("neteaseAlbumId", entry.albumId)
+            if (entry.artistIds.isNotEmpty()) {
+                put("neteaseArtistId", entry.artistIds.first())
+                put("neteaseArtistIds", JsonArray(entry.artistIds.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            }
             // 保留封面地址：封面缓存补齐后可以直接回填，重进列表时无需再查接口。
             if (entry.coverUrl.isNotBlank()) put("coverUrl", entry.coverUrl)
         }.toString()
@@ -1394,54 +2384,44 @@ internal object NeteaseRepository {
         )
     }
 
-    /** 只持久化“已加入播放列表”的歌单；暂存区的歌单随进程退出消失。 */
-    private fun persist(context: Context) {
-        synchronized(this) {
-            runCatching {
-                File(context.filesDir, PLAYLIST_FILE).writeText(
-                    LibrarySyncProtocol.json.encodeToString(_playlists.value.filter { it.addedToPlaylists }),
-                )
-            }
+    /** 只持久化“已加入播放列表”的歌单；我的页缓存歌单写单独文件，随进程退出保留。 */
+    private fun snapshotForPersist(): PersistSnapshot {
+        val all = _playlists.value
+        return PersistSnapshot(
+            version = persistVersion.incrementAndGet(),
+            added = all.filter { it.addedToPlaylists },
+            cached = all.filter { it.persistCache && !it.addedToPlaylists },
+        )
+    }
+
+    /** 后台落盘：合并多次请求，只写最新快照；调用线程不碰磁盘。 */
+    private fun persistSoon() {
+        pendingPersist.set(snapshotForPersist())
+        persistRequests.trySend(Unit)
+    }
+
+    /** 用户动作落盘：等到真正写完再返回，失败仍由内部 runCatching 兜住。 */
+    private suspend fun persistNow(context: Context) {
+        diskLoaded.await()
+        val snapshot = snapshotForPersist()
+        withContext(Dispatchers.IO) {
+            persistMutex.withLock { writePersist(context.applicationContext, snapshot) }
         }
     }
-}
 
-/** 标题去掉括号版后缀与标点，用于与本地曲库匹配。 */
-private val NeteaseBracketRegex = Regex("""[（(\[【].*?[)）\]】]""")
-private val NeteasePunctRegex = Regex("""[\s\-_/.,，。'’!！?？:：]""")
-
-internal fun normalizeNeteaseMatch(text: String): String = text.lowercase()
-    .replace(NeteaseBracketRegex, "")
-    .replace(NeteasePunctRegex, "")
-
-internal fun bestMatch(entry: NeteaseEntryRecord, tracksByTitle: Map<String, List<LibraryTrack>>): LibraryTrack? {
-    val title = normalizeNeteaseMatch(entry.title)
-    if (title.isBlank()) return null
-    val candidates = tracksByTitle[title].orEmpty()
-    if (candidates.isEmpty()) return null
-    if (entry.durationMs > 0) {
-        val seconds = entry.durationMs / 1000
-        candidates.firstOrNull { track ->
-            val duration = trackDurationSeconds(track)
-            duration != null && kotlin.math.abs(duration - seconds) <= 3
-        }?.let { return it }
+    private fun writePersist(context: Context, snapshot: PersistSnapshot) {
+        // 单写者 + 版本号：更旧的排队快照不会覆盖刚写下的新快照。
+        if (snapshot.version <= persistedVersion.get()) return
+        persistedVersion.set(snapshot.version)
+        runCatching {
+            File(context.filesDir, PLAYLIST_FILE).writeTextAtomically(
+                LibrarySyncProtocol.json.encodeToString(snapshot.added),
+            )
+        }
+        runCatching {
+            File(context.filesDir, CACHE_PLAYLIST_FILE).writeTextAtomically(
+                LibrarySyncProtocol.json.encodeToString(snapshot.cached),
+            )
+        }
     }
-    val artists = entry.artists.split("/", ",", "&")
-        .map { normalizeNeteaseMatch(it) }
-        .filter { it.isNotBlank() }
-    if (artists.isEmpty()) return candidates.first()
-    return candidates.firstOrNull { track ->
-        val trackArtist = normalizeNeteaseMatch(track.artists)
-        artists.any { trackArtist.contains(it) }
-    } ?: candidates.first()
-}
-
-internal fun trackDurationSeconds(track: LibraryTrack): Long? {
-    val metadata = track.metadataObject() ?: return null
-    val seconds = (metadata["duration"] as? kotlinx.serialization.json.JsonPrimitive)
-        ?.contentOrNull?.toDoubleOrNull()?.toLong()
-    if (seconds != null && seconds > 0) return seconds
-    val ms = (metadata["duration_ms"] as? kotlinx.serialization.json.JsonPrimitive)
-        ?.contentOrNull?.toLong()
-    return ms?.takeIf { it > 0 }?.div(1000)
 }

@@ -24,10 +24,18 @@ sealed interface AppIntent {
 
     data class OpenSimilarSongs(val trackId: String) : AppIntent
 
+    /** 在线实体页：复用播放列表界面，压在来源标签栈里。 */
+    data class OpenNeteaseArtist(val artistId: Long, val name: String) : AppIntent
+
+    data class OpenNeteaseAlbum(val albumId: Long, val name: String, val coverUrl: String) : AppIntent
+
     data object NavigateBack : AppIntent
 
     /** 从一级界面右上角进入设置；返回时回到进入前的 tab。 */
     data object OpenSettings : AppIntent
+
+    /** 独立账户页：和设置一样切换 destination，返回时回到进入前的 tab。 */
+    data object OpenAccount : AppIntent
 
     data class SetThemeMode(val themeMode: ThemeMode) : AppIntent
 
@@ -50,6 +58,12 @@ sealed interface AppIntent {
     data class SetShowGenres(val enabled: Boolean) : AppIntent
 
     data class SetShowComposers(val enabled: Boolean) : AppIntent
+
+    /** 点击底栏是否回到该标签上次页面（关闭后直接回一级页）。 */
+    data class SetRememberTabPage(val enabled: Boolean) : AppIntent
+
+    /** 滑动时是否合并底栏与迷你播放条；关闭后两者始终分开，内容底部留白随之增加。 */
+    data class SetMergeBottomBars(val enabled: Boolean) : AppIntent
 
     /** User picked the "Import M3U playlist" action. */
     data object ImportM3u : AppIntent

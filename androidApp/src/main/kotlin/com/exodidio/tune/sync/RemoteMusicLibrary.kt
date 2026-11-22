@@ -1,6 +1,7 @@
 package com.exodidio.tune.sync
 
 import android.content.Context
+import com.exodidio.tune.R
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -94,6 +95,9 @@ object RemoteMusicLibrary {
         val addresses: List<String> = listOf(base),
     )
 
+    /** 电脑地址类型；仅用于 UI 文案与探测超时选择。 */
+    enum class RemoteEndpointKind { Unknown, Lan, Public, Mesh }
+
     /** 设置页用的连接状态快照。 */
     data class RemoteStatus(
         val configured: Boolean = false,
@@ -101,7 +105,7 @@ object RemoteMusicLibrary {
         val busy: Boolean = false,
         val base: String = "",
         val host: String = "",
-        val kind: String = "",
+        val kind: RemoteEndpointKind = RemoteEndpointKind.Unknown,
         val secure: Boolean = false,
         val fingerprint: String = "",
         val addresses: List<String> = emptyList(),
@@ -162,6 +166,9 @@ object RemoteMusicLibrary {
     fun initialize(context: Context) {
         publish(context)
         startNetworkWatch(context)
+        // 资源库音频缓存独立维护：清掉过期半成品并按配额淘汰一次。
+        runCatching { RemoteAudioCache.cleanupPartials(context) }
+        runCatching { RemoteAudioCache.trim(context, force = true) }
     }
 
     fun startNetworkWatch(context: Context) {
@@ -217,7 +224,7 @@ object RemoteMusicLibrary {
             last = result.exceptionOrNull()
             if (index < attempts - 1) delay(delays[minOf(index, delays.size - 1)])
         }
-        return Result.failure(last ?: IllegalStateException("同步失败"))
+        return Result.failure(last ?: IllegalStateException(context.getString(R.string.integration_sync_failed_generic)))
     }
 
     private suspend fun probeBase(base: String, fingerprint: String): Boolean = withContext(Dispatchers.IO) {
@@ -226,8 +233,8 @@ object RemoteMusicLibrary {
             try {
                 applyPinnedTls(connection, fingerprint)
                 val timeout = when (kindOf(base)) {
-                    "局域网" -> 2_000
-                    "组网" -> 4_000
+                    RemoteEndpointKind.Lan -> 2_000
+                    RemoteEndpointKind.Mesh -> 4_000
                     else -> 5_000
                 }
                 connection.connectTimeout = timeout
@@ -334,26 +341,26 @@ object RemoteMusicLibrary {
         publish(context)
     }
 
-    /** 地址类型标签：局域网 / 公网 / 组网。 */
-    fun kindOf(address: String): String {
+    /** 地址类型：局域网 / 公网 / 组网（Tailscale）。文案由 UI 层本地化。 */
+    fun kindOf(address: String): RemoteEndpointKind {
         val host = runCatching { java.net.URI(address).host }.getOrNull()
             ?.removePrefix("[")
             ?.removeSuffix("]")
-            ?: return ""
+            ?: return RemoteEndpointKind.Unknown
         if (host.contains(':')) {
             val lower = host.lowercase()
             val local = lower.startsWith("fc") || lower.startsWith("fd") || lower.startsWith("fe80")
-            return if (local) "局域网" else "公网"
+            return if (local) RemoteEndpointKind.Lan else RemoteEndpointKind.Public
         }
         val tailscale = Regex("""^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.""")
-        return if (tailscale.containsMatchIn(host)) "组网" else "局域网"
+        return if (tailscale.containsMatchIn(host)) RemoteEndpointKind.Mesh else RemoteEndpointKind.Lan
     }
 
     private fun kindRank(address: String): Int = when (kindOf(address)) {
-        "局域网" -> 0
-        "公网" -> 1
-        "组网" -> 2
-        else -> 3
+        RemoteEndpointKind.Lan -> 0
+        RemoteEndpointKind.Public -> 1
+        RemoteEndpointKind.Mesh -> 2
+        RemoteEndpointKind.Unknown -> 3
     }
 
     private fun isSecure(address: String): Boolean = address.startsWith("https://", true)
@@ -377,7 +384,7 @@ object RemoteMusicLibrary {
             busy = busy ?: _status.value.busy,
             base = config?.base.orEmpty(),
             host = config?.host.orEmpty(),
-            kind = config?.base?.let(::kindOf).orEmpty(),
+            kind = config?.base?.let(::kindOf) ?: RemoteEndpointKind.Unknown,
             secure = config?.base?.let(::isSecure) == true,
             fingerprint = config?.fingerprint.orEmpty(),
             addresses = config?.addresses.orEmpty(),
@@ -421,11 +428,11 @@ object RemoteMusicLibrary {
         withContext(Dispatchers.IO) {
             val base = normalizeBase(baseInput)
             val code = codeInput.filter(Char::isDigit)
-            if (base.isBlank()) return@withContext Result.failure(IllegalArgumentException("请输入主机地址"))
-            if (code.length != 6) return@withContext Result.failure(IllegalArgumentException("请输入 6 位配对码"))
+            if (base.isBlank()) return@withContext Result.failure(IllegalArgumentException(context.getString(R.string.integration_pair_missing_host)))
+            if (code.length != 6) return@withContext Result.failure(IllegalArgumentException(context.getString(R.string.integration_pair_missing_code)))
             runCatching {
                 val fingerprint = if (base.startsWith("https://", true)) {
-                    fetchFingerprint(base).ifBlank { error("读取证书指纹失败，请确认主机开着 HTTPS") }
+                    fetchFingerprint(base).ifBlank { error(context.getString(R.string.integration_pair_fingerprint_failed)) }
                 } else {
                     ""
                 }
@@ -444,7 +451,7 @@ object RemoteMusicLibrary {
                     ?.takeIf { it.isNotBlank() }
                     ?: fingerprint
                 if (!ok || token.isBlank()) {
-                    error(root["error"]?.jsonPrimitive?.contentOrNull ?: "配对失败")
+                    error(root["error"]?.jsonPrimitive?.contentOrNull ?: context.getString(R.string.integration_pair_failed))
                 }
                 // 配对响应直接带 HTTP/HTTPS 两套地址，存下来换网时自动切。
                 val addresses = (listOf(base) + collectAddresses(root))
@@ -518,15 +525,15 @@ object RemoteMusicLibrary {
             },
         )
         runCatching {
-            File(context.filesDir, CACHE_FILE).writeText(cacheJson.encodeToString(payload))
+            File(context.filesDir, CACHE_FILE).writeTextAtomically(cacheJson.encodeToString(payload))
         }
     }
 
     /** 拉取电脑曲库并写进本地曲库；封面顺手下载到私有目录。 */
     suspend fun sync(context: Context): Result<Int> = withContext(Dispatchers.IO) {
-        val initial = config(context) ?: return@withContext Result.failure(IllegalStateException("还没有配置电脑音乐库"))
+        val initial = config(context) ?: return@withContext Result.failure(IllegalStateException(context.getString(R.string.integration_not_configured)))
         val config = ensureReachable(context, initial)
-            ?: return@withContext Result.failure(IllegalStateException("电脑连不上：局域网和公网地址都不通"))
+            ?: return@withContext Result.failure(IllegalStateException(context.getString(R.string.integration_all_addresses_unreachable)))
         publish(context, online = true, busy = true, message = "正在同步…")
         val result = runCatching {
             val response = postJsonRetry(
@@ -538,7 +545,7 @@ object RemoteMusicLibrary {
             )
             val root = Json.parseToJsonElement(response).jsonObject
             val ok = root["ok"]?.jsonPrimitive?.booleanOrNull == true
-            if (!ok) error(root["error"]?.jsonPrimitive?.contentOrNull ?: "读取电脑曲库失败")
+            if (!ok) error(root["error"]?.jsonPrimitive?.contentOrNull ?: context.getString(R.string.integration_library_read_failed))
             val tracks = root["result"]?.jsonObject?.get("tracks")?.jsonArray
                 ?: return@runCatching 0
             val artworkDir = File(context.filesDir, "remote-artwork").apply { mkdirs() }
@@ -557,7 +564,7 @@ object RemoteMusicLibrary {
                     val extension = name.substringAfterLast('.', "").lowercase()
                     val lossless = extension in setOf("flac", "alac", "wav", "aiff", "ape", "wv")
                     val artistNames = splitNames(artist)
-                    val albumTitle = album.ifBlank { "未知专辑" }
+                    val albumTitle = album.ifBlank { context.getString(R.string.common_unknown_album) }
                     val albumId = albumIdFor(albumTitle)
                     val genreNames = splitNames(obj.string("genre").orEmpty())
                     val composerNames = splitNames(obj.string("composer").orEmpty())
@@ -624,7 +631,7 @@ object RemoteMusicLibrary {
                     LibraryTrack(
                         id = REMOTE_PREFIX + id,
                         title = displayTitle,
-                        artists = artist.ifBlank { "未知歌手" },
+                        artists = artist.ifBlank { context.getString(R.string.common_unknown_artist) },
                         album = albumTitle,
                         albumId = albumId,
                         artworkKey = null,
@@ -871,43 +878,28 @@ internal fun ensureRemoteAudioFile(
     url: String,
     isStale: () -> Boolean = { false },
 ): String? {
-    val dir = File(context.filesDir, "remote-audio").apply { mkdirs() }
-    val target = remoteAudioCacheTarget(context, url)
-    val key = target.name
-    if (target.isFile && target.length() > 0) return target.absolutePath
+    RemoteAudioCache.cached(context, url)?.let { return it.absolutePath }
     if (isStale()) return null
+    val dir = RemoteAudioCache.dir(context)
+    val target = RemoteAudioCache.target(context, url)
+    val key = target.name
     val lock = downloadLocks.computeIfAbsent(key) { Any() }
     try {
         synchronized(lock) {
-            if (target.isFile && target.length() > 0) return target.absolutePath
+            RemoteAudioCache.cached(context, url)?.let { return it.absolutePath }
             if (isStale()) return null
-            return downloadAudio(url, dir, target, isStale, RemoteMusicLibrary.fingerprint(context))
+            val saved = downloadAudio(url, dir, target, isStale, RemoteMusicLibrary.fingerprint(context))
+            if (saved != null) RemoteAudioCache.trim(context)
+            return saved
         }
     } finally {
         downloadLocks.remove(key, lock)
     }
 }
 
-/** 缓存文件位置；缓存键只取签名路径，换局域网/公网地址后同一首歌不用重新下载。 */
-private fun remoteAudioCacheTarget(context: Context, url: String): File {
-    val path = if (url.startsWith("http", true)) {
-        val rest = url.substringAfter("://", url)
-        val slash = rest.indexOf('/')
-        if (slash >= 0) rest.substring(slash) else rest
-    } else {
-        url
-    }
-    val key = MessageDigest.getInstance("SHA-256").digest(path.toByteArray())
-        .take(10).joinToString("") { "%02x".format(it) }
-    val extension = path.substringBefore('?').substringAfterLast('.', "bin").take(5)
-    return File(File(context.filesDir, "remote-audio"), "$key.$extension")
-}
-
 /** 这首歌是否已经在本地缓存里（不触发下载）。 */
-internal fun remoteAudioCached(context: Context, url: String): Boolean {
-    val target = remoteAudioCacheTarget(context, url)
-    return target.isFile && target.length() > 0
-}
+internal fun remoteAudioCached(context: Context, url: String): Boolean =
+    RemoteAudioCache.cached(context, url) != null
 
 private val downloadLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
 

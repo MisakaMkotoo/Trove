@@ -41,6 +41,7 @@ import com.exodidio.tune.AppDestination
 import com.exodidio.tune.AppDestinationModels
 import com.exodidio.tune.AppIntent
 import com.exodidio.tune.AppStackPage
+import com.exodidio.tune.R
 import com.exodidio.tune.StackPageEntry
 import com.exodidio.tune.settings.PlayerTheme
 import com.exodidio.tune.settings.ThemeMode
@@ -58,7 +59,7 @@ import com.exodidio.tune.ui.screens.InsightUiState
 import com.exodidio.tune.ui.screens.SettingsContent
 import com.exodidio.tune.ui.screens.TabLayoutContent
 import com.exodidio.tune.ui.screens.IntegrationContent
-import com.exodidio.tune.ui.screens.LastFmContent
+import com.exodidio.tune.ui.screens.ServiceStatusContent
 import com.exodidio.tune.ui.screens.LyricsContent
 import com.exodidio.tune.ui.screens.MusicSyncContent
 import com.exodidio.tune.ui.screens.HiddenTracksContent
@@ -70,8 +71,8 @@ import com.exodidio.tune.ui.screens.NeteasePlaylistsContent
 import com.exodidio.tune.ui.screens.PlaybackSettingsContent
 import com.exodidio.tune.ui.screens.VolumeNormalizationContent
 import com.exodidio.tune.ui.screens.SongTransitionContent
+import com.exodidio.tune.ui.screens.LyricsPlaybackSettingsContent
 import com.exodidio.tune.ui.screens.EqualizerContent
-import com.exodidio.tune.lastfm.LastFmStatus
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
 import com.exodidio.tune.ui.screens.LibraryTracksContent
@@ -148,6 +149,8 @@ internal fun AppDestinationContent(
     hazeState: HazeState?,
     navigationBottomPadding: Dp,
     homeListState: LazyListState,
+    discoverListState: LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
+    mineListState: LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
     insightListState: LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
     libraryListState: LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
     tracksListState: LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
@@ -176,12 +179,43 @@ internal fun AppDestinationContent(
     removedTrackIds: Set<String> = emptySet(),
     showGenres: Boolean = false,
     showComposers: Boolean = false,
+    rememberTabPage: Boolean = true,
+    mergeBottomBars: Boolean = true,
     onTracksRemovedFromLibrary: (List<String>) -> Unit = {},
     onAlbumHeroColorChanged: (Color) -> Unit = {},
     onSettingsContentScrolled: (Boolean) -> Unit = {},
     onContentScroll: (ContentScrollDelta) -> Unit = {},
 ) {
     val focusManager = LocalFocusManager.current
+    // 横向滚动状态挂在 AppDestinationContent 上：进详情页返回不丢，进程退出才重置。
+    val neteaseRowStates = androidx.compose.runtime.remember { com.exodidio.tune.ui.screens.NeteaseRowStates() }
+    // 我的二级页也保留滚动位置：只在进程退出时重置。
+    val mineCreatedListState = androidx.compose.runtime.remember { androidx.compose.foundation.lazy.LazyListState() }
+    val mineSavedListState = androidx.compose.runtime.remember { androidx.compose.foundation.lazy.LazyListState() }
+    val mineArtistsListState = androidx.compose.runtime.remember { androidx.compose.foundation.lazy.LazyListState() }
+    val downloadsPageTitle = stringResource(R.string.mine_downloads_title)
+    // “我的”里点歌单/歌手：先占位再进详情，详情页自己后台加载。
+    val openNeteasePlaylist: (com.exodidio.tune.netease.DiscoverPlaylist) -> Unit = { playlist ->
+        if (com.exodidio.tune.netease.NeteaseRepository.playlistById(playlist.id) == null) {
+            com.exodidio.tune.netease.NeteaseRepository.stagePlaylist(
+                playlistId = playlist.id,
+                name = playlist.name,
+                coverUrl = playlist.coverUrl,
+                coverPath = playlist.coverPath,
+                trackCount = playlist.trackCount,
+                cacheToDisk = true,
+            )
+        }
+        com.exodidio.tune.netease.NeteaseRepository.select(playlist.id)
+        onIntent(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails))
+    }
+    val openNeteaseArtist: (com.exodidio.tune.netease.MineArtist) -> Unit = { artist ->
+        val id = artist.id.toLongOrNull()
+        if (id != null) {
+            com.exodidio.tune.netease.NeteaseRepository.stageArtistPage(id, artist.name, artist.coverUrl)
+            onIntent(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails))
+        }
+    }
     val homeUiState = destinations.home.state
     val insightUiState = destinations.insight.state
     val library = destinations.library
@@ -297,14 +331,14 @@ internal fun AppDestinationContent(
     val onArtistTrackContextBottomSheet = onTrackContextBottomSheet
     val onGenreTrackContextBottomSheet = onTrackContextBottomSheet
     val onComposerTrackContextBottomSheet = onTrackContextBottomSheet
-    val lastFmStatus = settings.lastFmStatus
-    val onLastFmConnect = settings.onLastFmConnect
-    val onLastFmDisconnect = settings.onLastFmDisconnect
     val lyricsSettings = settings.lyricsSettings
     val onLrclibChanged = settings.onLrclibChanged
     val onKugouChanged = settings.onKugouChanged
     val onNeteaseChanged = settings.onNeteaseChanged
-    val onRomanizationEnabledChanged = settings.onRomanizationEnabledChanged
+    val lyricSpringStrength = settings.lyricsSettings.lyricSpringStrength
+    val lyricAutoFullscreen = settings.lyricsSettings.lyricAutoFullscreen
+    val onLyricSpringStrengthChanged = settings.onLyricSpringStrengthChanged
+    val onLyricAutoFullscreenChanged = settings.onLyricAutoFullscreenChanged
     val onLyricsSourceChanged = settings.onLyricsSourceChanged
     val crossfadeSeconds = settings.crossfadeSeconds
     val lastEnabledCrossfadeSeconds = settings.lastEnabledCrossfadeSeconds
@@ -363,6 +397,7 @@ internal fun AppDestinationContent(
                 null
             },
             showHeader = false,
+            reserveHeaderSpace = !(page == AppStackPage.Root && (destination == AppDestination.Library || destination == AppDestination.Home || destination == AppDestination.Discover || destination == AppDestination.Mine)),
         ) { modifier, contentPadding ->
             AnimatedContent(
                 targetState = stackPage,
@@ -393,39 +428,172 @@ internal fun AppDestinationContent(
                             detectTapGestures { focusManager.clearFocus() }
                         },
                 ) {
-                    when (currentPage.destination) {
-                        AppDestination.Search -> LibrarySearchContent(
-                            uiState = searchUiState,
+                    // 详情页在任何标签内都可打开：压在来源标签的栈上，返回时原路返回。
+                    when (currentPage.page) {
+                        AppStackPage.AlbumDetails -> AlbumDetailsContent(
+                            uiState = selectedAlbumDetails,
                             contentPadding = contentPadding,
-                            onQueryChange = onSearchQueryChange,
-                            onTrackClick = onSearchTrackClick,
-                            onOnlineModeChange = onSearchOnlineModeChange,
-                            onOnlineSubmit = onSearchOnlineSubmit,
-                            onOnlineTrackPlay = onSearchOnlineTrackPlay,
-                            onOnlinePlaylistClick = onSearchOnlinePlaylistClick,
-                            onAlbumClick = { onIntent(AppIntent.OpenAlbumDetails(it)) },
-                            onArtistClick = { onIntent(AppIntent.OpenArtistDetails(it)) },
-                            onPlaylistClick = { onIntent(AppIntent.OpenPlaylistDetails(it)) },
-                            onComposerClick = { onIntent(AppIntent.OpenComposerDetails(it)) },
+                            modifier = Modifier.fillMaxSize(),
+                            hazeState = hazeState,
+                            reduceTransparency = reduceTransparency,
+                            onHeroColorChanged = onAlbumHeroColorChanged,
+                            onPlay = { selectedAlbumId?.let { onAlbumPlay(it, false) } },
+                            onShuffle = { selectedAlbumId?.let { onAlbumPlay(it, true) } },
+                            onTrackClick = { trackId -> selectedAlbumId?.let { onAlbumTrackPlay(it, trackId) } },
                             playbackQueue = visiblePlaybackQueue,
-                            onTrackPlayNext = { onTrackPlayNext(it.id) },
-                            onTrackAddToQueue = { onTrackAddToQueue(it.id) },
-                            onTrackFavoriteToggle = { track, favorite -> onTrackFavoriteToggle(track.id, favorite) },
-                            onTrackContextBottomSheet = onTrackContextBottomSheet,
+                            onTrackPlayNext = onTrackPlayNext,
+                            onTrackAddToQueue = onTrackAddToQueue,
+                            onTrackFavoriteToggle = onTrackFavoriteToggle,
+                            onTrackArtistClick = { artist -> onIntent(AppIntent.OpenArtistDetails(artist.id)) },
                             onAlbumPlayNext = onAlbumPlayNext,
                             onAlbumAddToQueue = onAlbumAddToQueue,
                             onAlbumAddToFavorites = onAlbumAddToFavorites,
+                            onTrackContextBottomSheet = onTrackContextBottomSheet,
                         )
-                        AppDestination.Discover -> DiscoverContent(
+                        AppStackPage.ArtistDetails -> ArtistDetailsContent(
+                            uiState = selectedArtistDetails,
+                            listState = artistDetailsListState,
+                            contentPadding = contentPadding,
+                            modifier = Modifier.fillMaxSize(),
+                            hazeState = hazeState,
+                            reduceTransparency = reduceTransparency,
+                            onHeroColorChanged = onAlbumHeroColorChanged,
+                            onPlay = { selectedArtistId?.let { onArtistPlay(it, false) } },
+                            onShuffle = { selectedArtistId?.let { onArtistPlay(it, true) } },
+                            onPlayNext = onArtistPlayNext,
+                            onAddToQueue = onArtistAddToQueue,
+                            onArtistUpdate = onArtistUpdate,
+                            onTrackContextBottomSheet = onArtistTrackContextBottomSheet,
+                            onAlbumClick = { album -> onIntent(AppIntent.OpenAlbumDetails(album.id)) },
+                            playbackQueue = visiblePlaybackQueue,
+                        )
+                        AppStackPage.GenreDetails -> GenreDetailsContent(
+                            uiState = selectedGenreDetails,
+                            listState = genreDetailsListState,
+                            contentPadding = contentPadding,
+                            modifier = Modifier.fillMaxSize(),
+                            hazeState = hazeState,
+                            reduceTransparency = reduceTransparency,
+                            onHeroColorChanged = onAlbumHeroColorChanged,
+                            onPlay = { selectedGenreId?.let { onGenrePlay(it, false) } },
+                            onShuffle = { selectedGenreId?.let { onGenrePlay(it, true) } },
+                            onPlayNext = onGenrePlayNext,
+                            onAddToQueue = onGenreAddToQueue,
+                            onTrackContextBottomSheet = onGenreTrackContextBottomSheet,
+                            onAlbumClick = { album -> onIntent(AppIntent.OpenAlbumDetails(album.id)) },
+                            playbackQueue = visiblePlaybackQueue,
+                        )
+                        AppStackPage.ComposerDetails -> ComposerDetailsContent(
+                            uiState = selectedComposerDetails,
+                            listState = composerDetailsListState,
+                            contentPadding = contentPadding,
+                            modifier = Modifier.fillMaxSize(),
+                            hazeState = hazeState,
+                            reduceTransparency = reduceTransparency,
+                            onHeroColorChanged = onAlbumHeroColorChanged,
+                            onPlay = { selectedComposerId?.let { onComposerPlay(it, false) } },
+                            onShuffle = { selectedComposerId?.let { onComposerPlay(it, true) } },
+                            onPlayNext = onComposerPlayNext,
+                            onAddToQueue = onComposerAddToQueue,
+                            onTrackContextBottomSheet = onComposerTrackContextBottomSheet,
+                            onAlbumClick = { album -> onIntent(AppIntent.OpenAlbumDetails(album.id)) },
+                            playbackQueue = visiblePlaybackQueue,
+                        )
+                        AppStackPage.PlaylistDetails -> PlaylistDetailsContent(
+                            uiState = selectedPlaylistDetails,
+                            contentPadding = contentPadding,
+                            modifier = Modifier.fillMaxSize(),
+                            hazeState = hazeState,
+                            reduceTransparency = reduceTransparency,
+                            onHeroColorChanged = onAlbumHeroColorChanged,
+                            onPlay = { selectedPlaylistId?.let { onPlaylistPlay(it, false) } },
+                            onShuffle = { selectedPlaylistId?.let { onPlaylistPlay(it, true) } },
+                            onTrackClick = { trackId -> selectedPlaylistId?.let { onPlaylistTrackPlay(it, trackId) } },
+                            playbackQueue = visiblePlaybackQueue,
+                            onTrackPlayNext = onTrackPlayNext,
+                            onTrackAddToQueue = onTrackAddToQueue,
+                            onTrackFavoriteToggle = onTrackFavoriteToggle,
+                            onTrackArtistClick = { artist -> onIntent(AppIntent.OpenArtistDetails(artist.id)) },
+                            onTrackRemoveFromPlaylist = { trackId -> selectedPlaylistId?.let { onPlaylistTrackRemove(it, trackId) } },
+                            onTrackMove = { trackId, previousTrackId, nextTrackId -> selectedPlaylistId?.let { onPlaylistTrackMove(it, trackId, previousTrackId, nextTrackId) } },
+                            onTrackContextBottomSheet = onTrackContextBottomSheet,
+                            onPlaylistPlayNext = onPlaylistPlayNext,
+                            onPlaylistAddToQueue = onPlaylistAddToQueue,
+                            onPlaylistUpdate = onPlaylistUpdate,
+                            onPlaylistDelete = { playlistId ->
+                                onPlaylistDelete(playlistId)
+                                onIntent(AppIntent.NavigateBack)
+                            },
+                        )
+                        AppStackPage.SimilarSongs -> SimilarSongsContent(
+                            songId = selectedSimilarSongId,
+                            contentPadding = contentPadding,
+                            modifier = Modifier.fillMaxSize(),
+                            playbackQueue = visiblePlaybackQueue,
+                        )
+                        AppStackPage.NeteasePlaylistDetails -> NeteasePlaylistDetailsContent(
+                            contentPadding = contentPadding,
+                            modifier = Modifier.fillMaxSize(),
+                            reduceTransparency = reduceTransparency,
+                            onOpenAlbum = { albumId -> onIntent(AppIntent.OpenAlbumDetails(albumId)) },
+                            onOpenArtist = { artistId -> onIntent(AppIntent.OpenArtistDetails(artistId)) },
+                            onHeroColorChanged = onAlbumHeroColorChanged,
+                        )
+                        else -> when (currentPage.destination) {
+                        AppDestination.Account -> com.exodidio.tune.ui.screens.AccountContent(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = contentPadding,
                         )
-                        AppDestination.Home -> HomeDestinationContent {
+                        AppDestination.Search -> when (currentPage.page) {
+                            AppStackPage.Root -> LibrarySearchContent(
+                                uiState = searchUiState,
+                                contentPadding = contentPadding,
+                                onQueryChange = onSearchQueryChange,
+                                onTrackClick = onSearchTrackClick,
+                                onOnlineModeChange = onSearchOnlineModeChange,
+                                onOnlineSubmit = onSearchOnlineSubmit,
+                                onOnlineTrackPlay = onSearchOnlineTrackPlay,
+                                onOnlinePlaylistClick = onSearchOnlinePlaylistClick,
+                                onAlbumClick = { onIntent(AppIntent.OpenAlbumDetails(it)) },
+                                onArtistClick = { onIntent(AppIntent.OpenArtistDetails(it)) },
+                                onPlaylistClick = { onIntent(AppIntent.OpenPlaylistDetails(it)) },
+                                onComposerClick = { onIntent(AppIntent.OpenComposerDetails(it)) },
+                                playbackQueue = visiblePlaybackQueue,
+                                onTrackPlayNext = { onTrackPlayNext(it.id) },
+                                onTrackAddToQueue = { onTrackAddToQueue(it.id) },
+                                onTrackFavoriteToggle = { track, favorite -> onTrackFavoriteToggle(track.id, favorite) },
+                                onTrackContextBottomSheet = onTrackContextBottomSheet,
+                                onAlbumPlayNext = onAlbumPlayNext,
+                                onAlbumAddToQueue = onAlbumAddToQueue,
+                                onAlbumAddToFavorites = onAlbumAddToFavorites,
+                            )
+                            // 在线搜索里点开的网易云歌单压在本 tab 的栈上，返回回搜索结果。
+                            AppStackPage.NeteasePlaylistDetails -> NeteasePlaylistDetailsContent(
+                                contentPadding = contentPadding,
+                                modifier = Modifier.fillMaxSize(),
+                                reduceTransparency = reduceTransparency,
+                                onOpenAlbum = { albumId -> onIntent(AppIntent.OpenAlbumDetails(albumId)) },
+                                onOpenArtist = { artistId -> onIntent(AppIntent.OpenArtistDetails(artistId)) },
+                                onHeroColorChanged = onAlbumHeroColorChanged,
+                            )
+                            else -> Unit
+                        }
+                        AppDestination.Discover -> DiscoverDestinationContent {
+                            val discover = destinations.discover
                             when (currentPage.page) {
-                                AppStackPage.Root -> NeteaseHomeContent(
+                                AppStackPage.Root -> DiscoverContent(
                                     modifier = Modifier.fillMaxSize(),
                                     contentPadding = contentPadding,
-                                    onOpenPlaylist = { onIntent(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails)) },
+                                    listState = discoverListState,
+                                    rowStates = neteaseRowStates,
+                                    playbackQueue = visiblePlaybackQueue,
+                                    onPlayTracks = discover.onPlayTracks,
+                                    onOpenPlaylist = discover.onOpenPlaylist,
+                                    onTrackPlayNext = { onTrackPlayNext(it.id) },
+                                    onTrackAddToQueue = { onTrackAddToQueue(it.id) },
+                                    onTrackFavoriteToggle = { track, favorite -> onTrackFavoriteToggle(track.id, favorite) },
+                                    onTrackContextBottomSheet = onTrackContextBottomSheet,
+                                    onOpenAccount = { onIntent(AppIntent.OpenAccount) },
                                 )
                                 AppStackPage.NeteasePlaylistDetails -> NeteasePlaylistDetailsContent(
                                     contentPadding = contentPadding,
@@ -437,6 +605,86 @@ internal fun AppDestinationContent(
                                 )
                                 else -> Unit
                             }
+                        }
+                        AppDestination.Home -> HomeDestinationContent {
+                            when (currentPage.page) {
+                                AppStackPage.Root -> NeteaseHomeContent(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentPadding = contentPadding,
+                                    listState = homeListState,
+                                    rowStates = neteaseRowStates,
+                                    playbackQueue = visiblePlaybackQueue,
+                                    onPlayTracks = destinations.home.onPlayTracks,
+                                    onTrackPlayNext = { onTrackPlayNext(it.id) },
+                                    onTrackAddToQueue = { onTrackAddToQueue(it.id) },
+                                    onTrackFavoriteToggle = { track, favorite -> onTrackFavoriteToggle(track.id, favorite) },
+                                    onTrackContextBottomSheet = onTrackContextBottomSheet,
+                                    onOpenPlaylist = { onIntent(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails)) },
+                                    onOpenAccount = { onIntent(AppIntent.OpenAccount) },
+                                )
+                                AppStackPage.NeteasePlaylistDetails -> NeteasePlaylistDetailsContent(
+                                    contentPadding = contentPadding,
+                                    modifier = Modifier.fillMaxSize(),
+                                    reduceTransparency = reduceTransparency,
+                                    onOpenAlbum = { albumId -> onIntent(AppIntent.OpenAlbumDetails(albumId)) },
+                                    onOpenArtist = { artistId -> onIntent(AppIntent.OpenArtistDetails(artistId)) },
+                                    onHeroColorChanged = onAlbumHeroColorChanged,
+                                )
+                                else -> Unit
+                            }
+                        }
+                        AppDestination.Mine -> when (currentPage.page) {
+                            AppStackPage.Root -> com.exodidio.tune.ui.screens.MineContent(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = contentPadding,
+                                listState = mineListState,
+                                rowStates = neteaseRowStates,
+                                playbackQueue = visiblePlaybackQueue,
+                                onPlayTracks = destinations.mine.onPlayTracks,
+                                onTrackPlayNext = { onTrackPlayNext(it.id) },
+                                onTrackAddToQueue = { onTrackAddToQueue(it.id) },
+                                onTrackFavoriteToggle = { track, favorite -> onTrackFavoriteToggle(track.id, favorite) },
+                                onTrackContextBottomSheet = onTrackContextBottomSheet,
+                                onOpenPlaylist = openNeteasePlaylist,
+                                onOpenCreatedPlaylists = { onIntent(AppIntent.OpenPageHere(AppStackPage.MineCreatedPlaylists)) },
+                                onOpenSavedPlaylists = { onIntent(AppIntent.OpenPageHere(AppStackPage.MineSavedPlaylists)) },
+                                onOpenArtists = { onIntent(AppIntent.OpenPageHere(AppStackPage.MineArtists)) },
+                                onOpenArtist = openNeteaseArtist,
+                                onOpenDownloads = {
+                                    com.exodidio.tune.netease.NeteaseRepository.stageDownloadsPage(downloadsPageTitle)
+                                    onIntent(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails))
+                                },
+                                onOpenAccount = { onIntent(AppIntent.OpenAccount) },
+                            )
+                            AppStackPage.MineCreatedPlaylists -> com.exodidio.tune.ui.screens.MinePlaylistsContent(
+                                saved = false,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = contentPadding,
+                                listState = mineCreatedListState,
+                                onOpenPlaylist = openNeteasePlaylist,
+                            )
+                            AppStackPage.MineSavedPlaylists -> com.exodidio.tune.ui.screens.MinePlaylistsContent(
+                                saved = true,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = contentPadding,
+                                listState = mineSavedListState,
+                                onOpenPlaylist = openNeteasePlaylist,
+                            )
+                            AppStackPage.MineArtists -> com.exodidio.tune.ui.screens.MineArtistsContent(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = contentPadding,
+                                listState = mineArtistsListState,
+                                onOpenArtist = openNeteaseArtist,
+                            )
+                            AppStackPage.NeteasePlaylistDetails -> NeteasePlaylistDetailsContent(
+                                contentPadding = contentPadding,
+                                modifier = Modifier.fillMaxSize(),
+                                reduceTransparency = reduceTransparency,
+                                onOpenAlbum = { albumId -> onIntent(AppIntent.OpenAlbumDetails(albumId)) },
+                                onOpenArtist = { artistId -> onIntent(AppIntent.OpenArtistDetails(artistId)) },
+                                onHeroColorChanged = onAlbumHeroColorChanged,
+                            )
+                            else -> Unit
                         }
                         AppDestination.Insight -> InsightDestinationContent {
                             InsightContent(
@@ -509,6 +757,17 @@ internal fun AppDestinationContent(
                                 onAppleBackdropSelected = {
                                     onIntent(AppIntent.OpenPage(AppStackPage.SettingsAppleBackdrop))
                                 },
+                                onTabLayoutSelected = {
+                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsTabLayout))
+                                },
+                                rememberTabPage = rememberTabPage,
+                                onRememberTabPageChanged = { enabled ->
+                                    onIntent(AppIntent.SetRememberTabPage(enabled))
+                                },
+                                mergeBottomBars = mergeBottomBars,
+                                onMergeBottomBarsChanged = { enabled ->
+                                    onIntent(AppIntent.SetMergeBottomBars(enabled))
+                                },
                                 hazeState = hazeState,
                             )
                             AppStackPage.SettingsAppleBackdrop -> com.exodidio.tune.ui.screens.AppleBackdropSettingsContent(
@@ -534,11 +793,17 @@ internal fun AppDestinationContent(
                                 onSongTransitionSelected = {
                                     onIntent(AppIntent.OpenPage(AppStackPage.SettingsSongTransition))
                                 },
+                                onPlaybackLyricsSelected = {
+                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsPlaybackLyrics))
+                                },
                                 onVolumeNormalizationSelected = {
                                     onIntent(AppIntent.OpenPage(AppStackPage.SettingsVolumeNormalization))
                                 },
                                 onEqualizerSelected = {
                                     onIntent(AppIntent.OpenPage(AppStackPage.SettingsEqualizer))
+                                },
+                                onHiddenTracksSelected = {
+                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsHiddenTracks))
                                 },
                                 modifier = settingsPageModifier,
                             )
@@ -548,6 +813,13 @@ internal fun AppDestinationContent(
                                 onCrossfadeSecondsChanged = onCrossfadeSecondsChanged,
                                 blendArtworkDuringCrossfade = blendArtworkDuringCrossfade,
                                 onBlendArtworkDuringCrossfadeChanged = onBlendArtworkDuringCrossfadeChanged,
+                                modifier = settingsPageModifier,
+                            )
+                            AppStackPage.SettingsPlaybackLyrics -> LyricsPlaybackSettingsContent(
+                                springStrength = lyricSpringStrength,
+                                onSpringStrengthChanged = onLyricSpringStrengthChanged,
+                                autoFullscreen = lyricAutoFullscreen,
+                                onAutoFullscreenChanged = onLyricAutoFullscreenChanged,
                                 modifier = settingsPageModifier,
                             )
                             AppStackPage.SettingsVolumeNormalization -> VolumeNormalizationContent(
@@ -564,10 +836,14 @@ internal fun AppDestinationContent(
                                 modifier = settingsPageModifier,
                             )
                             AppStackPage.SettingsIntegration -> IntegrationContent(
-                                lastFmStatus = lastFmStatus,
-                                lyricsSettings = lyricsSettings,
-                                onLastFmSelected = { onIntent(AppIntent.OpenPage(AppStackPage.SettingsLastFm)) },
+                                onServiceStatusSelected = { onIntent(AppIntent.OpenPage(AppStackPage.SettingsServiceStatus)) },
+                                onNeteasePlaylistsSelected = { onIntent(AppIntent.OpenPage(AppStackPage.SettingsNeteasePlaylists)) },
+                                onNcmImportSelected = { onIntent(AppIntent.OpenPage(AppStackPage.SettingsNcmImport)) },
                                 onLyricsSelected = { onIntent(AppIntent.OpenPage(AppStackPage.SettingsLyrics)) },
+                                modifier = settingsPageModifier,
+                            )
+                            AppStackPage.SettingsServiceStatus -> ServiceStatusContent(
+                                lyricsSettings = lyricsSettings,
                                 modifier = settingsPageModifier,
                             )
                             AppStackPage.SettingsMusicSync -> MusicSyncContent(
@@ -608,13 +884,7 @@ internal fun AppDestinationContent(
                                 onTrackClick = onInsightTrackClick,
                                 modifier = Modifier.fillMaxSize(),
                             )
-                            AppStackPage.SettingsLastFm -> LastFmContent(
-                                status = lastFmStatus,
-                                onConnect = onLastFmConnect,
-                                onDisconnect = onLastFmDisconnect,
-                                modifier = settingsPageModifier,
-                            )
-                            AppStackPage.SettingsLyrics -> LyricsContent(lyricsSettings, onLyricsSourceChanged, onLrclibChanged, onKugouChanged, onNeteaseChanged, onRomanizationEnabledChanged, settingsPageModifier)
+                            AppStackPage.SettingsLyrics -> LyricsContent(lyricsSettings, onLyricsSourceChanged, onLrclibChanged, onKugouChanged, onNeteaseChanged, settingsPageModifier)
                             AppStackPage.SettingsAbout -> AboutContent(
                                 modifier = settingsPageModifier,
                                 onOpenExternalUrl = { url ->
@@ -639,18 +909,6 @@ internal fun AppDestinationContent(
                                 },
                                 onMusicSyncSelected = {
                                     onIntent(AppIntent.OpenPage(AppStackPage.SettingsMusicSync))
-                                },
-                                onNcmImportSelected = {
-                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsNcmImport))
-                                },
-                                onHiddenTracksSelected = {
-                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsHiddenTracks))
-                                },
-                                onNeteasePlaylistsSelected = {
-                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsNeteasePlaylists))
-                                },
-                                onTabLayoutSelected = {
-                                    onIntent(AppIntent.OpenPage(AppStackPage.SettingsTabLayout))
                                 },
                                 onAboutSelected = {
                                     onIntent(AppIntent.OpenPage(AppStackPage.SettingsAbout))
@@ -938,6 +1196,7 @@ internal fun AppDestinationContent(
                             )
                             }
                         }
+                        }
                     }
                 }
             }
@@ -947,6 +1206,9 @@ internal fun AppDestinationContent(
 
 @Composable
 internal fun HomeDestinationContent(content: @Composable () -> Unit) = content()
+
+@Composable
+internal fun DiscoverDestinationContent(content: @Composable () -> Unit) = content()
 
 @Composable
 internal fun InsightDestinationContent(content: @Composable () -> Unit) = content()

@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.exodidio.tune.R
 import com.exodidio.tune.player.PlaybackQueueSnapshot
@@ -107,7 +108,9 @@ internal fun LibrarySearchContent(
                         SearchEmptyState(R.string.library_search_online_title, R.string.library_search_online_description)
                     }
                     uiState.onlineTracks.isEmpty() && uiState.onlinePlaylists.isEmpty() &&
-                        uiState.onlineArtists.isEmpty() && uiState.onlineAlbums.isEmpty() -> item("online_empty") {
+                        uiState.onlineArtists.isEmpty() && uiState.onlineAlbums.isEmpty() &&
+                        uiState.onlinePlaylistError == null && uiState.onlineArtistError == null &&
+                        uiState.onlineAlbumError == null -> item("online_empty") {
                         SearchEmptyState(R.string.library_search_no_results_title, R.string.library_search_online_empty_description)
                     }
                     else -> {
@@ -135,6 +138,7 @@ internal fun LibrarySearchContent(
                                         track.title,
                                         track.artists,
                                         artworkPath = track.artworkPath,
+                                        artworkUrl = com.exodidio.tune.netease.NeteaseRepository.coverUrlForTrack(track),
                                         contentPadding = PaddingValues(vertical = 6.dp),
                                         onClick = { if (onlineIndex >= 0) onOnlineTrackPlay(onlineIndex) },
                                         onMoreClick = { contextTrack = track },
@@ -149,14 +153,24 @@ internal fun LibrarySearchContent(
                                 }
                             }
                         }
+                        uiState.onlinePlaylistError?.let { message ->
+                            item("online_playlists_error") {
+                                SectionErrorHint(R.string.library_playlists, message, topPadding = 24.dp)
+                            }
+                        }
                         searchSection(R.string.library_playlists, uiState.onlinePlaylists, { it.id.toString() }, topPadding = 24.dp) { playlist ->
                             DiscCard(
                                 title = playlist.name,
-                                subtitle = playlist.creator.ifBlank { "${playlist.trackCount} 首" },
+                                subtitle = playlist.creator.ifBlank { stringResource(R.string.netease_track_count, playlist.trackCount) },
                                 artworkPath = playlist.artworkPath,
                                 fallbackSymbol = MaterialSymbols.QueueMusic,
                                 onClick = { onOnlinePlaylistClick(playlist.id) },
                             )
+                        }
+                        uiState.onlineArtistError?.let { message ->
+                            item("online_artists_error") {
+                                SectionErrorHint(R.string.library_artists, message, topPadding = 16.dp)
+                            }
                         }
                         searchSection(R.string.library_artists, uiState.onlineArtists, { it.id.toString() }, topPadding = 16.dp) { artist ->
                             DiscCard(
@@ -170,6 +184,11 @@ internal fun LibrarySearchContent(
                                     onOnlineSubmit()
                                 },
                             )
+                        }
+                        uiState.onlineAlbumError?.let { message ->
+                            item("online_albums_error") {
+                                SectionErrorHint(R.string.library_albums, message, topPadding = 16.dp)
+                            }
                         }
                         searchSection(R.string.library_albums, uiState.onlineAlbums, { it.id.toString() }, topPadding = 16.dp) { album ->
                             DiscCard(
@@ -306,6 +325,14 @@ internal const val SearchEmptyStateTag = "search-empty-state"
         symbol = MaterialSymbols.Search,
     )
 }
+
+/** 分区级失败提示：和“无结果”区分开，并说明是哪一个分区加载失败。 */
+@Composable private fun SectionErrorHint(section: Int, message: String, topPadding: Dp) = Text(
+    text = stringResource(R.string.library_search_section_failed, stringResource(section), message),
+    style = MaterialTheme.typography.bodyMedium,
+    color = LocalTuneColors.current.textMuted,
+    modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = topPadding, bottom = 4.dp),
+)
 
 @Composable private fun SearchHint(text: String) = Text(
     text = text,

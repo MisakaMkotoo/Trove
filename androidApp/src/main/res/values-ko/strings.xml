@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">홈</string>
     <string name="home_greeting_morning">좋은 아침입니다</string>
     <string name="home_greeting_afternoon">좋은 오후입니다</string>
@@ -180,14 +180,7 @@
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">연동</string>
     <string name="integration_title">연동</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">재생 기록을 스크로블하고 즐겨찾는 트랙을 Last.fm과 동기화합니다.</string>
-    <string name="lastfm_connected_as">%1$s(으)로 연결됨</string>
-    <string name="lastfm_connect">연결</string>
-    <string name="lastfm_connecting">연결 중…</string>
-    <string name="lastfm_disconnect">연결 해제</string>
-    <string name="lastfm_error">Last.fm에 연결할 수 없습니다. 다시 시도해 주세요.</string>
-    <string name="lastfm_not_configured">이 빌드에는 Last.fm 사용자 정보가 설정되어 있지 않습니다.</string>
+
     <string name="settings_about">정보</string>
     <string name="about_title">정보</string>
     <string name="about_description">현대적인 로컬 음악 플레이어</string>
@@ -339,16 +332,11 @@
     <string name="lyrics_title">가사</string>
     <string name="lyrics_data_sources">데이터 소스</string>
     <string name="lyrics_preferred_source">우선 소스</string>
-    <string name="lyrics_romanization">로마자 표기 사용</string>
+
     <string name="lyrics_source_auto_fetch">자동 가져오기</string>
     <string name="lyrics_info_action">가사 정보</string>
     <string name="lyrics_info_title">가사 데이터 소스</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">로마자 표시</string>
-    <string name="player_romanization_hide">로마자 숨기기</string>
-    <string name="player_romanization_loading">로마자 표기 중…</string>
-    <string name="player_romanization_error">로마자 표기에 실패했습니다. 껐다 켜서 다시 시도하세요.</string>
-    <string name="player_romanization_hint">오프라인 로마자 표기: 중국어 및 한국어.</string>
-    <string name="player_romanization_mandarin">한자만 있는 가사는 기본적으로 중국어 표준어로 처리됩니다. 이름의 발음은 다를 수 있습니다.</string>
+
 </resources>
 

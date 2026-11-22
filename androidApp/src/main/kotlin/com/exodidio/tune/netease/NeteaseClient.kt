@@ -4,12 +4,14 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.buildJsonObject
 import javax.crypto.spec.SecretKeySpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.Cipher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -28,6 +30,8 @@ internal data class NeteaseEntryPayload(
     val album: String,
     val durationMs: Long,
     val coverUrl: String,
+    val albumId: Long = 0L,
+    val artistIds: List<Long> = emptyList(),
 )
 
 internal data class NeteasePlaylistPayload(
@@ -35,12 +39,15 @@ internal data class NeteasePlaylistPayload(
     val name: String,
     val coverUrl: String,
     val entries: List<NeteaseEntryPayload>,
+    val description: String = "",
 )
 
 internal data class NeteaseQrStatus(
     val code: Int,
     val message: String,
     val cookie: String? = null,
+    /** 风控 -462 时下发的验证页地址；可在 WebView 里完成人机验证。 */
+    val verifyUrl: String? = null,
 )
 
 internal data class NeteaseLoginQr(
@@ -56,11 +63,11 @@ internal data class NeteaseLoginQr(
  */
 internal object NeteaseClient {
     private const val BASE = "https://music.163.com"
+    /** 新版桌面登录接口：旧 music.163.com 的扫码接口已被风控（8821）。 */
+    private const val QR_BASE = "https://interface.music.163.com"
     internal const val PrivateRadarPlaylistId = "3136952023"
     private const val UA =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    private const val MOBILE_UA =
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
     private val json = Json { ignoreUnknownKeys = true }
 
     fun playlistIdFrom(input: String): String? {
@@ -98,7 +105,7 @@ internal object NeteaseClient {
                 } else {
                     parsed
                 }
-                NeteasePlaylistPayload(id, name, cover, entries)
+                NeteasePlaylistPayload(id, name, cover, entries, playlist.string("description"))
             }
         }
 
@@ -124,15 +131,19 @@ internal object NeteaseClient {
             ?.mapNotNull { artist -> artist.jsonObjectOrNull()?.string("name")?.takeIf { it.isNotBlank() } }
             ?.joinToString(" / ")
             .orEmpty()
+        val artistIds = artistArray.orEmpty().mapNotNull { artist ->
+            artist.jsonObjectOrNull()?.stringOrNull("id")?.toLongOrNull()
+        }
         val albumObj = track["al"]?.jsonObjectOrNull() ?: track["album"]?.jsonObjectOrNull()
         val album = albumObj?.string("name").orEmpty()
+        val albumId = albumObj?.stringOrNull("id")?.toLongOrNull() ?: 0L
         val cover = albumObj?.string("picUrl").orEmpty()
             .ifBlank { albumObj?.string("blurPicUrl").orEmpty() }
             .ifBlank { fallbackCover }
         val durationMs = track["dt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
             ?: track["duration"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
             ?: 0L
-        return NeteaseEntryPayload(songId, title, artists, album, durationMs, cover)
+        return NeteaseEntryPayload(songId, title, artists, album, durationMs, cover, albumId, artistIds)
     }
 
     data class SongUrl(val url: String, val type: String)
@@ -266,92 +277,17 @@ internal object NeteaseClient {
             }
         }
 
-    /** 私人雷达：固定歌单 id，服务端按登录账号每天轮换内容；块页/推荐只是官方入口。 */
+    /** 私人雷达：固定歌单 id，服务端按登录账号每天轮换内容（不做标题/块兜底）。 */
     suspend fun fetchRadar(cookie: String?): Result<NeteasePlaylistPayload> =
         withContext(Dispatchers.IO) {
             runCatching {
                 if (cookie.isNullOrBlank()) error("私人雷达需要登录网易云")
-                val fixed = runCatching { fetchPlaylist(PrivateRadarPlaylistId, cookie).getOrThrow() }
-                    .onFailure { System.err.println("NETRADAR fixed id failed: ${it.message}") }
-                    .getOrNull()
-                if (fixed != null && fixed.entries.isNotEmpty()) {
-                    System.err.println("NETRADAR fixed id ok entries=${fixed.entries.size}")
-                    return@runCatching fixed.copy(name = "私人雷达")
-                }
-                // 兜底：旧逻辑，从首页聚合块/推荐歌单里找带“雷达”标题的块。
-                val attempts = listOf<Pair<String, () -> JsonObject>>(
-                    "block" to { requestWeapi("/api/homepage/block/page", mapOf("refresh" to "false"), cookie) },
-                    "personalized" to { requestWeapi("/api/personalized/playlist", mapOf("limit" to "50"), cookie) },
-                )
-                var radarId: String? = null
-                for ((name, call) in attempts) {
-                    val root = runCatching(call).getOrElse { error ->
-                        System.err.println("NETRADAR $name failed: ${error.message}")
-                        null
-                    } ?: continue
-                    radarId = findRadarBlockPlaylistId(root) ?: findPlaylistIdByName(root, "雷达")
-                    System.err.println("NETRADAR $name radarId=$radarId")
-                    if (radarId != null) break
-                }
-                if (radarId.isNullOrBlank()) error("没有找到私人雷达歌单（需要登录且有听歌记录）")
-                fetchPlaylist(radarId, cookie).getOrThrow().copy(name = "私人雷达")
+                val playlist = fetchPlaylist(PrivateRadarPlaylistId, cookie).getOrThrow()
+                System.err.println("NETRADAR fixed id entries=${playlist.entries.size}")
+                if (playlist.entries.isEmpty()) error("私人雷达返回为空")
+                playlist.copy(name = "私人雷达")
             }
         }
-
-    /** 块页里的雷达入口：按 blockCode 或块标题匹配，再取资源里的列表 id。 */
-    private fun findRadarBlockPlaylistId(element: kotlinx.serialization.json.JsonElement): String? =
-        when (element) {
-            is JsonObject -> {
-                val code = element.stringOrNull("blockCode").orEmpty().uppercase()
-                val ui = element["uiElement"]?.jsonObjectOrNull()
-                val title = listOf(
-                    ui?.get("mainTitle")?.jsonObjectOrNull()?.stringOrNull("title"),
-                    ui?.get("subTitle")?.jsonObjectOrNull()?.stringOrNull("title"),
-                ).filterNotNull().joinToString("")
-                if (code == "HOMEPAGE_BLOCK_MGC_PLAYLIST" || title.contains("雷达")) {
-                    findPlaylistResourceId(element)
-                } else {
-                    element.values.firstNotNullOfOrNull(::findRadarBlockPlaylistId)
-                }
-            }
-            is kotlinx.serialization.json.JsonArray -> element.firstNotNullOfOrNull(::findRadarBlockPlaylistId)
-            else -> null
-        }
-
-    private fun findPlaylistResourceId(element: kotlinx.serialization.json.JsonElement): String? =
-        when (element) {
-            is JsonObject -> {
-                val type = element.stringOrNull("resourceType")?.lowercase()
-                val id = element.stringOrNull("resourceId")
-                    ?: element.stringOrNull("resourceID")
-                    ?: element.stringOrNull("id")
-                if ((type == "list" || type == "playlist") && id != null && id.all(Char::isDigit) && id.isNotBlank()) {
-                    id
-                } else {
-                    element.values.firstNotNullOfOrNull(::findPlaylistResourceId)
-                }
-            }
-            is kotlinx.serialization.json.JsonArray -> element.firstNotNullOfOrNull(::findPlaylistResourceId)
-            else -> null
-        }
-
-    /** 递归扫描 JSON，找出 name 含关键字且带 id 的歌单对象。 */
-    private fun findPlaylistIdByName(element: kotlinx.serialization.json.JsonElement, keyword: String): String? {
-        return when (element) {
-            is kotlinx.serialization.json.JsonObject -> {
-                val name = element.stringOrNull("name").orEmpty()
-                val id = element.stringOrNull("id").orEmpty()
-                if (name.contains(keyword) && id.isNotBlank() && id.all(Char::isDigit)) {
-                    id
-                } else {
-                    element.values.firstNotNullOfOrNull { findPlaylistIdByName(it, keyword) }
-                }
-            }
-            is kotlinx.serialization.json.JsonArray ->
-                element.firstNotNullOfOrNull { findPlaylistIdByName(it, keyword) }
-            else -> null
-        }
-    }
 
     private fun JsonObject.stringOrNull(key: String): String? =
         this[key]?.jsonPrimitive?.contentOrNull
@@ -363,6 +299,8 @@ internal object NeteaseClient {
         val durationMs: Long,
         val album: String = "",
         val coverUrl: String = "",
+        val albumId: Long = 0L,
+        val artistIds: List<Long> = emptyList(),
     )
 
     data class SearchPlaylist(
@@ -505,6 +443,7 @@ internal object NeteaseClient {
                     name = playlist.string("name").ifBlank { "网易云歌单" },
                     coverUrl = playlist.string("coverImgUrl"),
                     trackCount = playlist.string("trackCount").toIntOrNull() ?: 0,
+                    description = playlist.string("description"),
                 )
             }
         }
@@ -514,6 +453,7 @@ internal object NeteaseClient {
         val name: String,
         val coverUrl: String,
         val trackCount: Int,
+        val description: String = "",
     )
 
     private fun cloudSearchForm(keyword: String, type: Int, limit: Int) =
@@ -548,6 +488,10 @@ internal object NeteaseClient {
                         durationMs = duration,
                         album = albumObj?.string("name").orEmpty(),
                         coverUrl = albumObj?.string("picUrl").orEmpty(),
+                        albumId = albumObj?.stringOrNull("id")?.toLongOrNull() ?: 0L,
+                        artistIds = artists.orEmpty().mapNotNull { entry ->
+                            entry.jsonObjectOrNull()?.stringOrNull("id")?.toLongOrNull()
+                        },
                     )
                 }
                 System.err.println(
@@ -568,7 +512,153 @@ internal object NeteaseClient {
         val name: String,
         val coverUrl: String,
         val trackCount: Int,
+        val description: String = "",
     )
+
+    /** 账号页展示用的登录信息（手机/邮箱由服务端打码后返回）。 */
+    @Serializable
+    internal data class AccountInfo(
+        val nickname: String,
+        val uid: String,
+        val loginName: String,
+        val createdAtMillis: Long,
+        val avatarUrl: String = "",
+        val signature: String = "",
+        val gender: Int = 0,
+    ) {
+        val isEmailLogin: Boolean get() = loginName.contains("@")
+    }
+
+    suspend fun fetchAccountInfo(cookie: String?): Result<AccountInfo> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                if (cookie.isNullOrBlank()) error("需要登录网易云")
+                val root = requestWeapi("/api/nuser/account/get", emptyMap(), cookie)
+                val account = root["account"]?.jsonObjectOrNull() ?: error("无法获取网易云账号")
+                val profile = root["profile"]?.jsonObjectOrNull()
+                val uid = account.string("id").ifBlank { profile?.string("userId").orEmpty() }
+                if (uid.isBlank()) error("无法获取网易云账号")
+                AccountInfo(
+                    nickname = profile?.string("nickname").orEmpty().ifBlank { "网易云用户" },
+                    uid = uid,
+                    loginName = account.string("userName"),
+                    createdAtMillis = account.stringOrNull("createTime")?.toLongOrNull() ?: 0L,
+                    avatarUrl = profile?.string("avatarUrl").orEmpty(),
+                    signature = profile?.string("signature").orEmpty(),
+                    gender = profile?.stringOrNull("gender")?.toIntOrNull() ?: 0,
+                ).also { info ->
+                    System.err.println(
+                        "NETACCOUNT uid=${info.uid} name=${info.nickname} " +
+                            "login=${info.loginName} created=${info.createdAtMillis}",
+                    )
+                }
+            }
+        }
+
+    internal data class UserPlaylistInfo(
+        val id: String,
+        val name: String,
+        val coverUrl: String,
+        val trackCount: Int,
+        val subscribed: Boolean,
+        val specialType: Int,
+        val creatorId: String,
+        val updateTimeMillis: Long = 0L,
+    )
+
+    /** 登录用户的全部歌单（自建 + 收藏），用 creatorId 区分。 */
+    suspend fun fetchUserPlaylists(uid: String, cookie: String?): Result<List<UserPlaylistInfo>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                if (cookie.isNullOrBlank()) error("需要登录网易云")
+                val root = requestWeapi(
+                    "/api/user/playlist",
+                    mapOf("uid" to uid, "offset" to "0", "limit" to "1000"),
+                    cookie,
+                )
+                val list = root["playlist"]?.jsonArray.orEmpty().mapNotNull { element ->
+                    val obj = element.jsonObjectOrNull() ?: return@mapNotNull null
+                    val id = obj.string("id").ifBlank { return@mapNotNull null }
+                    val name = obj.string("name").ifBlank { return@mapNotNull null }
+                    UserPlaylistInfo(
+                        id = id,
+                        name = name,
+                        coverUrl = obj.string("coverImgUrl"),
+                        trackCount = obj.string("trackCount").toIntOrNull() ?: 0,
+                        subscribed = obj.string("subscribed").equals("true", ignoreCase = true),
+                        specialType = obj.string("specialType").toIntOrNull() ?: 0,
+                        creatorId = obj["creator"]?.jsonObjectOrNull()?.string("userId").orEmpty(),
+                        updateTimeMillis = obj.stringOrNull("updateTime")?.toLongOrNull() ?: 0L,
+                    )
+                }
+                System.err.println("NETUSERPLAYLISTS uid=$uid playlists=${list.size}")
+                list
+            }
+        }
+
+    internal data class SubscribedArtist(
+        val id: String,
+        val name: String,
+        val coverUrl: String,
+    )
+
+    /** 我关注的歌手。 */
+    suspend fun fetchSubscribedArtists(cookie: String?, limit: Int = 200): Result<List<SubscribedArtist>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                if (cookie.isNullOrBlank()) error("需要登录网易云")
+                val root = requestWeapi(
+                    "/api/artist/sublist",
+                    mapOf("limit" to "$limit", "offset" to "0", "total" to "true"),
+                    cookie,
+                )
+                val list = root["data"]?.jsonArray.orEmpty().mapNotNull { element ->
+                    val obj = element.jsonObjectOrNull() ?: return@mapNotNull null
+                    val id = obj.string("id").ifBlank { return@mapNotNull null }
+                    val name = obj.string("name").ifBlank { return@mapNotNull null }
+                    // sublist 里部分歌手没有 picUrl，退到头像字段，避免整行没图。
+                    val cover = obj.string("picUrl")
+                        .ifBlank { obj.string("img1v1Url") }
+                        .ifBlank { obj.string("avatar") }
+                    SubscribedArtist(id, name, cover)
+                }
+                System.err.println(
+                    "NETARTISTS artists=${list.size} missingCover=${list.count { it.coverUrl.isBlank() }} keys=${root.keys}",
+                )
+                list
+            }
+        }
+
+    /** 专辑详情：专辑信息 + 曲目，用于“前往专辑”的在线页。 */
+    suspend fun fetchAlbumDetail(albumId: Long, cookie: String?): Result<NeteasePlaylistPayload> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val root = request("/api/v1/album/$albumId", emptyMap(), cookie)
+                val album = root["album"]?.jsonObjectOrNull() ?: error("专辑不存在或无法访问")
+                val name = album.string("name").ifBlank { "专辑" }
+                val cover = album.string("picUrl").ifBlank { album.string("blurPicUrl") }
+                val songs = root["songs"]?.jsonArray.orEmpty().mapNotNull { element ->
+                    element.jsonObjectOrNull()?.let { parseTrack(it, cover) }
+                }.distinctBy { it.songId }
+                System.err.println("NETALBUM id=$albumId songs=${songs.size} code=${root.string("code")}")
+                if (songs.isEmpty()) error("专辑返回为空（code=${root.string("code")}）")
+                NeteasePlaylistPayload(albumId.toString(), name, cover, songs)
+            }
+        }
+
+    /** 歌手热门歌曲（关注的歌手点进来时用）。 */
+    suspend fun fetchArtistTopSongs(artistId: String, cookie: String?): Result<List<NeteaseEntryPayload>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val root = requestWeapi("/api/artist/top/song", mapOf("id" to artistId), cookie)
+                val songs = root["songs"]?.jsonArray.orEmpty().mapNotNull { element ->
+                    element.jsonObjectOrNull()?.let { parseTrack(it, "") }
+                }.distinctBy { it.songId }
+                System.err.println("NETARTISTTOP id=$artistId songs=${songs.size} code=${root.string("code")}")
+                if (songs.isEmpty()) error("歌手歌曲为空（code=${root.string("code")}）")
+                songs
+            }
+        }
 
     /** 登录用户“我喜欢的音乐”的摘要：首页只展示封面/名称/数量，不拉整份歌曲列表。 */
     suspend fun fetchLikedPlaylistSummary(cookie: String?): Result<LikedPlaylistSummary?> =
@@ -601,6 +691,7 @@ internal object NeteaseClient {
                         name = playlist.stringOrNull("name").orEmpty(),
                         coverUrl = playlist.stringOrNull("coverImgUrl").orEmpty(),
                         trackCount = playlist.stringOrNull("trackCount")?.toIntOrNull() ?: 0,
+                        description = playlist.stringOrNull("description").orEmpty(),
                     )
                 }
             }
@@ -668,7 +759,170 @@ internal object NeteaseClient {
         return result.distinctBy { it.songId }.take(3)
     }
 
-    /** 推荐歌单（首页卡片用，只要元数据）。 */
+    internal data class Toplist(
+        val id: String,
+        val name: String,
+        val coverUrl: String,
+        val updateFrequency: String,
+    )
+
+    /** 排行榜：只要榜单元数据，点开后按普通歌单详情加载。 */
+    suspend fun fetchToplists(cookie: String?): Result<List<Toplist>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val root = request("/api/toplist/detail", emptyMap(), cookie)
+            root["list"]?.jsonArray.orEmpty().mapNotNull { element ->
+                val obj = element.jsonObjectOrNull() ?: return@mapNotNull null
+                val id = obj.string("id").ifBlank { return@mapNotNull null }
+                val name = obj.string("name").ifBlank { return@mapNotNull null }
+                // 数字专辑售卖榜不是歌曲榜单。
+                if (name.contains("数字")) return@mapNotNull null
+                Toplist(id, name, obj.string("coverImgUrl"), obj.string("updateFrequency"))
+            }
+        }
+    }
+
+    /** 首页整页块里的一个分区：曲风精选/歌曲推荐/推荐歌单/艺人新动向等都由服务端下发。 */
+    internal data class HomeBlock(
+        val code: String,
+        val title: String,
+        val songs: List<NeteaseEntryPayload> = emptyList(),
+        val playlists: List<NeteasePlaylistPayload> = emptyList(),
+    )
+
+    /**
+     * 首页整页块：一次返回 App 推荐页的全部分区。
+     * 必须带登录 Cookie；未登录会拿不到区块。
+     */
+    suspend fun fetchHomeBlocks(cookie: String?): Result<List<HomeBlock>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val root = requestWeapi(
+                    "/api/homepage/block/page",
+                    // 参考实现只有 refresh（默认 false）与翻页用的 cursor；首屏不能带 cursor=0。
+                    mapOf("refresh" to "false"),
+                    cookie,
+                )
+                val blocks = root["data"]?.jsonObjectOrNull()?.get("blocks")?.jsonArray.orEmpty()
+                    .mapNotNull { it.jsonObjectOrNull() }
+                if (blocks.isEmpty()) {
+                    error("首页区块为空（code=${root.string("code")}，需要登录网易云）")
+                }
+                System.err.println(
+                    "NETBLOCK code=${root.string("code")} blocks=${blocks.map { it.string("blockCode") }}",
+                )
+                blocks.map { block ->
+                    val ui = block["uiElement"]?.jsonObjectOrNull()
+                    // 部分歌曲块的标题不在 block 级，退到 creative 级再取一次。
+                    val creativeTitle = block["creatives"]?.jsonArray.orEmpty()
+                        .firstNotNullOfOrNull { creative ->
+                            creative.jsonObjectOrNull()?.get("uiElement")?.jsonObjectOrNull()
+                                ?.titleText("mainTitle")?.takeIf { it.isNotBlank() }
+                        }
+                        .orEmpty()
+                    val title = ui?.titleText("mainTitle").orEmpty().ifBlank { creativeTitle }
+                    val blockCover = ui?.get("image")?.jsonObjectOrNull()?.string("imageUrl").orEmpty()
+                    val resources = block["creatives"]?.jsonArray.orEmpty()
+                        .flatMap { creative -> creative.jsonObjectOrNull()?.get("resources")?.jsonArray.orEmpty() }
+                        .mapNotNull { it.jsonObjectOrNull() }
+                    val songs = resources.mapNotNull { resource ->
+                        val song = resource["resourceExtInfo"]?.jsonObjectOrNull()
+                            ?.get("songData")?.jsonObjectOrNull()
+                            ?: return@mapNotNull null
+                        parseTrack(song, blockCover)
+                    }.distinctBy { it.songId }
+                    val playlists = resources
+                        .filter { resource ->
+                            // 首页块的歌单资源 resourceType 是小写的 "list"。
+                            resource.string("resourceType").contains("list", ignoreCase = true) ||
+                                resource.string("resourceUrl").contains("/playlist", ignoreCase = true)
+                        }
+                        .mapNotNull { obj ->
+                            val id = obj.stringOrNull("resourceId")?.takeIf { it.isNotBlank() }
+                                ?: obj.stringOrNull("id") ?: return@mapNotNull null
+                            val resourceUi = obj["uiElement"]?.jsonObjectOrNull() ?: return@mapNotNull null
+                            val name = resourceUi.titleText("mainTitle")
+                                .ifBlank { resourceUi.titleText("subTitle") }
+                            if (name.isBlank()) return@mapNotNull null
+                            val cover = resourceUi["image"]?.jsonObjectOrNull()?.string("imageUrl").orEmpty()
+                                .ifBlank { resourceUi.string("imageUrl") }
+                            NeteasePlaylistPayload(id, name, cover, emptyList())
+                        }
+                        .distinctBy { it.id }
+                    System.err.println(
+                        "NETBLOCK ${block.string("blockCode")} title=$title " +
+                            "songs=${songs.size} playlists=${playlists.size}",
+                    )
+                    if (title.isBlank() && songs.isNotEmpty()) {
+                        System.err.println("NETBLOCK ${block.string("blockCode")} raw=${block.toString().take(1200)}")
+                    }
+                    HomeBlock(block.string("blockCode"), title, songs, playlists)
+                }
+            }
+        }
+
+    /** 每日推荐歌曲（按账号口味），首页“根据你喜爱的歌曲推荐”使用。 */
+    suspend fun fetchRecommendSongs(cookie: String?, limit: Int = 30): Result<List<NeteaseEntryPayload>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val root = requestWeapi(
+                    "/api/v3/discovery/recommend/songs",
+                    mapOf("afresh" to "false"),
+                    cookie,
+                )
+                val songs = root["data"]?.jsonObjectOrNull()?.get("dailySongs")?.jsonArray.orEmpty()
+                    .mapNotNull { element -> element.jsonObjectOrNull()?.let { parseTrack(it, "") } }
+                    .distinctBy { it.songId }
+                    .take(limit)
+                System.err.println("NETRECSONGS code=${root.string("code")} entries=${songs.size}")
+                if (songs.isEmpty()) {
+                    error("每日推荐歌曲为空（code=${root.string("code")}，需要登录网易云）")
+                }
+                songs
+            }
+        }
+
+    /** 新歌：列表项的 song 字段是完整歌曲对象，外层 picUrl 只作封面兜底。 */
+    suspend fun fetchNewSongs(cookie: String?, limit: Int = 12): Result<List<NeteaseEntryPayload>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val root = request(
+                    "/api/personalized/newsong",
+                    mapOf("type" to "new", "limit" to "$limit", "areaId" to "0"),
+                    cookie,
+                )
+                root["result"]?.jsonArray.orEmpty().mapNotNull { element ->
+                    val obj = element.jsonObjectOrNull() ?: return@mapNotNull null
+                    val song = obj["song"]?.jsonObjectOrNull() ?: obj
+                    parseTrack(song, obj.string("picUrl"))
+                }.distinctBy { it.songId }
+            }
+        }
+
+    /** 推荐歌单：登录后的“每日推荐歌单”，按账号口味生成（网页版推荐池不相关，不用）。 */
+    suspend fun fetchRecommendedResources(cookie: String?, limit: Int = 30): Result<List<NeteasePlaylistPayload>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val root = requestWeapi("/api/v1/discovery/recommend/resource", emptyMap(), cookie)
+                val items = root["recommend"]?.jsonArray.orEmpty()
+                if (items.isEmpty()) {
+                    error("推荐歌单为空（code=${root.string("code")}，需要登录网易云）")
+                }
+                items.mapNotNull { element ->
+                    val obj = element.jsonObjectOrNull() ?: return@mapNotNull null
+                    val id = obj.string("id").ifBlank { return@mapNotNull null }
+                    val name = obj.string("name").ifBlank { return@mapNotNull null }
+                    NeteasePlaylistPayload(
+                        id = id,
+                        name = name,
+                        coverUrl = obj.string("picUrl").ifBlank { obj.string("coverImgUrl") },
+                        entries = emptyList(),
+                        description = obj.string("copywriter"),
+                    )
+                }.take(limit)
+            }
+        }
+
+    /** 网页版推荐歌单（保留给设置页的旧入口，首页不使用）。 */
     suspend fun fetchRecommendedPlaylists(cookie: String?, limit: Int = 12): Result<List<NeteasePlaylistPayload>> =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -683,18 +937,41 @@ internal object NeteaseClient {
             }
         }
 
-    /** 取网易云歌词（LRC 优先，其次逐字歌词转换）。 */
+    /** 取网易云歌词：有逐字歌词时返回带 yrc 的 JSON 封装，否则返回合并后的 LRC。 */
     suspend fun fetchLyrics(songId: Long, cookie: String?): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val root = request(
                 "/api/song/lyric",
-                mapOf("id" to "$songId", "lv" to "-1", "kv" to "-1", "tv" to "-1", "rv" to "-1"),
+                mapOf(
+                    "id" to "$songId",
+                    "lv" to "-1",
+                    "kv" to "-1",
+                    "tv" to "-1",
+                    "rv" to "-1",
+                    "yv" to "-1",
+                    "ytv" to "-1",
+                    "yrv" to "-1",
+                ),
                 cookie,
             )
             val lrc = root["lrc"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
             val tlyric = root["tlyric"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
             val klyric = root["klyric"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
             val yrc = root["yrc"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
+            val ytlrc = root["ytlrc"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
+            val romalrc = root["romalrc"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
+            val yromalrc = root["yromalrc"]?.jsonObjectOrNull()?.string("lyric").orEmpty()
+            if (yrc.isNotBlank()) {
+                return@runCatching buildJsonObject {
+                    put("tuneLyrics", 1)
+                    put("lrc", lrc)
+                    put("tlyric", tlyric)
+                    put("yrc", yrc)
+                    put("ytlrc", ytlrc)
+                    put("romalrc", romalrc)
+                    put("yromalrc", yromalrc)
+                }.toString()
+            }
             val candidates = listOf(
                 mergeTranslation(lrc, tlyric),
                 mergeTranslation(klyric, tlyric),
@@ -749,6 +1026,10 @@ internal object NeteaseClient {
         withContext(Dispatchers.IO) {
             runCatching {
                 val connection = URL(url).openConnection() as HttpURLConnection
+                // 取消时直接断连：否则阻塞中的 read 要等 readTimeout 才退出，切歌仍会被拖住。
+                val cancelHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+                    if (cause != null) runCatching { connection.disconnect() }
+                }
                 try {
                     applyHeaders(connection, cookie)
                     connection.connectTimeout = 10_000
@@ -774,19 +1055,25 @@ internal object NeteaseClient {
                     }
                     target.length()
                 } finally {
+                    cancelHandle?.dispose()
                     connection.disconnect()
                 }
             }
         }
 
     /** 扫码登录：取 unikey 与下发的 NMTID，二维码内容为网页登录链接。 */
-    suspend fun createQrLogin(): Result<NeteaseLoginQr> = withContext(Dispatchers.IO) {
+    suspend fun createQrLogin(cookie: String? = null): Result<NeteaseLoginQr> = withContext(Dispatchers.IO) {
         runCatching {
-            val (root, setCookies) = requestWithCookies("/api/login/qrcode/unikey", mapOf("type" to "3"), null)
+            val (root, setCookies) = requestWithCookies(
+                "/api/login/qrcode/unikey",
+                mapOf("type" to "3"),
+                cookie,
+                base = QR_BASE,
+            )
             val key = root.string("unikey").ifBlank { error("无法获取登录二维码") }
-            val cookie = joinCookies(setCookies)
-            System.err.println("NETQR unikey key=$key nmtid=${cookie?.contains("NMTID=") == true} code=${root.string("code")}")
-            NeteaseLoginQr(key = key, url = "https://music.163.com/login?codekey=$key", cookie = cookie)
+            val sessionCookie = mergeCookies(cookie, joinCookies(setCookies))
+            System.err.println("NETQR unikey key=$key nmtid=${sessionCookie?.contains("NMTID=") == true} code=${root.string("code")}")
+            NeteaseLoginQr(key = key, url = "https://music.163.com/login?codekey=$key", cookie = sessionCookie)
         }.onFailure { System.err.println("NETQR unikey failed: ${it.message}") }
     }
 
@@ -798,14 +1085,17 @@ internal object NeteaseClient {
                     "/api/login/qrcode/client/login",
                     mapOf("key" to key, "type" to "3"),
                     cookie,
+                    base = QR_BASE,
                 )
                 val code = root.string("code").toIntOrNull() ?: 800
                 val message = root.string("message")
-                val session = joinCookies(setCookies)
+                val session = mergeCookies(cookie, joinCookies(setCookies))
+                val verifyUrl = root["verifyUrl"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 System.err.println(
-                    "NETQR poll code=$code message=$message setCookie=${setCookies.size} musicU=${session?.contains("MUSIC_U=") == true}",
+                    "NETQR poll code=$code message=$message setCookie=${setCookies.size} " +
+                        "musicU=${session?.contains("MUSIC_U=") == true} verifyUrl=${verifyUrl != null}",
                 )
-                NeteaseQrStatus(code = code, message = message, cookie = session)
+                NeteaseQrStatus(code = code, message = message, cookie = session, verifyUrl = verifyUrl)
             }.onFailure { System.err.println("NETQR poll failed: ${it.message}") }
         }
 
@@ -828,12 +1118,12 @@ internal object NeteaseClient {
         connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 15_000,
         retry: Boolean = true,
+        base: String = BASE,
     ): Pair<JsonObject, List<String>> {
-        val useMobileUa = path.contains("login/qrcode")
         val attempt = {
-            val connection = URL(BASE + path).openConnection() as HttpURLConnection
+            val connection = URL(base + path).openConnection() as HttpURLConnection
             try {
-                applyHeaders(connection, cookie, if (useMobileUa) MOBILE_UA else UA)
+                applyHeaders(connection, cookie, UA)
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.connectTimeout = connectTimeoutMs
@@ -868,6 +1158,17 @@ internal object NeteaseClient {
         .joinToString("; ")
         .takeIf { it.isNotBlank() }
 
+    /** 合并 Cookie 头（按名字去重，后者覆盖前者）。 */
+    private fun mergeCookies(vararg headers: String?): String? {
+        val byName = LinkedHashMap<String, String>()
+        headers.filterNotNull().forEach { header ->
+            header.split(';').map(String::trim).filter { it.contains('=') }.forEach { segment ->
+                byName[segment.substringBefore('=').trim()] = segment
+            }
+        }
+        return byName.values.joinToString("; ").takeIf { it.isNotBlank() }
+    }
+
     private fun applyHeaders(connection: HttpURLConnection, cookie: String?, userAgent: String = UA) {
         connection.setRequestProperty("User-Agent", userAgent)
         connection.setRequestProperty("Referer", "https://music.163.com/")
@@ -877,6 +1178,13 @@ internal object NeteaseClient {
 
     private fun JsonObject.string(key: String): String =
         this[key]?.jsonPrimitive?.contentOrNull.orEmpty()
+
+    /** 首页块的标题字段有对象和字符串两种形态（{"title": "..."} / "..."）。 */
+    private fun JsonObject.titleText(key: String): String =
+        when (val element = this[key]) {
+            is JsonObject -> element.string("title").ifBlank { element.string("text") }
+            else -> element?.jsonPrimitive?.contentOrNull.orEmpty()
+        }
 
     private fun kotlinx.serialization.json.JsonElement.jsonObjectOrNull(): JsonObject? =
         runCatching { jsonObject }.getOrNull()

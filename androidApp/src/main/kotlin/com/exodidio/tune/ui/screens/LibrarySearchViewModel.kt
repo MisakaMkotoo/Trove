@@ -48,6 +48,9 @@ data class LibrarySearchUiState(
     val onlineAlbums: List<com.exodidio.tune.netease.OnlineAlbumInfo> = emptyList(),
     val onlineLoading: Boolean = false,
     val onlineError: String? = null,
+    val onlinePlaylistError: String? = null,
+    val onlineArtistError: String? = null,
+    val onlineAlbumError: String? = null,
 )
 
 private data class OnlineSearchState(
@@ -58,18 +61,23 @@ private data class OnlineSearchState(
     val albums: List<com.exodidio.tune.netease.OnlineAlbumInfo> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
+    val playlistError: String? = null,
+    val artistError: String? = null,
+    val albumError: String? = null,
 )
 
 internal class LibrarySearchViewModel(
     private val syncStore: AndroidLibrarySyncStore,
     private val hideShortAudio: Flow<Boolean> = flowOf(false),
+    private val appContext: android.content.Context? = null,
 ) : ViewModel() {
     class Factory(
         private val syncStore: AndroidLibrarySyncStore,
         private val hideShortAudio: Flow<Boolean> = flowOf(false),
+        private val appContext: android.content.Context? = null,
     ) : androidx.lifecycle.ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            LibrarySearchViewModel(syncStore, hideShortAudio) as T
+            LibrarySearchViewModel(syncStore, hideShortAudio, appContext) as T
     }
 
     private val query = MutableStateFlow("")
@@ -118,6 +126,9 @@ internal class LibrarySearchViewModel(
             onlineAlbums = onlineState.albums,
             onlineLoading = onlineState.loading,
             onlineError = onlineState.error,
+            onlinePlaylistError = onlineState.playlistError,
+            onlineArtistError = onlineState.artistError,
+            onlineAlbumError = onlineState.albumError,
         )
     }.combine(syncStore.playbackOnlyTracksFlow) { state, playbackOnly ->
         // 封面是异步补齐的：结果列表按 trackId 合并 store 里的最新封面，晚到也会自动出现。
@@ -165,6 +176,9 @@ internal class LibrarySearchViewModel(
                         playlists = found.playlists,
                         artists = found.artists,
                         albums = found.albums,
+                        playlistError = found.playlistError,
+                        artistError = found.artistError,
+                        albumError = found.albumError,
                     )
                     // 歌单/歌手/专辑封面异步补齐，到达后按 id 回填。
                     found.playlists.forEach { item ->
@@ -196,7 +210,10 @@ internal class LibrarySearchViewModel(
                     }
                 },
                 onFailure = {
-                    onlineState.value = OnlineSearchState(query = keyword, error = it.message ?: "在线搜索失败")
+                    onlineState.value = OnlineSearchState(
+                        query = keyword,
+                        error = it.message ?: appContext?.getString(com.exodidio.tune.R.string.netease_search_failed),
+                    )
                 },
             )
         }

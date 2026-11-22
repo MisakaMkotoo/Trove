@@ -18,6 +18,12 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 网易云在线播放的本地缓存代理：
@@ -33,35 +39,46 @@ internal object NeteaseStreamProxy {
     /** 一次本地下发请求内允许的上游重连次数：轻微网络波动在代理层吸收掉。 */
     private const val UpstreamMaxAttempts = 3
     private const val UpstreamRetryDelayMs = 300L
+    /** 单条上游连接最多连续读取的字节数，超过就用 Range 换新连接，避免被 CDN 半路掐断。 */
+    private const val UpstreamMaxBytesPerConnection = 4L * 1024 * 1024
 
-    private var appContext: Context? = null
-    private var cache: SimpleCache? = null
-    private var databaseProvider: StandaloneDatabaseProvider? = null
-    private var server: ServerSocket? = null
-    private var port: Int = 0
+    @Volatile private var appContext: Context? = null
+    @Volatile private var cache: SimpleCache? = null
+    @Volatile private var databaseProvider: StandaloneDatabaseProvider? = null
+    @Volatile private var server: ServerSocket? = null
+    @Volatile private var port: Int = 0
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val initMutex = Mutex()
     private val upstreamUrls = ConcurrentHashMap<Long, String>()
     private val totalBytes = ConcurrentHashMap<Long, Long>()
     private val upstreamErrors = ConcurrentHashMap<Long, Long>()
 
-    @Synchronized
+    /** 非阻塞初始化：只登记 context，打开缓存/监听端口放到 IO 上做。 */
     fun initialize(context: Context) {
-        if (cache != null) return
         appContext = context.applicationContext
-        openCache(context.applicationContext, sizeLimitMb(context))
-        startServer()
+        if (cache != null && server != null) return
+        ioScope.launch { awaitReady() }
     }
 
-    @Synchronized
-    private fun openCache(context: Context, sizeMb: Int) {
-        closeCache()
+    /** 播放准备等真正需要代理时等待就绪；重复调用幂等。 */
+    suspend fun awaitReady() {
+        val app = appContext ?: return
+        if (cache != null && server != null) return
+        initMutex.withLock {
+            if (cache == null) openCacheLocked(app, sizeLimitMb(app))
+            if (server == null) startServerLocked()
+        }
+    }
+
+    private fun openCacheLocked(context: Context, sizeMb: Int) {
+        closeCacheLocked()
         val dir = File(context.filesDir, "netease-stream-cache-dir")
         val provider = StandaloneDatabaseProvider(context)
         databaseProvider = provider
         cache = SimpleCache(dir, LeastRecentlyUsedCacheEvictor(sizeMb.toLong() * 1024 * 1024), provider)
     }
 
-    @Synchronized
-    private fun closeCache() {
+    private fun closeCacheLocked() {
         runCatching { cache?.release() }
         cache = null
         runCatching { databaseProvider?.close() }
@@ -103,15 +120,13 @@ internal object NeteaseStreamProxy {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_SIZE_MB, DEFAULT_SIZE_MB).coerceIn(100, 8192)
 
-    @Synchronized
-    fun setSizeLimitMb(context: Context, sizeMb: Int) {
+    suspend fun setSizeLimitMb(context: Context, sizeMb: Int) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putInt(KEY_SIZE_MB, sizeMb.coerceIn(100, 8192)).apply()
         val app = appContext ?: return
-        openCache(app, sizeMb)
+        initMutex.withLock { openCacheLocked(app, sizeMb) }
     }
 
-    @Synchronized
     fun clearCache() {
         val current = cache ?: return
         runCatching {
@@ -123,7 +138,7 @@ internal object NeteaseStreamProxy {
 
     private fun keyFor(songId: Long): String = "netease-$songId"
 
-    private fun startServer() {
+    private fun startServerLocked() {
         if (server != null) return
         val socket = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
         server = socket
@@ -193,7 +208,13 @@ internal object NeteaseStreamProxy {
                     .setAllowCrossProtocolRedirects(true)
                     .setConnectTimeoutMs(4_000)
                     .setReadTimeoutMs(5_000)
-                    .setDefaultRequestProperties(mapOf("Referer" to "https://music.163.com/")),
+                    .setDefaultRequestProperties(
+                        mapOf(
+                            "Referer" to "https://music.163.com/",
+                            "Accept" to "*/*",
+                            "Accept-Encoding" to "identity",
+                        ),
+                    ),
             )
             .setCacheWriteDataSinkFactory(CacheDataSink.Factory().setCache(currentCache))
 
@@ -204,6 +225,7 @@ internal object NeteaseStreamProxy {
         var dataSource: DataSource? = null
         var attempts = 0
         var headersSent = false
+        var connectionStart = position
         try {
             while (remaining != 0L) {
                 try {
@@ -218,6 +240,7 @@ internal object NeteaseStreamProxy {
                                 .build(),
                         )
                         dataSource = source
+                        connectionStart = position
                         if (end == null && total == C.LENGTH_UNSET.toLong() && opened != C.LENGTH_UNSET.toLong()) {
                             total = position + opened
                             if (total > 0L) totalBytes[songId] = total
@@ -241,23 +264,46 @@ internal object NeteaseStreamProxy {
                         }
                         break
                     }
-                    output.write(buffer, 0, read)
+                    try {
+                        output.write(buffer, 0, read)
+                    } catch (error: Throwable) {
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        // 本地客户端已关闭（切歌/暂停/Media3 放弃读取）：主动取消，不是上游断流。
+                        System.err.println("NETSTREAM cancel song=$songId pos=$position err=${error.message}")
+                        return
+                    }
                     position += read
                     if (remaining != C.LENGTH_UNSET.toLong()) remaining -= read
+                    // 上游长连接容易被 CDN 半路掐断（~6MB Broken pipe）：定期换新连接续传。
+                    if (position - connectionStart >= UpstreamMaxBytesPerConnection) {
+                        runCatching { dataSource?.close() }
+                        dataSource = null
+                    }
                 } catch (error: Throwable) {
                     if (error is kotlinx.coroutines.CancellationException) throw error
+                    val connBytes = position - connectionStart
                     runCatching { dataSource?.close() }
                     dataSource = null
                     if (remaining == 0L) break
                     attempts += 1
-                    if (attempts >= UpstreamMaxAttempts) throw error
+                    if (attempts >= UpstreamMaxAttempts) {
+                        System.err.println(
+                            "NETSTREAM failed-upstream song=$songId attempts=$attempts pos=$position connBytes=$connBytes err=${error.message}",
+                        )
+                        throw error
+                    }
                     System.err.println(
-                        "NETSTREAM retry song=$songId attempt=$attempts pos=$position err=${error.message}",
+                        "NETSTREAM retry-upstream song=$songId attempt=$attempts pos=$position connBytes=$connBytes err=${error.message}",
                     )
                     Thread.sleep(UpstreamRetryDelayMs * attempts)
                 }
             }
-            output.flush()
+            try {
+                output.flush()
+            } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                System.err.println("NETSTREAM cancel song=$songId pos=$position err=${error.message}")
+            }
         } finally {
             runCatching { dataSource?.close() }
         }

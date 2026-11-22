@@ -1,8 +1,5 @@
 package com.exodidio.tune
 
-import com.exodidio.tune.lyrics.AndroidRomanizationEngine
-import com.exodidio.tune.lyrics.RomanizationViewModel
-
 import android.app.Activity
 import android.os.Bundle
 import android.view.WindowManager
@@ -39,6 +36,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.os.Handler
+import android.util.Log
 import android.os.Looper
 import android.provider.Settings
 import android.view.WindowInsetsController
@@ -60,9 +58,6 @@ import com.exodidio.tune.player.AndroidPlaybackSession
 import com.exodidio.tune.player.PlaybackService
 import com.exodidio.tune.player.PlaybackRequest
 import com.exodidio.tune.player.PlaybackState
-import com.exodidio.tune.lastfm.AndroidLastFmRuntime
-import com.exodidio.tune.lastfm.LastFmService
-import com.exodidio.tune.lastfm.isLastFmAuthCallback
 import com.exodidio.tune.lyrics.AndroidLyricsService
 import com.exodidio.tune.lyrics.LyricsPreferences
 import kotlin.math.roundToInt
@@ -85,12 +80,7 @@ import com.exodidio.tune.ui.screens.InsightViewModel
 private data class ManualLyricsOverride(val trackId: String, val content: String)
 
 class MainActivity : ComponentActivity() {
-    private val romanizationViewModel: RomanizationViewModel by viewModels {
-        RomanizationViewModel.Factory(
-            AndroidRomanizationEngine { applicationContext.assets.open(it) },
-        )
-    }
-    private lateinit var lastFm: LastFmService
+    private var playbackServiceStarted = false
     private var systemMusicVolumeState by mutableFloatStateOf(0f)
     private val viewModel: MainViewModel by viewModels {
         MainViewModel.Factory(ThemePreferences(applicationContext))
@@ -145,6 +135,7 @@ class MainActivity : ComponentActivity() {
         LibrarySearchViewModel.Factory(
             AndroidSyncRuntime.syncStore,
             com.exodidio.tune.player.PlaybackPreferences(applicationContext).hideShortAudio,
+            applicationContext,
         )
     }
     private val albumDetailsViewModel: AlbumDetailsViewModel by viewModels {
@@ -169,37 +160,39 @@ class MainActivity : ComponentActivity() {
         requestHighRefreshRate()
         AndroidSyncRuntime.initialize(applicationContext)
         com.exodidio.tune.netease.NeteaseRepository.initialize(applicationContext)
-        lastFm = AndroidLastFmRuntime.initialize(applicationContext, AndroidSyncRuntime.syncStore)
-        handleLastFmIntent(intent)
+        com.exodidio.tune.ui.components.TuneImages.initialize(applicationContext)
         AndroidPlaybackRuntime.initialize(applicationContext, AndroidSyncRuntime.syncStore)
         // 先把上次同步的电脑曲库垫进去，界面不用等网络；随后再后台刷新。
         // 恢复也放到 IO：整库元数据解析不能占着 onCreate 的主线程。
         lifecycleScope.launch(Dispatchers.IO) {
+            // 启动读盘全部在后台：先等本地曲库与网易云缓存就绪，再做首页匹配/恢复，
+            // 避免拿空库比对导致“未匹配”被写盘。
+            runCatching { AndroidSyncRuntime.syncStore.awaitLoaded() }
+            runCatching { com.exodidio.tune.netease.NeteaseRepository.awaitDiskLoaded() }
             runCatching { com.exodidio.tune.netease.NeteaseRepository.loadHome(applicationContext) }
             runCatching { com.exodidio.tune.sync.RemoteMusicLibrary.restoreCached(applicationContext) }
             // 配过电脑音乐库的话，启动时安静同步一次（失败自动退避重试，换网由网络回调再触发）。
             com.exodidio.tune.sync.RemoteMusicLibrary.initialize(applicationContext)
             com.exodidio.tune.sync.RemoteMusicLibrary.syncWithRetry(applicationContext)
         }
-        // Start the service once per app process so it can rebuild the last
-        // private playback session before Compose observes its StateFlows.
-        startService(Intent(this, PlaybackService::class.java))
         systemMusicVolumeState = currentSystemMusicVolume()
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NotificationPermissionRequest)
         }
 
         setContent {
-            val romanization by romanizationViewModel.state.collectAsStateWithLifecycle()
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-            val lastFmStatus by lastFm.status.collectAsStateWithLifecycle()
             val activePage = uiState.currentPage
             val activeDestination = uiState.selectedDestination
             val allTracks by AndroidSyncRuntime.syncStore.tracks.collectAsStateWithLifecycle(initialValue = emptyList())
             // 播放器的曲目视图必须包含在线流式曲目，否则收藏/封面等元数据会缺失。
             val playbackOnlyTracks by AndroidSyncRuntime.syncStore.playbackOnlyTracksFlow
                 .collectAsStateWithLifecycle(initialValue = emptyList())
-            val playbackQueueTracks = remember(allTracks, playbackOnlyTracks) { allTracks + playbackOnlyTracks }
+            val restoredQueueTracks by AndroidSyncRuntime.syncStore.restoredQueueTracksFlow
+                .collectAsStateWithLifecycle(initialValue = emptyMap())
+            val playbackQueueTracks = remember(allTracks, playbackOnlyTracks, restoredQueueTracks) {
+                allTracks + playbackOnlyTracks + restoredQueueTracks.values
+            }
             val moodRadioEligibleTrackIds by AndroidSyncRuntime.syncStore.moodRadioEligibleTrackIds.collectAsStateWithLifecycle(initialValue = emptySet())
             val allPlaylists by AndroidSyncRuntime.syncStore.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
             val homeUiState by if (activeDestination == AppDestination.Home && activePage == AppStackPage.Root) {
@@ -210,14 +203,21 @@ class MainActivity : ComponentActivity() {
                 remember { mutableStateOf(tracksViewModel.homeUiState.value) }
             }
             val tracksUiState by if (
-                activeDestination == AppDestination.Library &&
-                (activePage == AppStackPage.Root || activePage == AppStackPage.LibraryTracks || activePage == AppStackPage.LibraryDuplicates)
+                activePage == AppStackPage.SettingsDuplicates ||
+                (
+                    activeDestination == AppDestination.Library &&
+                        (activePage == AppStackPage.Root || activePage == AppStackPage.LibraryTracks || activePage == AppStackPage.LibraryDuplicates)
+                    )
             ) {
                 tracksViewModel.uiState.collectAsStateWithLifecycle()
             } else {
                 remember { mutableStateOf(tracksViewModel.uiState.value) }
             }
-            val insightUiState by if (activeDestination == AppDestination.Insight && activePage == AppStackPage.Root) insightViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(insightViewModel.uiState.value) }
+            // “数据分析”在设置里打开时也必须保持订阅，否则拿到的是未初始化的空状态。
+            val insightUiState by if (
+                activePage == AppStackPage.SettingsInsight ||
+                (activeDestination == AppDestination.Insight && activePage == AppStackPage.Root)
+            ) insightViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(insightViewModel.uiState.value) }
             val artistsUiState by if (activePage == AppStackPage.LibraryArtists) artistsViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(artistsViewModel.uiState.value) }
             val albumsUiState by if (activePage == AppStackPage.LibraryAlbums) albumsViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(albumsViewModel.uiState.value) }
             val genresUiState by if (activePage == AppStackPage.LibraryGenres) genresViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(genresViewModel.uiState.value) }
@@ -253,7 +253,9 @@ class MainActivity : ComponentActivity() {
                         if (granted && autoScanPending) {
                             autoScanPending = false
                             val singleFolder = folder ?: ""
-                            if (singleFolder.isNotBlank() && allTracks.isEmpty()) {
+                            // 曲库在后台读盘，直接判空会把“还没读完”当成“空库”，每次冷启动都全量重扫。
+                            runCatching { AndroidSyncRuntime.syncStore.awaitLoaded() }
+                            if (singleFolder.isNotBlank() && AndroidSyncRuntime.syncStore.tracks.value.isEmpty()) {
                                 scanner.scan(setOf(singleFolder))
                             }
                         }
@@ -265,7 +267,8 @@ class MainActivity : ComponentActivity() {
                 if (activity.checkSelfPermission(audioPermission()) == PackageManager.PERMISSION_GRANTED) {
                     preferenceScope.launch {
                         val singleFolder = folder ?: ""
-                        if (singleFolder.isNotBlank() && allTracks.isEmpty()) {
+                        runCatching { AndroidSyncRuntime.syncStore.awaitLoaded() }
+                        if (singleFolder.isNotBlank() && AndroidSyncRuntime.syncStore.tracks.value.isEmpty()) {
                             scanner.refreshPermission(true, false)
                             scanner.scan(setOf(singleFolder))
                         }
@@ -292,9 +295,6 @@ class MainActivity : ComponentActivity() {
                 initialValue = com.exodidio.tune.player.EqualizerSettings(),
             )
             val lyricsSettings by lyricsPreferences.settings.collectAsStateWithLifecycle(initialValue = com.exodidio.tune.lyrics.LyricsSettings())
-            LaunchedEffect(lyricsSettings.romanizationEnabled) {
-                romanizationViewModel.setAllowed(lyricsSettings.romanizationEnabled)
-            }
             // Avoid clearing a valid preference while Room is still loading the active manifest.
             val normalizationAvailable by AndroidSyncRuntime.syncStore.analysisAvailable.collectAsStateWithLifecycle(initialValue = true)
             LaunchedEffect(normalizationAvailable) {
@@ -389,7 +389,34 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val destinations = AppDestinationModels(
-                home = HomeDestinationModel(homeUiState, tracksViewModel::playHomeTrack),
+                home = HomeDestinationModel(
+                    state = homeUiState,
+                    onTrackClick = tracksViewModel::playHomeTrack,
+                    onPlayTracks = { ids, index ->
+                        if (index in ids.indices) playbackController.play(PlaybackRequest(ids, index))
+                    },
+                ),
+                discover = DiscoverDestinationModel(
+                    onPlayTracks = { ids, index ->
+                        if (index in ids.indices) playbackController.play(PlaybackRequest(ids, index))
+                    },
+                    onOpenPlaylist = { playlist ->
+                        com.exodidio.tune.netease.NeteaseRepository.stagePlaylist(
+                            playlistId = playlist.id,
+                            name = playlist.name,
+                            coverUrl = playlist.coverUrl,
+                            coverPath = playlist.coverPath,
+                            trackCount = 0,
+                        )
+                        com.exodidio.tune.netease.NeteaseRepository.select(playlist.id)
+                        viewModel.dispatch(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails))
+                    },
+                ),
+                mine = MineDestinationModel(
+                    onPlayTracks = { ids, index ->
+                        if (index in ids.indices) playbackController.play(PlaybackRequest(ids, index))
+                    },
+                ),
                 insight = InsightDestinationModel(
                     state = insightUiState,
                     onLibraryPeriodSelected = insightViewModel::setLibraryPeriod,
@@ -494,7 +521,7 @@ class MainActivity : ComponentActivity() {
                                 trackCount = info?.trackCount ?: 0,
                             )
                             com.exodidio.tune.netease.NeteaseRepository.select(playlistId.toString())
-                            viewModel.dispatch(AppIntent.OpenPage(AppStackPage.NeteasePlaylistDetails))
+                            viewModel.dispatch(AppIntent.OpenPageHere(AppStackPage.NeteasePlaylistDetails))
                         },
                     ),
                     details = LibraryDetailActions(
@@ -506,17 +533,13 @@ class MainActivity : ComponentActivity() {
                     ),
                 ),
                 settings = SettingsDestinationModel(
-                    lastFmStatus = lastFmStatus,
-                    onLastFmConnect = {
-                        lastFm.authorizationUrl()?.let { url -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                    },
-                    onLastFmDisconnect = { preferenceScope.launch { lastFm.disconnect() } },
                     lyricsSettings = lyricsSettings,
                     onLyricsSourceChanged = { source -> preferenceScope.launch { lyricsPreferences.setPreferredSource(source) } },
                     onLrclibChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setLrclib(enabled) } },
                     onKugouChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setKugou(enabled) } },
                     onNeteaseChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setNetease(enabled) } },
-                    onRomanizationEnabledChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setRomanizationEnabled(enabled) } },
+                    onLyricSpringStrengthChanged = { strength -> preferenceScope.launch { lyricsPreferences.setLyricSpringStrength(strength) } },
+                    onLyricAutoFullscreenChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setLyricAutoFullscreen(enabled) } },
                     crossfadeSeconds = crossfadeSettings.seconds,
                     lastEnabledCrossfadeSeconds = crossfadeSettings.lastEnabledSeconds,
                     onCrossfadeSecondsChanged = playbackController::setCrossfadeSeconds,
@@ -548,10 +571,12 @@ class MainActivity : ComponentActivity() {
                 queueTracks = playbackQueueTracks,
                 lyrics = lyrics,
                 lyricsLoading = lyricsLoadingTrackId == lyricsTrackId,
-                romanization = romanization,
-                romanizationAllowed = lyricsSettings.romanizationEnabled,
-                onRomanizationInput = romanizationViewModel::setInput,
-                onRomanizationToggle = romanizationViewModel::toggle,
+                translationVisible = lyricsSettings.translationVisible,
+                onTranslationToggle = {
+                    preferenceScope.launch { lyricsPreferences.setTranslationVisible(!lyricsSettings.translationVisible) }
+                },
+                lyricSpringStrength = lyricsSettings.lyricSpringStrength,
+                lyricAutoFullscreen = lyricsSettings.lyricAutoFullscreen,
                 onSearchLyrics = { track, title, artist -> lyricsService.search(track.id, title, artist, lyricsSettings) },
                 onLyricsSelected = { trackId, lyric ->
                     AndroidSyncRuntime.syncStore.saveProviderLyrics(trackId, lyric.content, lyric.source)
@@ -575,7 +600,6 @@ class MainActivity : ComponentActivity() {
                 onFavoriteToggle = { trackId, favorite ->
                     preferenceScope.launch {
                         AndroidSyncRuntime.syncStore.setFavorite(trackId, favorite)
-                        lastFm.setLoved(trackId, favorite)
                     }
                 },
                 onTrackPlayNext = playbackController::playNext,
@@ -606,15 +630,6 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleLastFmIntent(intent)
-    }
-
-    private fun handleLastFmIntent(intent: Intent?) {
-        val uri = intent?.data ?: return
-        if (isLastFmAuthCallback(uri.scheme, uri.host, uri.path, uri.getQueryParameter("token"))) {
-            intent.data = null
-            lifecycleScope.launch { lastFm.completeAuthorization(uri) }
-        }
     }
 
     private fun updateSystemBarAppearance(darkTheme: Boolean, fullScreenPlayerVisible: Boolean) {
@@ -728,6 +743,18 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         requestHighRefreshRate()
+        ensurePlaybackServiceStarted()
+    }
+
+    /**
+     * 在 onCreate 里直接 startService 会被系统按“后台启动服务”拒绝（BackgroundServiceStartNotAllowedException）。
+     * 放到 onResume：此时进程已是前台；万一仍被拒，下一次 onResume 会重试，并留下日志而不是静默吞掉。
+     */
+    private fun ensurePlaybackServiceStarted() {
+        if (playbackServiceStarted) return
+        runCatching { startService(Intent(this, PlaybackService::class.java)) }
+            .onSuccess { playbackServiceStarted = true }
+            .onFailure { error -> Log.w("Tune", "PlaybackService start deferred: ${error.message}") }
     }
 
     /** 显式请求屏幕最高刷新率；不设置的话系统常把普通应用按 60Hz 合成。 */

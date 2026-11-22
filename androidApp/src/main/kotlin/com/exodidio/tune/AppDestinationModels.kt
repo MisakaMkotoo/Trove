@@ -2,11 +2,8 @@ package com.exodidio.tune
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
-import com.exodidio.tune.lyrics.RomanizationUiState
-
 import android.net.Uri
 import androidx.compose.ui.graphics.Color
-import com.exodidio.tune.lastfm.LastFmStatus
 import com.exodidio.tune.lyrics.LyricsSettings
 import com.exodidio.tune.lyrics.LyricsSource
 import com.exodidio.tune.lyrics.LyricsSearchResult
@@ -45,6 +42,7 @@ import com.exodidio.tune.ui.screens.TrackSortOption
 @Immutable internal data class HomeDestinationModel(
     val state: HomeUiState = HomeUiState(),
     val onTrackClick: (List<LibraryTrack>, String) -> Unit = { _, _ -> },
+    val onPlayTracks: (List<String>, Int) -> Unit = { _, _ -> },
 )
 
 @Immutable internal data class InsightDestinationModel(
@@ -138,6 +136,15 @@ import com.exodidio.tune.ui.screens.TrackSortOption
     val onOnlinePlaylistClick: (Long) -> Unit = {},
 )
 
+@Immutable internal data class DiscoverDestinationModel(
+    val onPlayTracks: (List<String>, Int) -> Unit = { _, _ -> },
+    val onOpenPlaylist: (com.exodidio.tune.netease.DiscoverPlaylist) -> Unit = {},
+)
+
+@Immutable internal data class MineDestinationModel(
+    val onPlayTracks: (List<String>, Int) -> Unit = { _, _ -> },
+)
+
 @Stable internal data class LibraryDetailActions(
     val albums: AlbumDetailsUiState = AlbumDetailsUiState(),
     val playlists: PlaylistDetailsUiState = PlaylistDetailsUiState(),
@@ -159,15 +166,13 @@ import com.exodidio.tune.ui.screens.TrackSortOption
 )
 
 @Immutable internal data class SettingsDestinationModel(
-    val lastFmStatus: LastFmStatus = LastFmStatus(),
-    val onLastFmConnect: () -> Unit = {},
-    val onLastFmDisconnect: () -> Unit = {},
     val lyricsSettings: LyricsSettings = LyricsSettings(),
     val onLyricsSourceChanged: (LyricsSource) -> Unit = {},
     val onLrclibChanged: (Boolean) -> Unit = {},
     val onKugouChanged: (Boolean) -> Unit = {},
     val onNeteaseChanged: (Boolean) -> Unit = {},
-    val onRomanizationEnabledChanged: (Boolean) -> Unit = {},
+    val onLyricSpringStrengthChanged: (Float) -> Unit = {},
+    val onLyricAutoFullscreenChanged: (Boolean) -> Unit = {},
     val crossfadeSeconds: Int = 0,
     val lastEnabledCrossfadeSeconds: Int = 4,
     val onCrossfadeSecondsChanged: (Int) -> Unit = {},
@@ -195,6 +200,8 @@ import com.exodidio.tune.ui.screens.TrackSortOption
 
 @Immutable internal data class AppDestinationModels(
     val home: HomeDestinationModel = HomeDestinationModel(),
+    val discover: DiscoverDestinationModel = DiscoverDestinationModel(),
+    val mine: MineDestinationModel = MineDestinationModel(),
     val insight: InsightDestinationModel = InsightDestinationModel(),
     val library: LibraryDestinationModel = LibraryDestinationModel(),
     val settings: SettingsDestinationModel = SettingsDestinationModel(),
@@ -206,10 +213,10 @@ import com.exodidio.tune.ui.screens.TrackSortOption
     val queueTracks: List<LibraryTrack> = emptyList(),
     val lyrics: String? = null,
     val lyricsLoading: Boolean = false,
-    val romanization: RomanizationUiState = RomanizationUiState(),
-    val romanizationAllowed: Boolean = false,
-    val onRomanizationInput: (List<String>, Boolean) -> Unit = { _, _ -> },
-    val onRomanizationToggle: () -> Unit = {},
+    val translationVisible: Boolean = true,
+    val onTranslationToggle: () -> Unit = {},
+    val lyricSpringStrength: Float = 90f,
+    val lyricAutoFullscreen: Boolean = true,
     val onSearchLyrics: suspend (LibraryTrack, String, String) -> List<LyricsSearchResult> = { _, _, _ -> emptyList() },
     val onLyricsSelected: suspend (String, LyricsSearchResult) -> Unit = { _, _ -> },
     val artworkCrossfade: ArtworkCrossfadeTransition? = null,

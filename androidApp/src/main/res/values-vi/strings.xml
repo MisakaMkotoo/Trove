@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">Trang chủ</string>
     <string name="home_greeting_morning">Chào buổi sáng</string>
     <string name="home_greeting_afternoon">Chào buổi chiều</string>
@@ -180,14 +180,7 @@
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">Tích hợp</string>
     <string name="integration_title">Tích hợp</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">Scrobble các lượt nghe và đồng bộ bài hát yêu thích với Last.fm.</string>
-    <string name="lastfm_connected_as">Đã kết nối với tên %1$s</string>
-    <string name="lastfm_connect">Kết nối</string>
-    <string name="lastfm_connecting">Đang kết nối…</string>
-    <string name="lastfm_disconnect">Ngắt kết nối</string>
-    <string name="lastfm_error">Không thể kết nối với Last.fm. Vui lòng thử lại.</string>
-    <string name="lastfm_not_configured">Thông tin xác thực Last.fm chưa được cấu hình cho bản dựng này.</string>
+
     <string name="settings_about">Giới thiệu</string>
     <string name="about_title">Giới thiệu</string>
     <string name="about_description">Trình phát nhạc cục bộ hiện đại</string>
@@ -339,16 +332,11 @@
     <string name="lyrics_title">Lời bài hát</string>
     <string name="lyrics_data_sources">Nguồn dữ liệu</string>
     <string name="lyrics_preferred_source">Nguồn ưu tiên</string>
-    <string name="lyrics_romanization">Bật phiên âm</string>
+
     <string name="lyrics_source_auto_fetch">Tự động tìm</string>
     <string name="lyrics_info_action">Thông tin lời bài hát</string>
     <string name="lyrics_info_title">Nguồn lời bài hát</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">Hiện phiên âm</string>
-    <string name="player_romanization_hide">Ẩn phiên âm</string>
-    <string name="player_romanization_loading">Đang phiên âm…</string>
-    <string name="player_romanization_error">Phiên âm lỗi. Tắt rồi bật lại để thử lại.</string>
-    <string name="player_romanization_hint">Phiên âm offline: tiếng Trung và Hàn.</string>
-    <string name="player_romanization_mandarin">Lời chỉ có chữ Hán mặc định dùng Mandarin. Tên riêng có thể có cách đọc khác.</string>
+
 </resources>
 

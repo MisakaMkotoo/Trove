@@ -168,6 +168,7 @@ fun TrackRow(
     artist: String,
     modifier: Modifier = Modifier,
     artworkPath: String? = null,
+    artworkUrl: String? = null,
     contentPadding: PaddingValues = PaddingValues(start = 24.dp, top = 6.dp, end = 8.dp, bottom = 6.dp),
     artworkCornerRadius: Dp = TuneRadii.ListArtwork,
     titleStyle: TextStyle? = null,
@@ -212,15 +213,27 @@ fun TrackRow(
                 .border(0.5.dp, colors.borderGlass, RoundedCornerShape(artworkCornerRadius)),
             contentAlignment = Alignment.Center,
         ) {
-            if (bitmap != null) {
-                Image(
+            when {
+                bitmap != null -> Image(
                     bitmap = bitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize(),
                 )
-            } else {
-                MaterialSymbol(
+                !artworkUrl.isNullOrBlank() -> TuneRemoteImage(
+                    url = artworkUrl,
+                    sizePx = 200,
+                    modifier = Modifier.matchParentSize(),
+                    fallback = {
+                        MaterialSymbol(
+                            symbol = MaterialSymbols.MusicNote,
+                            contentDescription = null,
+                            size = 22.dp,
+                            tint = colors.textMuted,
+                        )
+                    },
+                )
+                else -> MaterialSymbol(
                     symbol = MaterialSymbols.MusicNote,
                     contentDescription = null,
                     size = 22.dp,

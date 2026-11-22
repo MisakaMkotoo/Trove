@@ -15,10 +15,6 @@ internal fun SettingsContent(
     onPlaybackSelected: () -> Unit,
     onIntegrationSelected: () -> Unit,
     onMusicSyncSelected: () -> Unit,
-    onNcmImportSelected: () -> Unit,
-    onHiddenTracksSelected: () -> Unit,
-    onNeteasePlaylistsSelected: () -> Unit,
-    onTabLayoutSelected: () -> Unit,
     onAboutSelected: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -44,26 +40,6 @@ internal fun SettingsContent(
                     R.string.settings_music_sync,
                     leadingSymbol = MaterialSymbols.Sync,
                     onClick = onMusicSyncSelected,
-                ),
-                ActionListItem(
-                    R.string.settings_ncm_import,
-                    leadingSymbol = MaterialSymbols.Album,
-                    onClick = onNcmImportSelected,
-                ),
-                ActionListItem(
-                    R.string.settings_hidden_tracks,
-                    leadingSymbol = MaterialSymbols.FilterList,
-                    onClick = onHiddenTracksSelected,
-                ),
-                ActionListItem(
-                    R.string.settings_netease_playlists,
-                    leadingSymbol = MaterialSymbols.MusicNote,
-                    onClick = onNeteasePlaylistsSelected,
-                ),
-                ActionListItem(
-                    R.string.settings_tab_layout,
-                    leadingSymbol = MaterialSymbols.Tune,
-                    onClick = onTabLayoutSelected,
                 ),
                 ActionListItem(
                     R.string.settings_about,

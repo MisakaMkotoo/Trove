@@ -24,6 +24,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
@@ -71,6 +72,14 @@ data class SimilarSongsMenuActions(
 )
 
 val LocalSimilarSongsMenuActions = staticCompositionLocalOf { SimilarSongsMenuActions() }
+
+/** 在线实体跳转：曲目带网易云 ID 时，菜单里的“前往专辑/歌手”走在线页面。 */
+data class NeteaseEntityMenuActions(
+    val onOpenArtist: (artistId: Long, name: String) -> Unit = { _, _ -> },
+    val onOpenAlbum: (albumId: Long, name: String, coverUrl: String?) -> Unit = { _, _, _ -> },
+)
+
+val LocalNeteaseEntityMenuActions = staticCompositionLocalOf { NeteaseEntityMenuActions() }
 
 data class MoodRadioMenuActions(
     val eligibleTrackIds: Set<String> = emptySet(),
@@ -156,6 +165,7 @@ fun TrackContextMenu(
 ) {
     val hapticFeedback = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val defaultHide: (LibraryTrack) -> Unit = { hiddenTrack ->
         scope.launch { AndroidSyncRuntime.syncStore.setHidden(hiddenTrack.id, true) }
         AndroidPlaybackRuntime.controller().removeFromQueue(hiddenTrack.id)
@@ -174,6 +184,13 @@ fun TrackContextMenu(
     val showMoodRadio = actions.moodRadio || track.id in moodRadio.eligibleTrackIds
     val similarMenu = LocalSimilarSongsMenuActions.current
     val showSimilarSongs = actions.similarSongs && similarMenu.available && similarMenu.isAvailable(track.id)
+    val neteaseEntityActions = LocalNeteaseEntityMenuActions.current
+    val neteaseArtistId = remember(track.metadataJson) {
+        com.exodidio.tune.netease.NeteaseRepository.neteaseArtistIdForTrack(track)
+    }
+    val neteaseAlbumId = remember(track.metadataJson) {
+        com.exodidio.tune.netease.NeteaseRepository.neteaseAlbumIdForTrack(track)
+    }
     val dismissAll = {
         detailSheet = null
         onDismiss()
@@ -224,16 +241,40 @@ fun TrackContextMenu(
             if ((actions.favorite || actions.addToPlaylist) && (hasNavigationActions || actions.removeFromPlaylist)) {
                 add(ContextActionMenuEntry.Divider)
             }
-            if (actions.goToAlbum && hasAlbum) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_album), MaterialSymbols.Album) { presentAfterFullscreenCloses { onGoToAlbum(track) } })
-            if (actions.goToArtists && hasArtists && artists.size == 1) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_artist, artists.single().name), MaterialSymbols.Person) { presentAfterFullscreenCloses { onGoToArtist(artists.single()) } })
-            if (actions.goToArtists && hasArtists && artists.size > 1) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_artists), MaterialSymbols.People) { requestBottomSheet(TrackContextBottomSheetRequest.Artists(artists)) })
+            if (actions.goToAlbum && hasAlbum) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_album), MaterialSymbols.Album) {
+                presentAfterFullscreenCloses {
+                    if (neteaseAlbumId != null) {
+                        neteaseEntityActions.onOpenAlbum(
+                            neteaseAlbumId,
+                            track.album,
+                            com.exodidio.tune.netease.NeteaseRepository.coverUrlForTrack(track),
+                        )
+                    } else {
+                        onGoToAlbum(track)
+                    }
+                }
+            })
+            if (actions.goToArtists && hasArtists) {
+                if (neteaseArtistId != null) {
+                    val name = artists.firstOrNull()?.name.orEmpty()
+                    add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_artist, name), MaterialSymbols.Person) {
+                        presentAfterFullscreenCloses { neteaseEntityActions.onOpenArtist(neteaseArtistId, name) }
+                    })
+                } else if (artists.size == 1) {
+                    add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_artist, artists.single().name), MaterialSymbols.Person) { presentAfterFullscreenCloses { onGoToArtist(artists.single()) } })
+                } else {
+                    add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_artists), MaterialSymbols.People) { requestBottomSheet(TrackContextBottomSheetRequest.Artists(artists)) })
+                }
+            }
             if (actions.removeFromPlaylist) {
                 if (hasNavigationActions) add(ContextActionMenuEntry.Divider)
                 add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_remove_from_playlist), MaterialSymbols.PlaylistRemove, destructive = true) { closeAfter { onRemoveFromPlaylist(track) } })
             }
-            if (onDownload != null || onMatchSong != null) {
+            val downloadedNetease = track.id.startsWith("netease:") &&
+                track.audioPath?.let { !it.startsWith("netease://") } == true
+            if ((onDownload != null && !downloadedNetease) || onMatchSong != null) {
                 add(ContextActionMenuEntry.Divider)
-                if (onDownload != null) {
+                if (onDownload != null && !downloadedNetease) {
                     add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_download), MaterialSymbols.ArrowDownward) { closeAfter { onDownload(track) } })
                 }
                 if (onMatchSong != null) {
@@ -249,6 +290,17 @@ fun TrackContextMenu(
             if (onDeleteFromDevice != null) {
                 add(ContextActionMenuEntry.Divider)
                 add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_delete_from_device), MaterialSymbols.Delete, destructive = true) { closeAfter { onDeleteFromDevice(track) } })
+            } else if (downloadedNetease) {
+                // 已下载的网易云歌曲：不再显示下载，改为删除下载。
+                add(ContextActionMenuEntry.Divider)
+                add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_delete_download), MaterialSymbols.Delete, destructive = true) {
+                    closeAfter {
+                        scope.launch {
+                            com.exodidio.tune.netease.NeteaseRepository.deleteDownload(context, track.id)
+                            AndroidPlaybackRuntime.controller().removeFromQueue(track.id)
+                        }
+                    }
+                })
             }
         }
         ContextActionMenu(entries)

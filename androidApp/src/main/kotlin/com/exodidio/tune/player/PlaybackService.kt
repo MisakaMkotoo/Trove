@@ -39,9 +39,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
@@ -51,12 +51,10 @@ import com.exodidio.tune.R
 import com.exodidio.tune.library.AudioTarget
 import com.exodidio.tune.library.resolveAudioTarget
 import com.exodidio.tune.sync.AndroidSyncRuntime
-import com.exodidio.tune.lastfm.AndroidLastFmRuntime
-import com.exodidio.tune.lastfm.LastFmService
-import com.exodidio.tune.lastfm.LastFmTrack
 import com.exodidio.tune.mood.MoodRadioBatchSize
 import com.exodidio.tune.mood.MoodRadioRefillThreshold
 import com.exodidio.tune.mood.selectMoodRadio
+import com.exodidio.tune.netease.NeteaseRepository
 
 /** 远程音频还没缓存：准备流程要交还给命令锁之外去下载。 */
 private class RemoteAudioNotReady(val path: String, val url: String) : Exception("Remote audio not cached")
@@ -81,10 +79,11 @@ class PlaybackService : Service() {
     // 每次指令进来就自增：正在下载的上一首尽快放弃，连续切歌不必排队等整首下完。
     private val loadToken = java.util.concurrent.atomic.AtomicInteger(0)
     // 在线流播放状态：用于识别“打开后立刻结束”的失败流。
-    private var currentStreamSongId: Long? = null
+    // 位置 ticker 在锁外读写这几个字段：用 @Volatile 保证跨线程可见性。
+    @Volatile private var currentStreamSongId: Long? = null
     private var currentStreamStartedAt = 0L
-    private var lastStreamPositionMs = 0L
-    private var lastStreamSongId: Long? = null
+    @Volatile private var lastStreamPositionMs = 0L
+    @Volatile private var lastStreamSongId: Long? = null
     private var pendingStreamResume: PendingStreamResume? = null
     // 点选类指令的代际号：连点十来下时，旧指令轮到自己时已被更新，直接丢弃，
     // 只执行最后点的那一首，避免积压指令依次准备、自动连切。
@@ -92,16 +91,28 @@ class PlaybackService : Service() {
     private val restored = CompletableDeferred<Unit>()
     private lateinit var restoreJob: Job
     private val queue = PlaybackQueue()
-    private var decoder: FfmpegDecoder? = null
+    @Volatile private var decoder: FfmpegDecoder? = null
     private var preloadedItem: PlaybackItem? = null
     private lateinit var sessionStore: PlaybackSessionStore
     private lateinit var playbackPreferences: PlaybackPreferences
     private lateinit var equalizerPreferences: EqualizerPreferences
     private lateinit var normalizationPreferences: NormalizationPreferences
-    private lateinit var lastFm: LastFmService
     private lateinit var listeningTracker: ListeningTracker
     private val listeningWrites = Channel<ListeningWrite>(64)
-    private lateinit var listeningWriter: Job
+    // 命令锁内只投递状态；Binder/全库索引等发布动作交给锁外单消费者，合并成最新一次。
+    private val queuePublishRequests = Channel<PlaybackQueueSnapshot>(Channel.CONFLATED)
+    private val notificationRequests = Channel<Unit>(Channel.CONFLATED)
+    // 连点的上一首/下一首合并处理：锁内只推进队列下标，只对最终曲目启动播放。
+    private val pendingSkips = java.util.concurrent.ConcurrentLinkedQueue<Boolean>()
+    private val skipRequests = Channel<Unit>(Channel.CONFLATED)
+    // 连续快速点击时先不启动：等最后一次点击后静默一小段，避免逐首拉直链/歌词。
+    @Volatile private var lastSkipAtMs = 0L
+    @Volatile private var skipBurstActive = false
+    // UI/队列推进立即执行；只有“真正开始播放”这一步走静默窗防抖。
+    private var skipStartJob: Job? = null
+    @Volatile private var pendingStartPaused = false
+    private var lastSessionPositionAtMs = 0L
+    private var moodRefillJob: Job? = null
     private var listeningFadeOutgoing: String? = null
     private var listeningFadeStartedAt = 0L
     private var listeningFadeStartedElapsed = 0L
@@ -126,15 +137,10 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         AndroidPlaybackRuntime.initialize(applicationContext, AndroidSyncRuntime.syncStore)
-        lastFm = AndroidLastFmRuntime.initialize(applicationContext, AndroidSyncRuntime.syncStore)
         listeningTracker = ListeningTracker("local") { UUID.randomUUID().toString() }
-        listeningWriter = scope.launch {
+        // 写盘协程挂在进程级 scope：Service 销毁时不能把它一起取消，否则最后一条听歌记录会丢。
+        AndroidSyncRuntime.backgroundScope.launch {
             for (write in listeningWrites) AndroidSyncRuntime.syncStore.recordListening(write)
-        }
-        runBlocking {
-            val now = System.currentTimeMillis()
-            AndroidSyncRuntime.syncStore.recoverOpenPlaybackAttempts(now)
-            AndroidSyncRuntime.syncStore.cleanupListening(now - ListeningRetentionMs)
         }
         sessionStore = PlaybackSessionStore(applicationContext)
         playbackPreferences = PlaybackPreferences(applicationContext)
@@ -174,8 +180,7 @@ class PlaybackService : Service() {
             }
         }
         // 在线曲目封面异步补齐后，正在播放的曲目也补上封面（只改状态，不重启播放）。
-        scope.launch {
-            AndroidSyncRuntime.syncStore.playbackOnlyTracksFlow.collect { tracks ->
+        scope.launch {            AndroidSyncRuntime.syncStore.playbackOnlyTracksFlow.collect { tracks ->
                 val current = when (val snapshot = state.value) {
                     is PlaybackState.Playing -> snapshot.item
                     is PlaybackState.Paused -> snapshot.item
@@ -207,6 +212,23 @@ class PlaybackService : Service() {
                         else -> Unit
                     }
                     updateNotification()
+                }
+            }
+        }
+        // 只给正在播放/准备中的在线曲目补文件封面：整队列不再批量下载封面。
+        scope.launch {
+            var requestedTrackId: String? = null
+            state.collect { snapshot ->
+                val item = when (snapshot) {
+                    is PlaybackState.Playing -> snapshot.item
+                    is PlaybackState.Paused -> snapshot.item
+                    is PlaybackState.Preparing -> snapshot.item
+                    else -> null
+                } ?: return@collect
+                if (item.trackId == requestedTrackId) return@collect
+                requestedTrackId = item.trackId
+                if (item.artworkPath.isNullOrBlank() && item.trackId.startsWith("netease:")) {
+                    NeteaseRepository.ensurePlaybackCover(item.trackId)
                 }
             }
         }
@@ -245,10 +267,39 @@ class PlaybackService : Service() {
             isActive = false
         }
         AndroidPlaybackSession.publish(mediaSession.sessionToken)
+        // 发布副作用与位置刷新都走锁外：命令锁只管内存状态机，不再被 Binder/全库索引占着。
+        scope.launch {
+            for (snapshot in queuePublishRequests) publishQueueSideEffects(snapshot)
+        }
+        scope.launch {
+            for (ignored in notificationRequests) updateNotification()
+        }
+        scope.launch {
+            for (ignored in skipRequests) runCatching { advanceSkipsAndScheduleStart() }
+        }
+        scope.launch {
+            while (true) {
+                delay(200)
+                tickPlaybackPosition()
+            }
+        }
         restoreJob = scope.launch {
+            // 曲库读盘在后台：等它完成再判断可用曲目，否则冷启动会把整条恢复队列判成不可用。
+            runCatching { AndroidSyncRuntime.syncStore.awaitLoaded() }
             try {
                 sessionStore.load()?.let { session ->
                     val saved = session.queue
+                    // 流式/搜索曲目只存在内存：先把随会话落盘的曲目放回曲库，恢复时才不会被过滤掉。
+                    val restoredQueueTracks = PlaybackQueueTracksStore.read(applicationContext)
+                    if (restoredQueueTracks.isNotEmpty()) {
+                        // 全部曲目先放进“恢复队列元数据”，曲库/扫描没就绪也能解析；
+                        // 流式曲目额外放回仅播放表，保证封面回写与可用性判断照常工作。
+                        AndroidSyncRuntime.syncStore.putRestoredQueueTracks(restoredQueueTracks)
+                        val streaming = restoredQueueTracks.filter { it.audioPath?.startsWith("netease://") == true }
+                        if (streaming.isNotEmpty()) {
+                            AndroidSyncRuntime.syncStore.putPlaybackOnlyTracks(streaming)
+                        }
+                    }
                     val availableTrackIds = AndroidPlaybackRuntime.availableTrackIds(saved.originalTrackIds)
                     commandMutex.withLock {
                         if (availableTrackIds.isEmpty()) {
@@ -271,8 +322,9 @@ class PlaybackService : Service() {
         scope.launch {
             while (true) {
                 delay(200)
+                // 歌曲结束分支要查 Media3 缓存跨度（SQLite）：在锁外先取好，锁内只做状态变更。
+                val clampSample = sampleStreamClampIfFinished()
                 commandMutex.withLock {
-                    refreshPlaybackPosition()
                     val playing = state.value as? PlaybackState.Playing
                     if (playing != null) enqueueListening(listeningTracker.tick(
                         playing.positionMs, playing.durationMs, System.currentTimeMillis(), SystemClock.elapsedRealtime(),
@@ -291,10 +343,12 @@ class PlaybackService : Service() {
                         val duration = decoder?.durationMs() ?: current.durationMs
                         val endedImmediately = SystemClock.elapsedRealtime() - currentStreamStartedAt < 3_000L
                         val clampMs = streamId?.let { songId ->
-                            val prefixMs = proxy.cachedPrefixMs(songId, duration)
-                            if (prefixMs > 0L) prefixMs
-                            else if (lastStreamSongId == songId) lastStreamPositionMs
-                            else current.positionMs
+                            clampSample?.takeIf { it.songId == songId }?.positionMs ?: run {
+                                val prefixMs = proxy.cachedPrefixMs(songId, duration)
+                                if (prefixMs > 0L) prefixMs
+                                else if (lastStreamSongId == songId) lastStreamPositionMs
+                                else current.positionMs
+                            }
                         }
                         val failedRecently = streamId != null && proxy.hasRecentUpstreamError(streamId)
                         val incomplete = duration <= 0L || (clampMs ?: 0L) < duration - 500L
@@ -307,7 +361,7 @@ class PlaybackService : Service() {
                             decoder?.pause()
                             state.value = PlaybackState.Paused(current.item, clampMs, duration)
                             publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, clampMs, duration)
-                            updateNotification()
+                            notificationRequests.trySend(Unit)
                             currentStreamSongId = null
                         } else {
                             if (streamId != null && endedImmediately) {
@@ -318,7 +372,7 @@ class PlaybackService : Service() {
                             publishQueue()
                         }
                     }
-                    if (refillMoodRadioIfNeeded()) publishQueue()
+                    maybeRefillMoodRadio()
                     maybeAppendHeartbeat()
                     maybeAppendRoam()
                     // A crossfade occupies both native source slots. Once its
@@ -373,14 +427,19 @@ class PlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        runBlocking {
-            finishListeningCrossfade()
-            enqueueListening(listeningTracker.finish(PlaybackEndReason.STOPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
-            listeningWrites.close()
-            withTimeoutOrNull(2_000) { listeningWriter.join() }
+        // 会话快照必须在解码器关闭前取；之后所有落盘/释放都交给进程级 IO，不再阻塞主线程。
+        val finalSession = currentSession()
+        finishListeningCrossfade()
+        enqueueListening(listeningTracker.finish(PlaybackEndReason.STOPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+        listeningWrites.close()
+        val closingDecoder = decoder
+        decoder = null
+        AndroidSyncRuntime.backgroundScope.launch {
+            runCatching { sessionStore.save(finalSession) }
+            // FfmpegDecoder 无内部同步：位置 ticker 用 tryLock 访问它，
+            // 所以关闭必须同样在命令锁内，否则可能与最后几拍读取并发。
+            runCatching { commandMutex.withLock { closingDecoder?.close() } }
         }
-        runBlocking { sessionStore.save(currentSession()) }
-        decoder?.close()
         preferencesJob?.cancel()
         moodRadioJob?.cancel()
         unregisterReceiver(noisyAudioReceiver)
@@ -449,7 +508,7 @@ class PlaybackService : Service() {
         repeat: RepeatMode? = null,
         heartbeatStart: Boolean = false,
         roamStart: Boolean = false,
-    ): Job {
+    ): Job? {
         // 心动模式/漫游绑定当前队列：任何换成另一个队列的操作都退出，模式自身的入队除外。
         if (action in HeartbeatExitActions) {
             if (!heartbeatStart) com.exodidio.tune.netease.NeteaseRepository.setHeartbeatEnabled(false)
@@ -462,6 +521,15 @@ class PlaybackService : Service() {
             // 直接断开连接让旧下载立刻退出，指令才能真正马上处理。
             com.exodidio.tune.sync.cancelRemoteAudioDownloads()
         }
+        // 上一首/下一首不进单条指令队列：整批合并推进，只启动最终那一首。
+        if (action == ActionNext || action == ActionPrevious) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            skipBurstActive = now - lastSkipAtMs <= SkipBurstGapMs
+            lastSkipAtMs = now
+            pendingSkips.add(action == ActionNext)
+            skipRequests.trySend(Unit)
+            return null
+        }
         // 点选类指令取一个代际号；轮到自己时若已有点得更晚的指令，整条丢弃。
         val dispatchToken = loadToken.get()
         val selectionTicket = if (action in SelectionActions) selectionGeneration.incrementAndGet() else 0
@@ -472,7 +540,10 @@ class PlaybackService : Service() {
         restored.await()
         // 网络的活儿只放在锁外：先把界面切到目标曲目并停掉旧声，下载完再进锁接管。
         if (selectionTicket != 0) prepareSelectionOffLock(action, trackIds, startIndex, superseded)
+        val lockWaitStartedAt = android.os.SystemClock.elapsedRealtime()
         commandMutex.withLock {
+            val lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockWaitStartedAt
+            if (lockWaitMs >= 50L) System.err.println("LOCKWAIT action=$action ms=$lockWaitMs")
             if (superseded()) return@withLock
             consumeNativeTransition()
             Log.d(PlaybackLogTag, "Handling action=$action queueSize=${queue.snapshot().activeTrackIds.size}")
@@ -480,10 +551,16 @@ class PlaybackService : Service() {
             when (action) {
                 ActionPlay -> if (isAlreadyLoadingOrPlaying(trackIds.getOrNull(startIndex))) {
                     // 连点同一首：已经在准备/播放就不要重新下载、从头再播一遍。
+                    System.err.println("PLAYACTION play skip-already head=${trackIds.firstOrNull()} state=${state.value::class.simpleName}")
                     QueueTransition.Unchanged
                 } else {
+                    System.err.println(
+                        "PLAYACTION play head=${trackIds.firstOrNull()} size=${trackIds.size} " +
+                            "prev=${state.value::class.simpleName} hb=$heartbeatStart roam=$roamStart",
+                    )
                     handleTransition(runCatching { queue.play(PlaybackRequest(trackIds, startIndex)) }
                         .getOrElse { QueueTransition.Stop }, PlaybackEndReason.SKIPPED)
+                    System.err.println("PLAYACTION play done state=${state.value::class.simpleName}")
                 }
                 ActionShuffle -> handleTransition(runCatching { queue.playShuffled(PlaybackRequest(trackIds, startIndex)) }
                     .getOrElse { QueueTransition.Stop }, PlaybackEndReason.SKIPPED)
@@ -507,19 +584,20 @@ class PlaybackService : Service() {
                             pauseCurrent()
                         }
                         is PlaybackState.Preparing -> {
-                            // 普通准备中再点没有新意义；重连中再点表示取消。
-                            if (current.resumeIntent) cancelPendingStreamResume()
+                            // 流重连中再点=取消；远程曲目下载中再点=取消下载并回暂停态。
+                            if (current.resumeIntent) {
+                                cancelPendingStreamResume()
+                            } else {
+                                com.exodidio.tune.sync.cancelRemoteAudioDownloads()
+                                loadToken.incrementAndGet()
+                                settlePausedAfterRemoteFailure(current.item, "cancelled by user")
+                            }
                         }
                         else -> resumeCurrent()
                     }
                 }
                 ActionStop -> stopPlayback()
                 ActionClearQueue -> handleTransition(queue.clear())
-                ActionNext -> handleTransition(queue.next(), PlaybackEndReason.SKIPPED, preservePlaybackState = true)
-                ActionPrevious -> {
-                    if ((decoder?.positionMs() ?: 0L) > PreviousRestartThresholdMs) seekCurrent(0L)
-                    else handleTransition(queue.previous(), PlaybackEndReason.SKIPPED, preservePlaybackState = true)
-                }
                 ActionSeek -> seekCurrent(positionMs)
                 ActionSetShuffle -> handleTransition(queue.setShuffle(enabled))
                 ActionSetRepeat -> repeat?.let(queue::setRepeatMode)
@@ -567,20 +645,30 @@ class PlaybackService : Service() {
         Log.d(PlaybackLogTag, "Mood Radio started seed=$seedId added=${selected.size} queueSize=${queue.snapshot().activeTrackIds.size}")
     }
 
-    private suspend fun refillMoodRadioIfNeeded(): Boolean {
-        val seedId = moodRadioSeedId ?: return false
+    /**
+     * 锁内只做便宜判断；全库候选与 selectMoodRadio 的计算放到锁外任务里，
+     * 完成后再回锁确认 seed 没变、追加队列。
+     */
+    private fun maybeRefillMoodRadio() {
+        val seedId = moodRadioSeedId ?: return
+        if (moodRefillJob?.isActive == true) return
         val snapshot = queue.snapshot()
-        if (snapshot.activeTrackIds.size - snapshot.currentIndex - 1 >= MoodRadioRefillThreshold) return false
+        if (snapshot.activeTrackIds.size - snapshot.currentIndex - 1 >= MoodRadioRefillThreshold) return
         val attempt = snapshot.currentTrackId to snapshot.activeTrackIds.size
-        if (attempt == moodRadioLastRefillAttempt) return false
+        if (attempt == moodRadioLastRefillAttempt) return
         moodRadioLastRefillAttempt = attempt
-        val store = AndroidSyncRuntime.syncStore
-        if (!store.libraryAnalysisEnabled.first()) return false
-        val selected = selectMoodRadio(seedId, store.moodRadioTracks(), snapshot.activeTrackIds.toSet(), MoodRadioBatchSize)
-        if (selected.isEmpty()) return false
-        queue.append(selected.map { it.id })
-        Log.d(PlaybackLogTag, "Mood Radio refilled seed=$seedId added=${selected.size} queueSize=${queue.snapshot().activeTrackIds.size}")
-        return true
+        moodRefillJob = scope.launch {
+            val store = AndroidSyncRuntime.syncStore
+            if (!store.libraryAnalysisEnabled.first()) return@launch
+            val selected = selectMoodRadio(seedId, store.moodRadioTracks(), snapshot.activeTrackIds.toSet(), MoodRadioBatchSize)
+            if (selected.isEmpty()) return@launch
+            commandMutex.withLock {
+                if (moodRadioSeedId != seedId) return@withLock
+                queue.append(selected.map { it.id })
+                publishQueue()
+                Log.d(PlaybackLogTag, "Mood Radio refilled seed=$seedId added=${selected.size} queueSize=${queue.snapshot().activeTrackIds.size}")
+            }
+        }
     }
 
     private fun stopMoodRadio() { moodRadioSeedId = null; moodRadioLastRefillAttempt = null; moodRadioActive.value = false }
@@ -604,6 +692,87 @@ class PlaybackService : Service() {
         }
     }
 
+    private class PreparedPlayback(
+        val item: PlaybackItem,
+        val decoder: FfmpegDecoder,
+        val positionMs: Long,
+        val durationMs: Long,
+        val startPaused: Boolean,
+    )
+
+    /**
+     * 创建并打开解码器插槽。普通指令在锁内调用（保持原行为）；
+     * 连点合并路径在锁外调用，避免打开流阻塞命令锁。
+     */
+    private suspend fun prepareDecoder(
+        item: PlaybackItem,
+        startPositionMs: Long,
+        startPaused: Boolean,
+        dspConfig: GlobalDspConfig,
+        focusGain: Float,
+        normalizedGain: Float,
+    ): PreparedPlayback {
+        val prepared = FfmpegDecoder()
+        try {
+            prepared.setGlobalDspConfig(dspConfig)
+            prepared.setFocusGain(focusGain)
+            prepared.preparePath(item.audioPath, normalizedGain)
+            if (startPositionMs > 0L) prepared.seekTo(clampSeekPosition(startPositionMs, prepared.durationMs()))
+            if (startPaused) prepared.pause() else prepared.play()
+            return PreparedPlayback(item, prepared, prepared.positionMs(), prepared.durationMs(), startPaused)
+        } catch (error: Throwable) {
+            runCatching { prepared.close() }
+            throw error
+        }
+    }
+
+    /** 锁内接管已打开的插槽：状态、通知、听歌统计与前台。 */
+    private fun commitPrepared(prepared: PreparedPlayback, startTracking: Boolean) {
+        val item = prepared.item
+        if (prepared.startPaused) {
+            state.value = PlaybackState.Paused(item, prepared.positionMs, prepared.durationMs)
+            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, prepared.positionMs, prepared.durationMs)
+        } else {
+            currentStreamSongId = streamSongIdOf(item)
+            currentStreamStartedAt = SystemClock.elapsedRealtime()
+            lastStreamSongId = currentStreamSongId
+            lastStreamPositionMs = prepared.positionMs
+            state.value = PlaybackState.Playing(item, prepared.positionMs, prepared.durationMs)
+            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PLAYING, prepared.positionMs, prepared.durationMs)
+        }
+        decoder = prepared.decoder
+        if (!prepared.startPaused && startTracking) {
+            enqueueListening(
+                listeningTracker.start(item.trackId, prepared.positionMs, System.currentTimeMillis(), SystemClock.elapsedRealtime()),
+            )
+        }
+        if (!prepared.startPaused && !startTracking) {
+            listeningTracker.resumeAfterInterruption(SystemClock.elapsedRealtime())
+        }
+    }
+
+    /** 播放启动失败的统一收尾；调用方持有命令锁。 */
+    private fun handleStartFailure(item: PlaybackItem, error: Throwable, startPositionMs: Long, prepareIntent: Boolean) {
+        if (error is RemoteAudioNotReady) {
+            // 界面已经切到这首歌并显示“准备中”，下载在锁外完成后自动接管播放。
+            scheduleDeferredRemotePlay(error.url)
+            return
+        }
+        if (error is StreamUrlNotReady) {
+            // 直链在锁外获取，拿到后重新接管播放。
+            System.err.println("NETSTREAM not ready song=${error.songId}; deferring")
+            scheduleDeferredStreamPlay(error.songId, startPositionMs, prepareIntent)
+            return
+        }
+        val songId = streamSongIdOf(item)
+        if (songId != null) {
+            // 在线歌曲连不上：退回暂停态而不是把播放入口整个收走，按播放可再次重连。
+            settlePausedAfterStreamFailure(item, startPositionMs, 0L, error.message ?: "stream failed")
+            return
+        }
+        fail(item.trackId, error.message ?: "Unable to decode audio")
+    }
+
     private suspend fun playCurrent(
         startPositionMs: Long = 0L,
         startPaused: Boolean = false,
@@ -615,6 +784,10 @@ class PlaybackService : Service() {
         val trackId = queue.snapshot().currentTrackId ?: return stopPlayback()
         Log.d(PlaybackLogTag, "Preparing current queue track id=$trackId")
         val item = AndroidPlaybackRuntime.controller().resolve(trackId) ?: return fail(trackId, "Audio asset is not available")
+        System.err.println(
+            "PLAYPREP id=$trackId path=${item.audioPath} " +
+                "target=${runCatching { resolveAudioTarget(filesDir, item.audioPath)?.let { it::class.simpleName } }.getOrNull()}",
+        )
         state.value = PlaybackState.Preparing(item, resumeIntent = prepareIntent)
         publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, positionMs = startPositionMs, durationMs = 0L)
         if (audioManager.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return fail(trackId, "Audio focus was not granted")
@@ -624,58 +797,173 @@ class PlaybackService : Service() {
             // A normalization lookup can suspend. Do not leave a closed decoder
             // reachable while a queued session write may read playback state.
             decoder = null
-            val preparedDecoder = FfmpegDecoder()
-            try {
-                preparedDecoder.setGlobalDspConfig(equalizerDspConfig(equalizerSettings))
-                preparedDecoder.setFocusGain(if (isDucked) DuckedFocusGain else 1f)
-                preparedDecoder.preparePath(item.audioPath, normalizationGain(item, queue.peekNext()))
-                if (startPositionMs > 0L) preparedDecoder.seekTo(clampSeekPosition(startPositionMs, preparedDecoder.durationMs()))
-                if (startPaused) {
-                    preparedDecoder.pause()
-                    state.value = PlaybackState.Paused(item, preparedDecoder.positionMs(), preparedDecoder.durationMs())
-                    publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, preparedDecoder.positionMs(), preparedDecoder.durationMs())
-                } else {
-                    preparedDecoder.play()
-                    currentStreamSongId = streamSongIdOf(item)
-                    currentStreamStartedAt = SystemClock.elapsedRealtime()
-                    lastStreamSongId = currentStreamSongId
-                    lastStreamPositionMs = preparedDecoder.positionMs()
-                    state.value = PlaybackState.Playing(item, preparedDecoder.positionMs(), preparedDecoder.durationMs())
-                    publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PLAYING, preparedDecoder.positionMs(), preparedDecoder.durationMs())
-                }
-                decoder = preparedDecoder
-                lastFm.startPlayback(item.trackId, preparedDecoder.positionMs())
-                if (!startPaused && startTracking) enqueueListening(listeningTracker.start(item.trackId, preparedDecoder.positionMs(), System.currentTimeMillis(), SystemClock.elapsedRealtime()))
-                if (!startPaused && !startTracking) listeningTracker.resumeAfterInterruption(SystemClock.elapsedRealtime())
-            } catch (error: Throwable) {
-                preparedDecoder.close()
-                throw error
-            }
+            val prepared = prepareDecoder(
+                item,
+                startPositionMs,
+                startPaused,
+                equalizerDspConfig(equalizerSettings),
+                if (isDucked) DuckedFocusGain else 1f,
+                normalizationGain(item, queue.peekNext()),
+            )
+            commitPrepared(prepared, startTracking)
             preloadNext()
             showForeground(item)
             Log.d(PlaybackLogTag, "Playback started id=$trackId durationMs=${decoder?.durationMs()}")
         } catch (error: Throwable) {
             if (error is kotlinx.coroutines.CancellationException) throw error
-            if (error is RemoteAudioNotReady) {
-                // 界面已经切到这首歌并显示“准备中”，下载在锁外完成后自动接管播放。
-                scheduleDeferredRemotePlay(error.url)
-                return
-            }
-            if (error is StreamUrlNotReady) {
-                // 直链在锁外获取，拿到后重新接管播放。
-                System.err.println("NETSTREAM not ready song=${error.songId}; deferring")
-                scheduleDeferredStreamPlay(error.songId, startPositionMs, prepareIntent)
-                return
-            }
-
-            val songId = streamSongIdOf(item)
-            if (songId != null) {
-                // 在线歌曲连不上：退回暂停态而不是把播放入口整个收走，按播放可再次重连。
-                settlePausedAfterStreamFailure(item, startPositionMs, 0L, error.message ?: "stream failed")
-                return
-            }
-            fail(trackId, error.message ?: "Unable to decode audio")
+            handleStartFailure(item, error, startPositionMs, prepareIntent)
         }
+    }
+
+    /** 连点合并的切歌现场：锁内已切到“准备中”并关掉旧声。 */
+    private class SkipSwitch(
+        val item: PlaybackItem,
+        val startPaused: Boolean,
+        val token: Int,
+        val dspConfig: GlobalDspConfig,
+        val focusGain: Float,
+        val normalizedGain: Float,
+    )
+
+    private suspend fun <T> timedLock(phase: String, block: suspend () -> T): T = commandMutex.withLock {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        try {
+            block()
+        } finally {
+            // 锁内停留时间（探针）：验证批量切歌/提交没有长期占锁。
+            val heldMs = android.os.SystemClock.elapsedRealtime() - startedAt
+            if (heldMs >= 50L) System.err.println("DRAINHOLD phase=$phase ms=$heldMs")
+        }
+    }
+
+    private enum class SkipAdvance { None, Stopped, Play }
+
+    /**
+     * 点击立即推进队列并刷新界面（不碰解码器/网络）；真正的启动交给静默窗后的 startPendingSkip。
+     */
+    private suspend fun advanceSkipsAndScheduleStart() {
+        runCatching { restored.await() }
+        if (pendingSkips.isEmpty()) return
+        val advance = timedLock("steps") { advancePendingSkipsLocked() }
+        if (advance != SkipAdvance.Play) return
+        scheduleSkipStart()
+    }
+
+    private suspend fun advancePendingSkipsLocked(): SkipAdvance {
+        consumeNativeTransition()
+        val wasPaused = state.value is PlaybackState.Paused
+        var transition: QueueTransition? = null
+        var restartedCurrent = false
+        var stepped = false
+        while (true) {
+            val next = pendingSkips.poll() ?: break
+            if (next) {
+                transition = queue.next()
+                restartedCurrent = false
+                stepped = true
+            } else if (!stepped && (decoder?.positionMs() ?: 0L) > PreviousRestartThresholdMs) {
+                // 连点的第一次“上一首”与单点一致：先回到本曲开头。
+                seekCurrent(0L)
+                transition = QueueTransition.Unchanged
+                restartedCurrent = true
+            } else {
+                transition = queue.previous()
+                restartedCurrent = false
+                stepped = true
+            }
+        }
+        val finalTransition = transition ?: return SkipAdvance.None
+        if (restartedCurrent) return SkipAdvance.None
+        when (finalTransition) {
+            is QueueTransition.Play -> Unit
+            QueueTransition.StopAtCurrent -> {
+                stopAtCurrentTrack(PlaybackEndReason.SKIPPED)
+                return SkipAdvance.Stopped
+            }
+            QueueTransition.Stop -> {
+                stopPlayback()
+                return SkipAdvance.Stopped
+            }
+            QueueTransition.Unchanged -> return SkipAdvance.None
+        }
+        val trackId = queue.snapshot().currentTrackId ?: return SkipAdvance.None
+        val item = AndroidPlaybackRuntime.controller().resolve(trackId) ?: return SkipAdvance.None
+        publishQueue()
+        pendingStartPaused = wasPaused
+        // 只切界面：不关旧解码器、不取流，连点期间旧歌继续放，启动交给静默窗。
+        state.value = PlaybackState.Preparing(item)
+        return SkipAdvance.Play
+    }
+
+    /** 连点时取消上一轮待启动任务；手停下 250ms 后才真正拉流/下载并出声。 */
+    private fun scheduleSkipStart() {
+        skipStartJob?.cancel()
+        val quietMs = if (skipBurstActive) SkipStartQuietMs else 0L
+        skipStartJob = scope.launch {
+            if (quietMs > 0L) delay(quietMs)
+            if (pendingSkips.isNotEmpty()) return@launch
+            startPendingSkip()
+        }
+    }
+
+    private suspend fun startPendingSkip() {
+        runCatching { restored.await() }
+        if (pendingSkips.isNotEmpty()) return
+        val switch = timedLock("switch") { prepareSkipSwitchLocked(pendingStartPaused) } ?: return
+        val prepared = try {
+            prepareDecoder(switch.item, 0L, switch.startPaused, switch.dspConfig, switch.focusGain, switch.normalizedGain)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            timedLock("error") {
+                if (loadToken.get() != switch.token) return@timedLock
+                handleStartFailure(switch.item, error, 0L, prepareIntent = false)
+            }
+            return
+        }
+        timedLock("commit") {
+            if (queue.snapshot().currentTrackId != switch.item.trackId || loadToken.get() != switch.token) {
+                runCatching { prepared.decoder.close() }
+                return@timedLock
+            }
+            commitPrepared(prepared, startTracking = true)
+            preloadNext()
+            showForeground(switch.item)
+            Log.d(PlaybackLogTag, "Playback started id=${switch.item.trackId} durationMs=${prepared.durationMs}")
+        }
+    }
+
+    /** 锁内：切到“准备中”并关掉旧声；返回 null 表示本批放弃。 */
+    private suspend fun prepareSkipSwitchLocked(wasPaused: Boolean): SkipSwitch? {
+        finishListeningCrossfade()
+        enqueueListening(
+            listeningTracker.finish(PlaybackEndReason.SKIPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()),
+        )
+        val trackId = queue.snapshot().currentTrackId ?: run {
+            stopPlayback()
+            return null
+        }
+        val item = AndroidPlaybackRuntime.controller().resolve(trackId) ?: run {
+            fail(trackId, "Audio asset is not available")
+            return null
+        }
+        System.err.println(
+            "PLAYPREP id=$trackId path=${item.audioPath} " +
+                "target=${runCatching { resolveAudioTarget(filesDir, item.audioPath)?.let { it::class.simpleName } }.getOrNull()}",
+        )
+        state.value = PlaybackState.Preparing(item)
+        publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, positionMs = 0L, durationMs = 0L)
+        if (audioManager.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            fail(trackId, "Audio focus was not granted")
+            return null
+        }
+        restoreFocusGain()
+        val token = loadToken.get()
+        val dspConfig = equalizerDspConfig(equalizerSettings)
+        val focusGain = if (isDucked) DuckedFocusGain else 1f
+        val normalizedGain = normalizationGain(item, queue.peekNext())
+        decoder?.close()
+        decoder = null
+        return SkipSwitch(item, wasPaused, token, dspConfig, focusGain, normalizedGain)
     }
 
     /** 锁外下载远程文件；下载完成且这一首仍是当前曲目时，回到锁内继续准备。 */
@@ -685,7 +973,15 @@ class PlaybackService : Service() {
             val file = com.exodidio.tune.sync.ensureRemoteAudioFile(applicationContext, url) {
                 loadToken.get() != token
             }
-            if (file == null || loadToken.get() != token) return@launch
+            if (loadToken.get() != token) return@launch
+            if (file == null) {
+                // 资源库不可达或下载失败：不能停在 Preparing，落到暂停态让用户重试。
+                val currentId = queue.snapshot().currentTrackId ?: return@launch
+                val item = AndroidPlaybackRuntime.controller().resolve(currentId) ?: return@launch
+                if (resolveAudioTarget(filesDir, item.audioPath) !is AudioTarget.RemoteTarget) return@launch
+                settlePausedAfterRemoteFailure(item, "remote library unavailable")
+                return@launch
+            }
             commandMutex.withLock {
                 if (loadToken.get() != token) return@withLock
                 val currentId = queue.snapshot().currentTrackId ?: return@withLock
@@ -696,11 +992,27 @@ class PlaybackService : Service() {
         }
     }
 
+    /** 资源库曲目准备失败/被取消：回暂停态，播放键可再次重试。 */
+    private fun settlePausedAfterRemoteFailure(item: PlaybackItem, reason: String) {
+        if (queue.snapshot().currentTrackId != item.trackId) return
+        System.err.println("PLAYREMOTEFAIL id=${item.trackId} path=${item.audioPath} reason=$reason")
+        decoder?.close()
+        decoder = null
+        state.value = PlaybackState.Paused(item, 0L, 0L)
+        publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, 0L, 0L)
+        updateNotification()
+    }
+
     /** Restores the selected item paused, so reopening the app never starts audio by itself. */
     private suspend fun restoreCurrent(savedPositionMs: Long) {
         val trackId = queue.snapshot().currentTrackId ?: return clearRestoredSession()
         val item = AndroidPlaybackRuntime.controller().resolve(trackId)
-            ?: return clearRestoredSession()
+            ?: run {
+                // 本地扫描/远端曲库可能还没恢复完：保留整个队列，别因为当前曲目暂时解析不了就清空。
+                Log.w(PlaybackLogTag, "Queue restored; current track not resolvable yet: $trackId")
+                publishQueue()
+                return
+            }
         // Publish the retained item before FFmpeg opens it, so Compose can mount the mini player.
         state.value = PlaybackState.Paused(item, savedPositionMs.coerceAtLeast(0L), durationMs = 0L)
         val restoredTarget = resolveAudioTarget(filesDir, item.audioPath)
@@ -736,7 +1048,6 @@ class PlaybackService : Service() {
                 it.pause()
                 state.value = PlaybackState.Paused(item, positionMs, it.durationMs())
                 publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, positionMs, it.durationMs())
-                lastFm.startPlayback(item.trackId, positionMs)
             }
             preloadNext()
             showForeground(item)
@@ -881,6 +1192,7 @@ class PlaybackService : Service() {
     /** 在线歌曲连不上：保留曲目并按缓存末尾/原位置暂停，绝不把播放入口收掉。 */
     private fun settlePausedAfterStreamFailure(item: PlaybackItem, positionMs: Long, durationMs: Long, reason: String) {
         Log.w(PlaybackLogTag, "Stream playback unavailable id=${item.trackId} reason=$reason")
+        System.err.println("PLAYSTREAMPAUSED id=${item.trackId} path=${item.audioPath} reason=$reason")
         val songId = streamSongIdOf(item)
         decoder?.close()
         decoder = null
@@ -934,7 +1246,6 @@ class PlaybackService : Service() {
         finishListeningCrossfade()
         clearArtworkCrossfade()
         decoder?.seekTo(targetPositionMs) ?: return
-        lastFm.seek(targetPositionMs)
         if (playing) {
             state.value = PlaybackState.Playing(item, targetPositionMs, durationMs)
             publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PLAYING, targetPositionMs, durationMs)
@@ -988,6 +1299,7 @@ class PlaybackService : Service() {
 
     private fun fail(trackId: String?, reason: String) {
         Log.e(PlaybackLogTag, "Playback failed id=$trackId reason=$reason")
+        System.err.println("PLAYFAIL id=$trackId reason=$reason")
         finishListeningCrossfade()
         enqueueListening(listeningTracker.finish(PlaybackEndReason.STOPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         clearArtworkCrossfade()
@@ -1032,7 +1344,22 @@ class PlaybackService : Service() {
     private suspend fun publishQueue() {
         val snapshot = queue.snapshot()
         queueState.value = snapshot
-        val tracks = AndroidSyncRuntime.syncStore.tracks.first().associateBy { it.id }
+        // 全库索引 + Binder 发布交给锁外单消费者；这里只投递最新快照。
+        queuePublishRequests.trySend(snapshot)
+        // Capture before the asynchronous DataStore write. A later command can
+        // close the decoder, but cannot change this immutable session snapshot.
+        val session = currentSession(snapshot)
+        scope.launch {
+            sessionStore.save(session)
+            persistQueueTracks(snapshot)
+        }
+    }
+
+    private fun publishQueueSideEffects(snapshot: PlaybackQueueSnapshot) {
+        val store = AndroidSyncRuntime.syncStore
+        val tracks = store.restoredQueueTracksFlow.value +
+            store.playbackOnlyTracksFlow.value.associateBy { it.id } +
+            store.tracks.value.associateBy { it.id }
         mediaSession.setQueue(snapshot.activeTrackIds.mapIndexedNotNull { index, trackId ->
             tracks[trackId]?.let { track ->
                 MediaSession.QueueItem(
@@ -1047,10 +1374,6 @@ class PlaybackService : Service() {
             }
         })
         updateNowPlayingTransportState()
-        // Capture before the asynchronous DataStore write. A later command can
-        // close the decoder, but cannot change this immutable session snapshot.
-        val session = currentSession(snapshot)
-        scope.launch { sessionStore.save(session) }
     }
 
     private fun currentSession(snapshot: PlaybackQueueSnapshot = queue.snapshot()): PlaybackSession {
@@ -1061,6 +1384,21 @@ class PlaybackService : Service() {
         }
         return PlaybackSession(snapshot, positionMs.coerceAtLeast(0L))
     }
+
+    /** 只持久化“仅播放”曲目：本地/导入/远端曲库各自有持久化，不在这里重复。 */
+    private fun persistQueueTracks(snapshot: PlaybackQueueSnapshot) {
+        val store = AndroidSyncRuntime.syncStore
+        // 元数据一起存：冷启动时本地扫描/远端曲库可能还没就绪，队列也要能显示和解析。
+        val byId = (store.tracks.value + store.playbackOnlyTracksFlow.value).associateBy { it.id }
+        val tracks = snapshot.activeTrackIds.mapNotNull(byId::get)
+        if (tracks.isEmpty()) return
+        val signature = tracks.joinToString("|") { it.id }.hashCode()
+        if (signature == lastQueueTracksSignature) return
+        lastQueueTracksSignature = signature
+        PlaybackQueueTracksStore.write(applicationContext, tracks)
+    }
+
+    @Volatile private var lastQueueTracksSignature: Int = Int.MIN_VALUE
 
     private suspend fun clearRestoredSession() {
         decoder?.close(); decoder = null; preloadedItem = null
@@ -1247,7 +1585,6 @@ class PlaybackService : Service() {
         state.value = PlaybackState.Playing(incoming, positionMs, durationMs)
         enqueueListening(listeningTracker.finish(PlaybackEndReason.COMPLETED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         enqueueListening(listeningTracker.start(incoming.trackId, positionMs, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
-        lastFm.startPlayback(incoming.trackId, positionMs)
         publishNowPlaying(incoming, AndroidMediaPlaybackState.STATE_PLAYING, positionMs, durationMs)
         updateNotification()
         // During a crossfade both native slots are live (incoming + outgoing).
@@ -1372,14 +1709,56 @@ class PlaybackService : Service() {
         }
     }
 
-    private fun refreshPlaybackPosition() {
-        val current = state.value as? PlaybackState.Playing ?: return
-        val positionMs = decoder?.positionMs()?.let { clampSeekPosition(it, current.durationMs) } ?: return
-        if (currentStreamSongId != null) lastStreamPositionMs = positionMs
-        if (positionMs == current.positionMs) return
-        state.value = current.copy(positionMs = positionMs)
-        mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_PLAYING, positionMs))
-        lastFm.reportPlayback(current.item.toLastFmTrack(), positionMs, current.durationMs)
+    /**
+     * 位置刷新走独立 200ms ticker。解码器仍未做线程安全封装，所以这里用 tryLock 机会式读取：
+     * 拿不到锁（正在切歌/准备）就跳过这一拍，绝不排队等锁。
+     */
+    private fun tickPlaybackPosition() {
+        if (!commandMutex.tryLock()) return
+        try {
+            val current = state.value as? PlaybackState.Playing ?: return
+            val positionMs = decoder?.positionMs()?.let { clampSeekPosition(it, current.durationMs) } ?: return
+            if (currentStreamSongId != null) lastStreamPositionMs = positionMs
+            if (positionMs != current.positionMs) {
+                // 只在状态没被 seek/暂停改过时前移，避免用旧读数覆盖新位置。
+                state.update { latest ->
+                    if (latest is PlaybackState.Playing &&
+                        latest.item.trackId == current.item.trackId &&
+                        latest.positionMs == current.positionMs
+                    ) {
+                        latest.copy(positionMs = positionMs)
+                    } else {
+                        latest
+                    }
+                }
+            }
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastSessionPositionAtMs < 1_000L) return
+            lastSessionPositionAtMs = now
+            mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_PLAYING, positionMs))
+        } finally {
+            commandMutex.unlock()
+        }
+    }
+
+    private data class StreamClampSample(val songId: Long, val positionMs: Long)
+
+    /** 歌曲刚结束时提前查一次缓存跨度（Media3 SQLite）；锁被占用就留到锁内兜底。 */
+    private fun sampleStreamClampIfFinished(): StreamClampSample? {
+        if (!commandMutex.tryLock()) return null
+        return try {
+            val current = state.value as? PlaybackState.Playing ?: return null
+            if (decoder?.isFinished() != true) return null
+            val songId = currentStreamSongId ?: return null
+            val duration = decoder?.durationMs() ?: current.durationMs
+            val prefixMs = com.exodidio.tune.netease.NeteaseStreamProxy.cachedPrefixMs(songId, duration)
+            val positionMs = if (prefixMs > 0L) prefixMs
+            else if (lastStreamSongId == songId) lastStreamPositionMs
+            else current.positionMs
+            StreamClampSample(songId, positionMs)
+        } finally {
+            commandMutex.unlock()
+        }
     }
 
     private fun enqueueListening(writes: List<ListeningWrite>) {
@@ -1397,15 +1776,6 @@ class PlaybackService : Service() {
         listeningFadeStartedElapsed = 0
         listeningFadeMaxMs = 0
     }
-
-    private fun PlaybackItem.toLastFmTrack() = LastFmTrack(
-        id = trackId,
-        title = title,
-        artist = artist,
-        album = album,
-        albumArtist = albumArtist,
-        trackNumber = trackNumber,
-    )
 
     private fun androidPlaybackState(state: Int, positionMs: Long): AndroidMediaPlaybackState =
         AndroidMediaPlaybackState.Builder()
@@ -1442,7 +1812,7 @@ class PlaybackService : Service() {
         return artwork
     }
 
-    private fun FfmpegDecoder.preparePath(path: String, gain: Float) {
+    private suspend fun FfmpegDecoder.preparePath(path: String, gain: Float) {
         when (val target = resolveAudioTarget(filesDir, path)) {
             is AudioTarget.FileTarget -> prepare(target.file, gain)
             is AudioTarget.ContentTarget -> {
@@ -1466,13 +1836,17 @@ class PlaybackService : Service() {
                 if (repository.cachedStreamUrl(songId) == null && !repository.hasCachedStream(songId)) {
                     throw StreamUrlNotReady(songId)
                 }
-                val url = repository.playbackStreamUrl(songId)
                 try {
-                    prepareUrl(url, gain)
+                    prepareUrl(repository.playbackStreamUrl(songId), gain)
                 } catch (error: Throwable) {
                     if (error is kotlinx.coroutines.CancellationException) throw error
                     System.err.println("NETSTREAM prepare failed song=$songId: ${error.message}")
-                    throw error
+                    // 缓存的直链可能已过期：丢掉后重新取一次，成功就继续播放，不再直接落暂停。
+                    repository.invalidateStreamUrl(songId)
+                    val refreshed = repository.ensureResumableStreamUrl(songId)
+                    if (!refreshed) throw error
+                    System.err.println("NETSTREAM retry with fresh url song=$songId")
+                    prepareUrl(repository.playbackStreamUrl(songId), gain)
                 }
             }
             null -> error("Empty audio path")
@@ -1560,13 +1934,15 @@ class PlaybackService : Service() {
         internal const val EnabledExtra = "enabled"
         internal const val RepeatModeExtra = "repeat_mode"
         private const val PreviousRestartThresholdMs = 3_000L
+        // 连点静默窗：最后一次点击后停 250ms 才启动；两击间隔 ≤400ms 视为连点。
+        private const val SkipStartQuietMs = 250L
+        private const val SkipBurstGapMs = 400L
         private const val DuckedFocusGain = 0.2f
         private const val ChannelId = "playback"
         private const val NotificationId = 2002
         private const val NowPlayingArtworkSizePx = 512
         private const val StreamUrlTimeoutMs = 12_000L
         private const val HeartbeatRetryMaxDelayMs = 15_000L
-        private const val ListeningRetentionMs = 180L * 24 * 60 * 60 * 1_000
         private val PreloadResyncActions = setOf(
             ActionSetShuffle, ActionSetRepeat, ActionPlayNext, ActionRemove, ActionReorder, ActionStartMoodRadio,
         )

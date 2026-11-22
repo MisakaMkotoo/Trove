@@ -8,8 +8,52 @@
     <string name="destination_library">Library</string>
     <string name="destination_insight">Insight</string>
     <string name="destination_discover">Discover</string>
+    <string name="destination_mine">Mine</string>
+    <string name="mine_placeholder_description">Your space will appear here.</string>
     <string name="discover_placeholder_title">Discover</string>
     <string name="discover_placeholder_description">Coming soon.</string>
+    <string name="discover_section_rankings">Charts</string>
+    <string name="discover_section_curated">Curated playlists</string>
+    <string name="discover_section_recommended">For you</string>
+    <string name="discover_section_new_songs">New songs</string>
+    <string name="discover_category_rankings">Charts</string>
+    <string name="discover_category_playlists">Playlists</string>
+    <string name="discover_category_japanese">J-pop</string>
+    <string name="discover_category_acg">Anime</string>
+    <string name="discover_category_explore">Explore</string>
+    <string name="discover_category_vip">VIP</string>
+    <string name="discover_category_ost">OST</string>
+    <string name="discover_category_rock">Rock</string>
+    <string name="discover_loading">Loading…</string>
+    <string name="discover_error">Couldn\'t load: %1$s</string>
+    <string name="discover_retry">Retry</string>
+    <string name="discover_ranking_subtitle">Official chart</string>
+    <string name="discover_curated_subtitle">Editor\'s pick</string>
+    <string name="discover_recommended_subtitle">Recommended for you</string>
+    <string name="discover_new_songs_empty">No new songs right now.</string>
+    <string name="home_section_favorite_rec">Based on songs you love</string>
+    <string name="home_feed_fallback_title">Picked for you</string>
+    <string name="account_title">Account</string>
+    <string name="account_nickname">Nickname</string>
+    <string name="account_uid">UID</string>
+    <string name="account_login_name">Phone / email</string>
+    <string name="account_type">Account type</string>
+    <string name="account_type_phone">Phone</string>
+    <string name="account_type_email">Email</string>
+    <string name="account_joined">Joined</string>
+    <string name="account_login_title">Sign in to NetEase Cloud Music</string>
+    <string name="account_login_desc">Sign in to sync playlists, daily picks and account details.</string>
+    <string name="netease_login_go">Sign in</string>
+    <string name="discover_login_curated">Sign in to see curated playlists</string>
+    <string name="mine_created_title">Created playlists</string>
+    <string name="mine_saved_title">Saved playlists</string>
+    <string name="mine_artists_title">Followed artists</string>
+    <string name="mine_more">More</string>
+    <string name="mine_recent_section">Recently played</string>
+    <string name="mine_downloads_title">Downloaded music</string>
+    <string name="netease_artist_songs_title">Artist</string>
+    <string name="account_gender_male">Male</string>
+    <string name="account_gender_female">Female</string>
     <string name="settings_show_genres">Show genres</string>
     <string name="settings_show_composers">Show composers</string>
     <string name="settings_data_analysis">Data analysis</string>
@@ -143,6 +187,7 @@
     <string name="library_search_online_empty_description">Try another keyword.</string>
     <string name="library_search_online_loading">Searching NetEase…</string>
     <string name="library_search_online_error">Online search failed: %1$s</string>
+    <string name="library_search_section_failed">Couldn\'t load %1$s: %2$s</string>
     <string name="filter_placeholder_search">Search...</string>
     <string name="text_field_clear">Clear text</string>
     <string name="filter_no_match_description">Try a different filter.</string>
@@ -223,9 +268,12 @@
     <string name="playback_normalization_target_minimum">-30 LUFS</string>
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">Integration</string>
+    <string name="settings_service_status">Service status</string>
     <string name="integration_title">Integration</string>
     <string name="settings_music_sync">Music sync</string>
     <string name="settings_tab_layout">Visible tabs</string>
+    <string name="settings_remember_tab_page">Remember last page</string>
+    <string name="settings_merge_bottom_bars">Merge dock and player bar</string>
     <string name="settings_netease_playlists">NetEase playlists</string>
     <string name="netease_daily_recommend">Daily Mix</string>
     <string name="netease_radar">Personal Radar</string>
@@ -239,7 +287,10 @@
     <string name="track_context_similar_songs">Similar songs</string>
     <string name="similar_songs_empty">No similar songs found</string>
     <string name="similar_songs_error">Could not load similar songs</string>
-    <string name="netease_home_section">For you</string>
+    <string name="netease_home_section">Featured Picks</string>
+    <string name="netease_daily_intro">Updated daily for you</string>
+    <string name="netease_radar_intro">Radar picks tuned to your taste</string>
+    <string name="netease_liked_intro">Songs you liked on NetEase</string>
     <string name="netease_radar_section">Radar playlists</string>
     <string name="netease_home_loading">Loading recommendations…</string>
     <string name="netease_home_login_hint">Sign in to NetEase to see your Daily Mix and Personal Radar.</string>
@@ -249,6 +300,8 @@
     <string name="netease_cache_title">Stream cache</string>
     <string name="netease_cache_usage">Used %1$s of %2$s</string>
     <string name="netease_cache_clear">Clear cache</string>
+    <string name="netease_cover_cache_title">Cover cache</string>
+    <string name="remote_cache_title">Library cache</string>
     <string name="netease_cache_current">Current size</string>
     <string name="netease_playlist_link_hint">Playlist link or ID</string>
     <string name="netease_import_action">Import playlist</string>
@@ -256,10 +309,14 @@
     <string name="netease_add_to_playlists">Add to playlists</string>
     <string name="netease_remove_from_playlists">Remove from playlists</string>
     <string name="netease_download_all">Download all songs</string>
+    <string name="netease_download_in_progress">Downloading…</string>
+    <string name="netease_download_none">Nothing to download</string>
+    <string name="netease_download_result">Downloaded %1$d of %2$d</string>
     <string name="netease_download_progress">Downloading %1$d / %2$d</string>
     <string name="netease_delete_title">Delete this playlist?</string>
     <string name="netease_delete_desc">Only the NetEase playlist record is removed; downloaded audio files are kept.</string>
     <string name="netease_login_web">Web sign-in</string>
+    <string name="netease_login_web_desktop">Desktop web sign-in</string>
     <string name="netease_login_done">I\'m signed in</string>
     <string name="netease_login_qr">Sign in with QR code</string>
     <string name="netease_logout">Sign out</string>
@@ -316,18 +373,10 @@
     <string name="music_sync_folder_change">Change folder</string>
     <string name="music_sync_folder_clear">Scan everything instead</string>
     <string name="music_sync_desc">Pick exactly one folder to keep your library focused. Scanning stays on this device.</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">Scrobble your plays and sync favorite tracks with Last.fm.</string>
-    <string name="lastfm_connected_as">Connected as %1$s</string>
-    <string name="lastfm_connect">Connect</string>
-    <string name="lastfm_connecting">Connecting…</string>
-    <string name="lastfm_disconnect">Disconnect</string>
-    <string name="lastfm_error">Could not connect to Last.fm. Try again.</string>
-    <string name="lastfm_not_configured">Last.fm credentials are not configured for this build.</string>
+
     <string name="lyrics_title">Lyrics</string>
     <string name="lyrics_data_sources">Data sources</string>
     <string name="lyrics_preferred_source">Preferred source</string>
-    <string name="lyrics_romanization">Enable romanization</string>
     <string name="lyrics_source_auto_fetch">Auto fetch</string>
     <string name="lyrics_info_action">Lyrics information</string>
     <string name="lyrics_info_title">Lyrics sources</string>
@@ -350,7 +399,7 @@
     <string name="about_update_download_install">Download &amp; install</string>
     <string name="about_update_downloading">Downloading…</string>
     <string name="about_github">GitHub</string>
-    <string name="about_star">Star Tune on GitHub</string>
+    <string name="about_star">Star Trove on GitHub</string>
     <string name="about_license">License</string>
     <string name="theme_system">System</string>
     <string name="theme_light">Light</string>
@@ -500,12 +549,11 @@
     <string name="composers_empty_title">No composers in library</string>
     <string name="composers_empty_description">Synced composers will appear here once mobile sync completes.</string>
     <string name="composers_no_match_title">No matching composers</string>
-    <string name="player_romanization_show">Show romanization</string>
-    <string name="player_romanization_hide">Hide romanization</string>
-    <string name="player_romanization_loading">Romanizing…</string>
-    <string name="player_romanization_error">Romanization failed. Toggle off and on to retry.</string>
-    <string name="player_romanization_hint">Offline romanization: Chinese and Korean.</string>
-    <string name="player_romanization_mandarin">Han-only lyrics default to Mandarin. Names may have different readings.</string>
+
+    <string name="player_translation_show">Show translation</string>
+    <string name="player_translation_hide">Hide translation</string>
+    <string name="playback_lyrics_spring_strength">Lyric motion spring strength</string>
+    <string name="playback_lyrics_auto_fullscreen">Auto fullscreen lyrics</string>
     <string name="library_duplicates">Duplicates</string>
     <string name="duplicates_empty_title">No duplicates found</string>
     <string name="duplicates_empty_description">Tracks with the same title, artist, and duration will appear here.</string>
@@ -514,5 +562,112 @@
     <string name="duplicates_kept_badge">Kept</string>
     <string name="duplicates_rescan_note">Kept-best removals and dismissed groups only hide entries here — files stay on the device, and a library rescan brings hidden copies back.</string>
     <string name="track_context_delete_from_device">Delete files from device</string>
+    <string name="track_context_delete_download">Delete download</string>
+
+    <!-- Shared -->
+    <string name="common_unknown">Unknown</string>
+    <string name="common_unknown_artist">Unknown artist</string>
+    <string name="common_count_tracks">%1$d tracks</string>
+
+    <!-- Service status / computer library -->
+    <string name="integration_computer_library">Computer library</string>
+    <string name="integration_remote_unconfigured">Not configured</string>
+    <string name="integration_remote_syncing">Syncing… (%1$s)</string>
+    <string name="integration_remote_online">%1$s%2$s · Online</string>
+    <string name="integration_remote_offline">Offline · Last address %1$s</string>
+    <string name="integration_last_sync">Last sync</string>
+    <string name="integration_never_synced">No successful sync yet</string>
+    <string name="integration_last_sync_value">%1$s · %2$d computer tracks</string>
+
+    <string name="integration_lyrics_sources">Lyrics sources</string>
+    <string name="integration_lrclib_on">LRCLIB on</string>
+    <string name="integration_lrclib_off">LRCLIB off</string>
+    <string name="integration_kugou_on">Kugou on</string>
+    <string name="integration_kugou_off">Kugou off</string>
+    <string name="integration_time_never">Never</string>
+    <string name="integration_time_just_now">Just now</string>
+    <string name="integration_time_seconds">%1$d s ago</string>
+    <string name="integration_time_minutes">%1$d min ago</string>
+    <string name="integration_time_hours">%1$d h ago</string>
+    <string name="integration_time_days">%1$d d ago</string>
+    <string name="integration_host_hint">Host address (http://IP:27185 or https://IP:27186)</string>
+    <string name="integration_pair_code">6-digit pairing code</string>
+    <string name="integration_connecting">Connecting…</string>
+    <string name="integration_connected_syncing">Connected, syncing library…</string>
+    <string name="integration_synced_count">Synced %1$d computer tracks</string>
+    <string name="integration_connected_sync_failed">Connected, but sync failed: %1$s</string>
+    <string name="integration_connect_failed">Connection failed: %1$s</string>
+    <string name="integration_connect">Connect</string>
+    <string name="integration_address_help">Use the LAN HTTP address at home; use the public IPv6 HTTPS address outside. After pairing, the computer sends both addresses and the phone switches automatically when the network changes.</string>
+    <string name="integration_connected_prefix">Connected:</string>
+    <string name="integration_status_syncing">Status: syncing…</string>
+    <string name="integration_status_online">Status: online</string>
+    <string name="integration_status_offline">Status: offline</string>
+    <string name="integration_current_address">Current address: %1$s</string>
+    <string name="integration_last_sync_prefix">Last sync:</string>
+    <string name="integration_last_sync_count">%1$s · %2$d</string>
+    <string name="integration_cert_pinned">Certificate fingerprint: %1$s (pinned)</string>
+    <string name="integration_cert_unpinned">Certificate fingerprint: not pinned</string>
+    <string name="integration_saved_addresses">Saved addresses (tap to switch)</string>
+    <string name="integration_switching_to">Switching to %1$s address…</string>
+    <string name="integration_switched_synced">Switched and synced %1$d tracks</string>
+    <string name="integration_switch_failed">Switch failed: %1$s</string>
+    <string name="integration_syncing">Syncing…</string>
+    <string name="integration_sync_failed">Sync failed: %1$s</string>
+    <string name="integration_resync">Resync</string>
+    <string name="integration_disconnected">Computer library disconnected</string>
+    <string name="integration_disconnect">Disconnect</string>
+    <string name="integration_kind_lan">LAN</string>
+    <string name="integration_kind_public">Public</string>
+    <string name="integration_switched_message">Switched to %1$s address</string>
+    <string name="integration_kind_mesh">Mesh</string>
+    <string name="integration_not_configured">Computer library is not configured</string>
+    <string name="integration_all_addresses_unreachable">Computer unreachable: neither LAN nor public address works</string>
+    <string name="integration_sync_failed_generic">Sync failed</string>
+    <string name="integration_pair_missing_host">Enter host address</string>
+    <string name="integration_pair_missing_code">Enter the 6-digit pairing code</string>
+    <string name="integration_pair_fingerprint_failed">Failed to read certificate fingerprint; make sure HTTPS is enabled on the host</string>
+    <string name="integration_pair_failed">Pairing failed</string>
+    <string name="integration_library_read_failed">Failed to read computer library</string>
+    <string name="integration_request_failed">Request failed</string>
+    <string name="integration_tls_client_cert">Client certificate rejected</string>
+    <string name="integration_tls_empty_chain">Empty certificate chain</string>
+    <string name="common_unknown_album">Unknown album</string>
+
+    <!-- NetEase account / login -->
+    <string name="account_qr_fetch_failed">Unable to get QR code</string>
+    <string name="account_status_query_failed">Failed to query status: %1$s</string>
+    <string name="account_network_error">Network error</string>
+    <string name="account_qr_expired">QR code expired (code=800)</string>
+    <string name="account_qr_waiting">Waiting for scan (code=801)</string>
+    <string name="account_qr_scanned">Scanned, confirm on your phone (code=802)</string>
+    <string name="account_login_success">Signed in (code=803)</string>
+    <string name="account_qr_missing_cookie">code=803 but no MUSIC_U cookie</string>
+    <string name="account_qr_waiting_code">Waiting for scan (status %1$d%2$s)</string>
+    <string name="account_qr_status_suffix">: %1$s</string>
+    <string name="account_qr_scan_hint">Scan with the NetEase Cloud Music app</string>
+    <string name="account_credential_obtained">Credentials received</string>
+    <string name="account_login_not_detected">No login detected yet</string>
+    <string name="account_qr_risk">NetEase requires verification: %1$s. Try web sign-in or another network.</string>
+    <string name="account_qr_verify">Complete verification</string>
+    <string name="account_qr_verify_title">Verification</string>
+    <string name="account_qr_verify_done">I completed verification</string>
+
+    <!-- NetEase lists -->
+    <string name="netease_download_failed">Download failed</string>
+    <string name="netease_loading">Loading…</string>
+    <string name="netease_radar_refresh_failed">Radar refresh failed</string>
+    <string name="netease_refreshing">Refreshing…</string>
+    <string name="netease_refresh_failed">Refresh failed</string>
+    <string name="netease_saved_to_playlists">Saved to playlists</string>
+    <string name="netease_save_failed">Save failed</string>
+    <string name="netease_playlist_imported">Playlist imported</string>
+    <string name="netease_import_failed">Import failed</string>
+    <string name="netease_heartbeat_start_failed">Failed to start Heartbeat mode</string>
+    <string name="netease_roam_start_failed">Failed to start Roam</string>
+    <string name="netease_login_credential_obtained">Credentials received</string>
+    <string name="netease_login_not_detected">No login detected yet</string>
+    <string name="netease_track_count">%1$d tracks</string>
+    <string name="netease_search_failed">Online search failed</string>
 </resources>
 

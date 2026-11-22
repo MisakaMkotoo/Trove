@@ -46,6 +46,7 @@ import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.TrackContextArtist
 import com.exodidio.tune.ui.components.TrackContextMenu
 import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
+import com.exodidio.tune.ui.components.artworkBorder
 import com.exodidio.tune.ui.components.rememberArtworkThumbnail
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
@@ -247,7 +248,8 @@ private fun RecentTrackTile(
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(RecentTileRadius))
-                .background(colors.glassElevated),
+                .background(colors.glassElevated)
+                .artworkBorder(colors, RoundedCornerShape(RecentTileRadius)),
             contentAlignment = Alignment.Center,
         ) {
             if (bitmap != null) {

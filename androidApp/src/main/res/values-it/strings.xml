@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">Home</string>
     <string name="home_greeting_morning">Buongiorno</string>
     <string name="home_greeting_afternoon">Buon pomeriggio</string>
@@ -181,14 +181,7 @@
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">Integrazioni</string>
     <string name="integration_title">Integrazioni</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">Invia lo scrobbling dei tuoi ascolti e sincronizza i preferiti con Last.fm.</string>
-    <string name="lastfm_connected_as">Connesso come %1$s</string>
-    <string name="lastfm_connect">Connetti</string>
-    <string name="lastfm_connecting">Connessione in corso…</string>
-    <string name="lastfm_disconnect">Disconnetti</string>
-    <string name="lastfm_error">Impossibile connettersi a Last.fm. Riprova.</string>
-    <string name="lastfm_not_configured">Le credenziali di Last.fm non sono configurate per questa build.</string>
+
     <string name="settings_about">Informazioni</string>
     <string name="about_title">Informazioni</string>
     <string name="about_description">Un moderno lettore musicale locale</string>
@@ -347,16 +340,11 @@
     <string name="lyrics_title">Testi</string>
     <string name="lyrics_data_sources">Fonti dati</string>
     <string name="lyrics_preferred_source">Fonte preferita</string>
-    <string name="lyrics_romanization">Abilita romanizzazione</string>
+
     <string name="lyrics_source_auto_fetch">Recupero automatico</string>
     <string name="lyrics_info_action">Informazioni sui testi</string>
     <string name="lyrics_info_title">Fonti dei testi</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">Mostra romanizzazione</string>
-    <string name="player_romanization_hide">Nascondi romanizzazione</string>
-    <string name="player_romanization_loading">Romanizzazione in corso…</string>
-    <string name="player_romanization_error">Romanizzazione non riuscita. Disattiva e riattiva per riprovare.</string>
-    <string name="player_romanization_hint">Romanizzazione offline: cinese e coreano.</string>
-    <string name="player_romanization_mandarin">I testi con soli caratteri Han usano il mandarino. I nomi possono avere letture diverse.</string>
+
 </resources>
 

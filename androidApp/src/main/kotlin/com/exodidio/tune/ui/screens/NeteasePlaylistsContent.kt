@@ -1,8 +1,4 @@
 package com.exodidio.tune.ui.screens
-
-import android.content.Context
-import android.graphics.Bitmap
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -23,30 +19,25 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.exodidio.tune.R
+import com.exodidio.tune.netease.NeteaseImageCache
 import com.exodidio.tune.netease.NeteaseRepository
 import com.exodidio.tune.netease.NeteaseStreamProxy
-import com.exodidio.tune.ui.components.ActionList
-import com.exodidio.tune.ui.components.ActionListContainerStyle
-import com.exodidio.tune.ui.components.ActionListItem
 import com.exodidio.tune.ui.components.Card
 import com.exodidio.tune.ui.components.HeroCard
 import com.exodidio.tune.ui.components.MaterialSymbol
 import com.exodidio.tune.ui.components.MaterialSymbols
-import com.exodidio.tune.ui.components.TuneBottomSheet
 import com.exodidio.tune.ui.components.TuneTextField
 import com.exodidio.tune.ui.components.TuneTextFieldSize
 import com.exodidio.tune.ui.theme.LocalTuneColors
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 internal fun NeteasePlaylistsContent(
@@ -57,15 +48,21 @@ internal fun NeteasePlaylistsContent(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val playlists by NeteaseRepository.playlists.collectAsStateWithLifecycle()
-    val loggedIn by NeteaseRepository.loggedIn.collectAsStateWithLifecycle()
     var link by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
-    var qrLogin by remember { mutableStateOf<Triple<String, String, String?>?>(null) }
-    var qrStatus by remember { mutableStateOf("") }
-    var showWebLogin by remember { mutableStateOf(false) }
     var cacheSizeMb by remember { mutableStateOf(NeteaseStreamProxy.sizeLimitMb(context)) }
-    var cacheUsage by remember { mutableStateOf(NeteaseStreamProxy.usageBytes()) }
+    // 用量要遍历缓存目录/读 Media3 索引：一律放到 IO，组合期先显示占位。
+    var cacheUsage by remember { mutableStateOf<Long?>(null) }
+    var coverCacheSizeMb by remember { mutableStateOf(NeteaseImageCache.sizeLimitMb(context)) }
+    var coverCacheUsage by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(Unit) {
+        val usage = withContext(Dispatchers.IO) {
+            NeteaseStreamProxy.usageBytes() to NeteaseImageCache.usageBytes(context)
+        }
+        cacheUsage = usage.first
+        coverCacheUsage = usage.second
+    }
 
     fun importPlaylist() {
         if (busy || link.isBlank()) return
@@ -74,8 +71,8 @@ internal fun NeteasePlaylistsContent(
         scope.launch {
             val result = NeteaseRepository.import(context, link)
             status = result.fold(
-                onSuccess = { "已导入歌单" },
-                onFailure = { it.message ?: "导入失败" },
+                onSuccess = { context.getString(R.string.netease_playlist_imported) },
+                onFailure = { it.message ?: context.getString(R.string.netease_import_failed) },
             )
             if (result.isSuccess) link = ""
             busy = false
@@ -124,42 +121,6 @@ internal fun NeteasePlaylistsContent(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
             }
-            ActionList(
-                items = buildList {
-                    if (loggedIn) {
-                        add(
-                            ActionListItem(
-                                labelRes = R.string.netease_logout,
-                                leadingSymbol = MaterialSymbols.Person,
-                                onClick = { NeteaseRepository.clearLogin(context) },
-                            ),
-                        )
-                    } else {
-                        add(
-                            ActionListItem(
-                                labelRes = R.string.netease_login_qr,
-                                leadingSymbol = MaterialSymbols.Person,
-                                onClick = {
-                                    scope.launch {
-                                        NeteaseRepository.createQrLogin().fold(
-                                            onSuccess = { qr -> qrStatus = ""; qrLogin = Triple(qr.key, qr.url, qr.cookie) },
-                                            onFailure = { qrStatus = it.message ?: "无法获取二维码" },
-                                        )
-                                    }
-                                },
-                            ),
-                        )
-                        add(
-                            ActionListItem(
-                                labelRes = R.string.netease_login_web,
-                                leadingSymbol = MaterialSymbols.Translate,
-                                onClick = { showWebLogin = true },
-                            ),
-                        )
-                    }
-                },
-                containerStyle = ActionListContainerStyle.Plain,
-            )
         }
         Card {
             Text(
@@ -171,7 +132,7 @@ internal fun NeteasePlaylistsContent(
             Text(
                 text = stringResource(
                     R.string.netease_cache_usage,
-                    formatCacheSize(cacheUsage),
+                    cacheUsage?.let(::formatCacheSize) ?: "…",
                     formatCacheSize(cacheSizeMb.toLong() * 1024 * 1024),
                 ),
                 style = MaterialTheme.typography.bodySmall,
@@ -183,9 +144,14 @@ internal fun NeteasePlaylistsContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            NeteaseStreamProxy.setSizeLimitMb(context, preset)
                             cacheSizeMb = preset
-                            cacheUsage = NeteaseStreamProxy.usageBytes()
+                            scope.launch {
+                                cacheUsage = withContext(Dispatchers.IO) {
+                                    // 改上限会释放并重建 SimpleCache，必须在 IO 上做。
+                                    NeteaseStreamProxy.setSizeLimitMb(context, preset)
+                                    NeteaseStreamProxy.usageBytes()
+                                }
+                            }
                         }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -210,8 +176,12 @@ internal fun NeteasePlaylistsContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable {
-                        NeteaseStreamProxy.clearCache()
-                        cacheUsage = NeteaseStreamProxy.usageBytes()
+                        scope.launch {
+                            cacheUsage = withContext(Dispatchers.IO) {
+                                NeteaseStreamProxy.clearCache()
+                                NeteaseStreamProxy.usageBytes()
+                            }
+                        }
                     }
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -230,7 +200,89 @@ internal fun NeteasePlaylistsContent(
                 )
             }
         }
-        val visiblePlaylists = remember(playlists) { playlists.filter { it.dynamicKind == null } }
+        Card {
+            Text(
+                text = stringResource(R.string.netease_cover_cache_title),
+                style = MaterialTheme.typography.titleSmall,
+                color = colors.textMain,
+                modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp),
+            )
+            Text(
+                text = stringResource(
+                    R.string.netease_cache_usage,
+                    coverCacheUsage?.let(::formatCacheSize) ?: "…",
+                    formatCacheSize(coverCacheSizeMb.toLong() * 1024 * 1024),
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.textMuted,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
+            listOf(200, 500, 800, 1536, 3072).forEach { preset ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            coverCacheSizeMb = preset
+                            scope.launch {
+                                coverCacheUsage = withContext(Dispatchers.IO) {
+                                    // 改上限要重建 Coil 磁盘缓存并裁剪目录，全部在 IO 上做。
+                                    NeteaseImageCache.setSizeLimitMb(context, preset)
+                                    com.exodidio.tune.ui.components.TuneImages.applyDiskLimit(context)
+                                    NeteaseImageCache.usageBytes(context)
+                                }
+                            }
+                        }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = formatCacheSize(preset.toLong() * 1024 * 1024),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.textMain,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (preset == coverCacheSizeMb) {
+                        MaterialSymbol(
+                            symbol = MaterialSymbols.Check,
+                            contentDescription = stringResource(R.string.netease_cache_current),
+                            size = 18.dp,
+                            tint = colors.primary,
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        scope.launch {
+                            coverCacheUsage = withContext(Dispatchers.IO) {
+                                NeteaseImageCache.clear(context)
+                                com.exodidio.tune.ui.components.TuneImages.clearDisk()
+                                NeteaseImageCache.usageBytes(context)
+                            }
+                        }
+                    }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.netease_cache_clear),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.textMain,
+                    modifier = Modifier.weight(1f),
+                )
+                MaterialSymbol(
+                    symbol = MaterialSymbols.Delete,
+                    contentDescription = null,
+                    size = 18.dp,
+                    tint = colors.textMuted,
+                )
+            }
+        }
+        val visiblePlaylists = remember(playlists) {
+            playlists.filter { it.dynamicKind == null && !(it.persistCache && !it.addedToPlaylists) }
+        }
         if (visiblePlaylists.isEmpty()) {
             Text(
                 text = stringResource(R.string.netease_playlists_empty),
@@ -296,101 +348,6 @@ internal fun NeteasePlaylistsContent(
             }
         }
     }
-
-    qrLogin?.let { (key, url, cookie) ->
-        QrLoginSheet(
-            key = key,
-            url = url,
-            cookie = cookie,
-            context = context,
-            initialStatus = qrStatus,
-            onDone = { success ->
-                qrLogin = null
-                if (success) status = "登录成功"
-            },
-        )
-    }
-    if (showWebLogin) {
-        NeteaseWebLoginDialog(
-            onDismiss = { showWebLogin = false },
-            onLoggedIn = { cookie ->
-                NeteaseRepository.saveLogin(context, cookie)
-                showWebLogin = false
-                status = "登录成功"
-            },
-        )
-    }
-}
-
-@Composable
-private fun QrLoginSheet(
-    key: String,
-    url: String,
-    cookie: String?,
-    context: Context,
-    initialStatus: String,
-    onDone: (Boolean) -> Unit,
-) {
-    val colors = LocalTuneColors.current
-    val scope = rememberCoroutineScope()
-    var status by remember { mutableStateOf(initialStatus) }
-    val bitmap = remember(url) { runCatching { qrBitmap(url, 512) }.getOrNull() }
-    LaunchedEffect(key) {
-        while (true) {
-            delay(1_500)
-            val result = NeteaseRepository.pollQrLogin(key, cookie)
-            val polled = result.getOrElse { error ->
-                status = "查询状态失败：${error.message ?: "网络错误"}"
-                continue
-            }
-            when (polled.code) {
-                800 -> status = "二维码已过期（code=800）"
-                801 -> status = "等待扫码（code=801）"
-                802 -> status = "已扫码，请在手机上确认（code=802）"
-                803 -> {
-                    val session = polled.cookie?.takeIf { it.contains("MUSIC_U=") }
-                    if (session != null) {
-                        NeteaseRepository.saveLogin(context, session)
-                        status = "登录成功（code=803）"
-                        delay(800)
-                        onDone(true)
-                    } else {
-                        status = "code=803 但没有拿到 MUSIC_U"
-                        onDone(false)
-                    }
-                    return@LaunchedEffect
-                }
-                else -> status = "等待扫码（状态 ${polled.code}${polled.message.takeIf { it.isNotBlank() }?.let { "：$it" } ?: ""}）"
-            }
-        }
-    }
-    TuneBottomSheet(
-        title = { Text(stringResource(R.string.netease_login_qr), color = colors.textMain) },
-        onDismiss = { onDone(false) },
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            bitmap?.let { Image(it.asImageBitmap(), null, Modifier.size(240.dp)) }
-            Text(
-                text = status.ifBlank { "请使用网易云音乐 App 扫码" },
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.textMuted,
-            )
-        }
-    }
-}
-
-private fun qrBitmap(content: String, sizePx: Int): Bitmap {
-    val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, sizePx, sizePx)
-    val pixels = IntArray(sizePx * sizePx) { index ->
-        val x = index % sizePx
-        val y = index / sizePx
-        if (matrix.get(x, y)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
-    }
-    return Bitmap.createBitmap(pixels, sizePx, sizePx, Bitmap.Config.ARGB_8888)
 }
 
 private fun formatCacheSize(bytes: Long): String = when {

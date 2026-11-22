@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">ホーム</string>
     <string name="home_greeting_morning">おはようございます</string>
     <string name="home_greeting_afternoon">こんにちは</string>
@@ -180,14 +180,7 @@
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">連携</string>
     <string name="integration_title">連携</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">再生履歴をScrobbleし、お気に入りトラックをLast.fmと同期します。</string>
-    <string name="lastfm_connected_as">%1$s として接続中</string>
-    <string name="lastfm_connect">接続</string>
-    <string name="lastfm_connecting">接続中…</string>
-    <string name="lastfm_disconnect">切断</string>
-    <string name="lastfm_error">Last.fmに接続できませんでした。もう一度お試しください。</string>
-    <string name="lastfm_not_configured">このビルドではLast.fmの認証情報が設定されていません。</string>
+
     <string name="settings_about">情報</string>
     <string name="about_title">情報</string>
     <string name="about_description">モダンなローカル音楽プレーヤー</string>
@@ -339,16 +332,11 @@
     <string name="lyrics_title">歌詞</string>
     <string name="lyrics_data_sources">データソース</string>
     <string name="lyrics_preferred_source">優先するソース</string>
-    <string name="lyrics_romanization">ローマ字表記を有効にする</string>
+
     <string name="lyrics_source_auto_fetch">自動取得</string>
     <string name="lyrics_info_action">歌詞情報</string>
     <string name="lyrics_info_title">歌詞のデータソース</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">ローマ字を表示</string>
-    <string name="player_romanization_hide">ローマ字を非表示</string>
-    <string name="player_romanization_loading">ローマ字に変換中…</string>
-    <string name="player_romanization_error">変換に失敗しました。オフにしてからオンにして再試行してください。</string>
-    <string name="player_romanization_hint">オフラインのローマ字表記：中国語と韓国語。</string>
-    <string name="player_romanization_mandarin">漢字のみの歌詞は中国語（標準語）として扱います。名前の読み方は異なる場合があります。</string>
+
 </resources>
 

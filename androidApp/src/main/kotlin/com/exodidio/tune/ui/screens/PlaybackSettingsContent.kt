@@ -19,6 +19,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import com.exodidio.tune.R
 import com.exodidio.tune.ui.components.ActionList
 import com.exodidio.tune.ui.components.ActionListContainerStyle
@@ -48,8 +49,10 @@ internal fun PlaybackSettingsContent(
     onDuplicatesSelected: () -> Unit = {},
     onDataAnalysisSelected: () -> Unit = {},
     onSongTransitionSelected: () -> Unit,
+    onPlaybackLyricsSelected: () -> Unit = {},
     onVolumeNormalizationSelected: () -> Unit,
     onEqualizerSelected: () -> Unit,
+    onHiddenTracksSelected: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -58,6 +61,10 @@ internal fun PlaybackSettingsContent(
                 ActionListItem(
                     labelRes = R.string.song_transition_title,
                     onClick = onSongTransitionSelected,
+                ),
+                ActionListItem(
+                    labelRes = R.string.lyrics_title,
+                    onClick = onPlaybackLyricsSelected,
                 ),
                 ActionListItem(
                     labelRes = R.string.playback_volume_normalization,
@@ -122,6 +129,11 @@ internal fun PlaybackSettingsContent(
                     labelRes = R.string.settings_data_analysis,
                     leadingSymbol = MaterialSymbols.BarChart,
                     onClick = onDataAnalysisSelected,
+                ),
+                ActionListItem(
+                    labelRes = R.string.settings_hidden_tracks,
+                    leadingSymbol = MaterialSymbols.FilterList,
+                    onClick = onHiddenTracksSelected,
                 ),
             ),
             containerStyle = ActionListContainerStyle.Card,
@@ -341,6 +353,62 @@ internal fun SongTransitionContent(
                     )
                 }
             }
+        }
+    }
+}
+
+/** 设置-播放-歌词：弹簧强度与自动进入全屏。 */
+@Composable
+internal fun LyricsPlaybackSettingsContent(
+    springStrength: Float,
+    onSpringStrengthChanged: (Float) -> Unit,
+    autoFullscreen: Boolean,
+    onAutoFullscreenChanged: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTuneColors.current
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LabeledCard(label = stringResource(R.string.playback_lyrics_spring_strength)) {
+            Column(
+                modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Text(
+                        text = springStrength.roundToInt().toString(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.textMuted,
+                    )
+                }
+                TuneTrackSlider(
+                    value = springStrength,
+                    valueRange = 40f..200f,
+                    onValueChange = onSpringStrengthChanged,
+                    onValueChangeFinished = {},
+                    modifier = Modifier.fillMaxWidth(),
+                    trackHeight = 6.dp,
+                    activeTrackColor = colors.primary,
+                    inactiveTrackColor = colors.buttonSecondary,
+                    trackAlignment = Alignment.TopCenter,
+                )
+            }
+        }
+        com.exodidio.tune.ui.components.Card {
+            ActionList(
+                items = listOf(
+                    ActionListItem(
+                        labelRes = R.string.playback_lyrics_auto_fullscreen,
+                        trailingContent = {
+                            Switch(
+                                checked = autoFullscreen,
+                                onCheckedChange = onAutoFullscreenChanged,
+                            )
+                        },
+                        onClick = { onAutoFullscreenChanged(!autoFullscreen) },
+                    ),
+                ),
+                containerStyle = ActionListContainerStyle.Plain,
+            )
         }
     }
 }

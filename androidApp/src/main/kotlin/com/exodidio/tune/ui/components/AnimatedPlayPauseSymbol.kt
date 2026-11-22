@@ -103,7 +103,8 @@ private fun DrawScope.drawPlayPauseCrossScale(
     if (playAlpha > 0f) {
         drawPath(
             pathOf(
-                listOf(6f to 3.5f, 20f to 12f, 6f to 20.5f),
+                // 苹果播放三角形墨迹约 39.4×39.7dp（近正方形），不是窄三角形。
+                listOf(2.9f to 2.5f, 21.1f to 12f, 2.9f to 21.5f),
                 scale = glyphScale * (1f - pauseProgress * (1f - TransitionMinimumScale)),
                 cornerRadius = iconSizePx * 0.10f,
             ),
@@ -113,11 +114,11 @@ private fun DrawScope.drawPlayPauseCrossScale(
     if (pauseAlpha > 0f) {
         val pauseScale = glyphScale * (TransitionMinimumScale + pauseProgress * (1f - TransitionMinimumScale))
         drawPath(
-            pathOf(listOf(5.5f to 4f, 10.2f to 4f, 10.2f to 20f, 5.5f to 20f), pauseScale, iconSizePx * 0.075f),
+            pathOf(listOf(4.5f to 2.7f, 10.6f to 2.7f, 10.6f to 21.3f, 4.5f to 21.3f), pauseScale, iconSizePx * 0.075f),
             color.copy(alpha = color.alpha * pauseAlpha),
         )
         drawPath(
-            pathOf(listOf(13.8f to 4f, 18.5f to 4f, 18.5f to 20f, 13.8f to 20f), pauseScale, iconSizePx * 0.075f),
+            pathOf(listOf(13.4f to 2.7f, 19.5f to 2.7f, 19.5f to 21.3f, 13.4f to 21.3f), pauseScale, iconSizePx * 0.075f),
             color.copy(alpha = color.alpha * pauseAlpha),
         )
     }

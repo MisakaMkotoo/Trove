@@ -34,6 +34,8 @@ data class AppUiState(
     val lyricsFontLevel: Int = 1,
     val showGenres: Boolean = false,
     val showComposers: Boolean = false,
+    val rememberTabPage: Boolean = true,
+    val mergeBottomBars: Boolean = true,
     val selectedAlbumId: String? = null,
     val selectedArtistId: String? = null,
     val selectedGenreId: String? = null,
@@ -41,6 +43,7 @@ data class AppUiState(
     val selectedPlaylistId: String? = null,
     val selectedSimilarSongId: String? = null,
     val settingsReturnDestination: AppDestination? = null,
+    val accountReturnDestination: AppDestination? = null,
     val destinationStacks: Map<AppDestination, List<AppStackPage>> = rootDestinationStacks(),
     val pageStateGenerations: Map<PageStateKey, Int> = emptyMap(),
 ) {
@@ -66,8 +69,15 @@ class MainViewModel(
     private val selectedPlaylistId = MutableStateFlow<String?>(null)
     private val selectedSimilarSongId = MutableStateFlow<String?>(null)
     private val settingsReturnDestination = MutableStateFlow<AppDestination?>(null)
+    private val accountReturnDestination = MutableStateFlow<AppDestination?>(null)
     private val pageStateGenerations = MutableStateFlow<Map<PageStateKey, Int>>(emptyMap())
     private val _effects = Channel<AppEffect>(Channel.BUFFERED)
+    private val rememberTabPage = MutableStateFlow(true)
+    init {
+        viewModelScope.launch {
+            themeModeStore.rememberTabPage.collect { rememberTabPage.value = it }
+        }
+    }
 
     val effects = _effects.receiveAsFlow()
 
@@ -83,6 +93,8 @@ class MainViewModel(
         val lyricsFontLevel: Int = 1,
         val showGenres: Boolean = false,
         val showComposers: Boolean = false,
+        val rememberTabPage: Boolean = true,
+        val mergeBottomBars: Boolean = true,
     )
 
     private val appearancePrefs = themeModeStore.themeMode
@@ -116,6 +128,12 @@ class MainViewModel(
         .combine(themeModeStore.showComposers) { prefs, showComposers ->
             prefs.copy(showComposers = showComposers)
         }
+        .combine(themeModeStore.rememberTabPage) { prefs, rememberTabPage ->
+            prefs.copy(rememberTabPage = rememberTabPage)
+        }
+        .combine(themeModeStore.mergeBottomBars) { prefs, mergeBottomBars ->
+            prefs.copy(mergeBottomBars = mergeBottomBars)
+        }
 
     val uiState: StateFlow<AppUiState> = combine(
         appearancePrefs,
@@ -139,6 +157,8 @@ class MainViewModel(
             lyricsFontLevel = appearance.lyricsFontLevel,
             showGenres = appearance.showGenres,
             showComposers = appearance.showComposers,
+            rememberTabPage = appearance.rememberTabPage,
+            mergeBottomBars = appearance.mergeBottomBars,
             selectedAlbumId = albumId,
             destinationStacks = pages,
         )
@@ -154,6 +174,8 @@ class MainViewModel(
         state.copy(selectedSimilarSongId = similarSongId)
     }.combine(settingsReturnDestination) { state, returnDestination ->
         state.copy(settingsReturnDestination = returnDestination)
+    }.combine(accountReturnDestination) { state, returnDestination ->
+        state.copy(accountReturnDestination = returnDestination)
     }.combine(pageStateGenerations) { state, generations ->
         state.copy(pageStateGenerations = generations)
     }.stateIn(
@@ -173,8 +195,11 @@ class MainViewModel(
             is AppIntent.OpenGenreDetails -> openGenreDetails(intent.genreId)
             is AppIntent.OpenComposerDetails -> openComposerDetails(intent.composerId)
             is AppIntent.OpenSimilarSongs -> openSimilarSongs(intent.trackId)
+            is AppIntent.OpenNeteaseArtist -> openNeteaseArtist(intent.artistId, intent.name)
+            is AppIntent.OpenNeteaseAlbum -> openNeteaseAlbum(intent.albumId, intent.name, intent.coverUrl)
             AppIntent.NavigateBack -> navigateBack()
             AppIntent.OpenSettings -> openSettings()
+            AppIntent.OpenAccount -> openAccount()
             is AppIntent.SetThemeMode -> setThemeMode(intent.themeMode)
             is AppIntent.SetReduceTransparency -> setReduceTransparency(intent.enabled)
             is AppIntent.SetPlayerTheme -> setPlayerTheme(intent.theme)
@@ -186,6 +211,8 @@ class MainViewModel(
             is AppIntent.SetLyricsFontLevel -> setLyricsFontLevel(intent.level)
             is AppIntent.SetShowGenres -> setShowGenres(intent.enabled)
             is AppIntent.SetShowComposers -> setShowComposers(intent.enabled)
+            is AppIntent.SetRememberTabPage -> setRememberTabPage(intent.enabled)
+            is AppIntent.SetMergeBottomBars -> setMergeBottomBars(intent.enabled)
             is AppIntent.ImportM3u -> _effects.trySend(AppEffect.PickM3uImport)
             is AppIntent.ExportM3u -> _effects.trySend(AppEffect.PickM3uExport(intent.playlistId))
             is AppIntent.OpenExternalUrl -> _effects.trySend(AppEffect.OpenExternalUrl(intent.url))
@@ -194,15 +221,22 @@ class MainViewModel(
 
     private fun selectDestination(destination: AppDestination) {
         if (destination != AppDestination.Settings) settingsReturnDestination.value = null
-        if (destination == selectedDestination.value) {
-            val discardedPages = destinationStacks.value.getValue(destination).drop(1)
-            destinationStacks.update { stacks ->
-                stacks + (destination to listOf(AppStackPage.Root))
-            }
-            discardedPages.forEach { page -> invalidatePoppedPageState(destination, page) }
-        } else {
+        if (destination != AppDestination.Account) accountReturnDestination.value = null
+        val remember = rememberTabPage.value
+        if (destination != selectedDestination.value) {
             selectedDestination.value = destination
         }
+        // 记住上次页面（默认）：切标签保留原页面；关闭后点任意标签都直接回一级页。
+        if (!remember) resetToRoot(destination)
+    }
+
+    private fun resetToRoot(destination: AppDestination) {
+        val discardedPages = destinationStacks.value.getValue(destination).drop(1)
+        if (discardedPages.isEmpty()) return
+        destinationStacks.update { stacks ->
+            stacks + (destination to listOf(AppStackPage.Root))
+        }
+        discardedPages.forEach { page -> invalidatePoppedPageState(destination, page) }
     }
 
     private fun openPage(page: AppStackPage) {
@@ -233,32 +267,44 @@ class MainViewModel(
 
     private fun openAlbumDetails(albumId: String) {
         selectedAlbumId.value = albumId
-        openPage(AppStackPage.AlbumDetails)
+        openPageHere(AppStackPage.AlbumDetails)
     }
 
     private fun openPlaylistDetails(playlistId: String) {
         selectedPlaylistId.value = playlistId
-        openPage(AppStackPage.PlaylistDetails)
+        openPageHere(AppStackPage.PlaylistDetails)
     }
 
     private fun openArtistDetails(artistId: String) {
         selectedArtistId.value = artistId
-        openPage(AppStackPage.ArtistDetails)
+        openPageHere(AppStackPage.ArtistDetails)
     }
 
     private fun openGenreDetails(genreId: String) {
         selectedGenreId.value = genreId
-        openPage(AppStackPage.GenreDetails)
+        openPageHere(AppStackPage.GenreDetails)
     }
 
     private fun openComposerDetails(composerId: String) {
         selectedComposerId.value = composerId
-        openPage(AppStackPage.ComposerDetails)
+        openPageHere(AppStackPage.ComposerDetails)
     }
 
     private fun openSimilarSongs(trackId: String) {
         selectedSimilarSongId.value = trackId
-        openPage(AppStackPage.SimilarSongs)
+        openPageHere(AppStackPage.SimilarSongs)
+    }
+
+    private fun openNeteaseArtist(artistId: Long, name: String) {
+        if (artistId <= 0) return
+        com.exodidio.tune.netease.NeteaseRepository.stageArtistPage(artistId, name)
+        openPageHere(AppStackPage.NeteasePlaylistDetails)
+    }
+
+    private fun openNeteaseAlbum(albumId: Long, name: String, coverUrl: String) {
+        if (albumId <= 0) return
+        com.exodidio.tune.netease.NeteaseRepository.stageAlbumPage(albumId, name, coverUrl)
+        openPageHere(AppStackPage.NeteasePlaylistDetails)
     }
 
     /** 设置改为一级界面的右上角入口：记住进入前的 tab，返回时恢复。 */
@@ -272,15 +318,36 @@ class MainViewModel(
         }
     }
 
+    /** 账户走独立 destination：与设置一致的淡入淡出，不进任何 tab 的浏览栈。 */
+    private fun openAccount() {
+        val current = selectedDestination.value
+        if (current == AppDestination.Account) return
+        accountReturnDestination.value = current
+        selectedDestination.value = AppDestination.Account
+        destinationStacks.update { stacks ->
+            stacks + (AppDestination.Account to listOf(AppStackPage.Root))
+        }
+    }
+
     private fun navigateBack() {
         val destination = selectedDestination.value
-        // 设置根页：返回到进入设置前所在的 tab。
+        // 设置/账户根页：返回到进入前所在的 tab。
         if (destination == AppDestination.Settings &&
             destinationStacks.value.getValue(destination).size <= 1
         ) {
             val returnDestination = settingsReturnDestination.value
             if (returnDestination != null) {
                 settingsReturnDestination.value = null
+                selectedDestination.value = returnDestination
+                return
+            }
+        }
+        if (destination == AppDestination.Account &&
+            destinationStacks.value.getValue(destination).size <= 1
+        ) {
+            val returnDestination = accountReturnDestination.value
+            if (returnDestination != null) {
+                accountReturnDestination.value = null
                 selectedDestination.value = returnDestination
                 return
             }
@@ -380,6 +447,14 @@ class MainViewModel(
 
     private fun setShowComposers(enabled: Boolean) {
         viewModelScope.launch { themeModeStore.setShowComposers(enabled) }
+    }
+
+    private fun setRememberTabPage(enabled: Boolean) {
+        viewModelScope.launch { themeModeStore.setRememberTabPage(enabled) }
+    }
+
+    private fun setMergeBottomBars(enabled: Boolean) {
+        viewModelScope.launch { themeModeStore.setMergeBottomBars(enabled) }
     }
 
     override fun onCleared() {

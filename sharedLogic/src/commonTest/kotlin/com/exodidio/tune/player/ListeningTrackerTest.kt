@@ -26,10 +26,21 @@ class ListeningTrackerTest {
         val tracker = tracker()
         tracker.start("track", 0, 0, 1)
         val qualified = tracker.tick(50_000, 100_000, 50_000, 50_001)
-        assertIs<ListeningWrite.QualifiedPlay>(qualified.single())
+        assertIs<ListeningWrite.QualifiedPlay>(qualified.filterIsInstance<ListeningWrite.QualifiedPlay>().single())
         val checkpoint = tracker.tick(60_000, 100_000, 60_000, 60_001)
         assertEquals(60, assertIs<ListeningWrite.Session>(checkpoint.single()).value.listenedSeconds)
         assertTrue(tracker.tick(70_000, 100_000, 70_000, 70_001).isEmpty())
+    }
+
+    @Test
+    fun recordsRecentPlayAfterThreeSecondsOnce() {
+        val tracker = tracker()
+        tracker.start("track", 0, 0, 1)
+        assertTrue(tracker.tick(2_000, 100_000, 2_000, 2_001).none { it is ListeningWrite.RecentPlay })
+        val recent = tracker.tick(3_000, 100_000, 3_000, 3_001).filterIsInstance<ListeningWrite.RecentPlay>()
+        assertEquals(1, recent.size)
+        assertEquals("track", recent.single().trackId)
+        assertTrue(tracker.tick(4_000, 100_000, 4_000, 4_001).none { it is ListeningWrite.RecentPlay })
     }
 
     @Test

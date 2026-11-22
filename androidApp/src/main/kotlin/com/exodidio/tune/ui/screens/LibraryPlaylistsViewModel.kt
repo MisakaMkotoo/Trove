@@ -45,6 +45,7 @@ internal data class NeteasePlaylistSummary(
     val name: String,
     val count: Int,
     val coverPath: String? = null,
+    val coverUrl: String? = null,
 )
 
 internal data class LibraryPlaylistsUiState(
@@ -86,7 +87,13 @@ internal class LibraryPlaylistsViewModel(private val context: Context, syncStore
                 )
             },
             neteasePlaylists = netease.filter { it.addedToPlaylists }.map { playlist ->
-                NeteasePlaylistSummary(playlist.id, playlist.name, playlist.entries.size, playlist.coverPath)
+                NeteasePlaylistSummary(
+                    id = playlist.id,
+                    name = playlist.name,
+                    count = playlist.entries.size,
+                    coverPath = playlist.coverPath,
+                    coverUrl = playlist.coverUrl,
+                )
             },
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LibraryPlaylistsUiState(isLoaded = false))

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">Главная</string>
     <string name="home_greeting_morning">Доброе утро</string>
     <string name="home_greeting_afternoon">Добрый день</string>
@@ -183,14 +183,7 @@
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">Интеграции</string>
     <string name="integration_title">Интеграции</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">Скробблинг треков и синхронизация избранного с Last.fm.</string>
-    <string name="lastfm_connected_as">Подключено как %1$s</string>
-    <string name="lastfm_connect">Подключить</string>
-    <string name="lastfm_connecting">Подключение…</string>
-    <string name="lastfm_disconnect">Отключить</string>
-    <string name="lastfm_error">Не удалось подключиться к Last.fm. Попробуйте еще раз.</string>
-    <string name="lastfm_not_configured">Учетные данные Last.fm не настроены для этой сборки.</string>
+
     <string name="settings_about">О программе</string>
     <string name="about_title">О программе</string>
     <string name="about_description">Современный локальный аудиоплеер</string>
@@ -363,16 +356,11 @@
     <string name="lyrics_title">Тексты песен</string>
     <string name="lyrics_data_sources">Источники данных</string>
     <string name="lyrics_preferred_source">Предпочтительный источник</string>
-    <string name="lyrics_romanization">Включить романизацию</string>
+
     <string name="lyrics_source_auto_fetch">Загружать автоматически</string>
     <string name="lyrics_info_action">Информация о текстах</string>
     <string name="lyrics_info_title">Источники текстов</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">Показать романизацию</string>
-    <string name="player_romanization_hide">Скрыть романизацию</string>
-    <string name="player_romanization_loading">Романизация…</string>
-    <string name="player_romanization_error">Ошибка романизации. Выключите и включите, чтобы повторить.</string>
-    <string name="player_romanization_hint">Романизация офлайн: китайский и корейский.</string>
-    <string name="player_romanization_mandarin">Текст только с иероглифами Han читается на мандаринском. Имена могут читаться иначе.</string>
+
 </resources>
 

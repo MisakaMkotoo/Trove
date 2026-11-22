@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">Home</string>
     <string name="home_greeting_morning">Good morning</string>
     <string name="home_greeting_afternoon">Good afternoon</string>
@@ -192,14 +192,7 @@
     <string name="music_sync_folders_empty">Scanning everything. Add folders to limit the scan.</string>
     <string name="music_sync_folder_add">Add folder</string>
     <string name="music_sync_folder_remove">Remove</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">Scrobble your plays and sync favorite tracks with Last.fm.</string>
-    <string name="lastfm_connected_as">Connected as %1$s</string>
-    <string name="lastfm_connect">Connect</string>
-    <string name="lastfm_connecting">Connecting…</string>
-    <string name="lastfm_disconnect">Disconnect</string>
-    <string name="lastfm_error">Could not connect to Last.fm. Try again.</string>
-    <string name="lastfm_not_configured">Last.fm credentials are not configured for this build.</string>
+
     <string name="settings_about">About</string>
     <string name="about_title">About</string>
     <string name="about_description">A modern local music player</string>
@@ -213,7 +206,7 @@
     <string name="about_update_download_install">Download &amp; install</string>
     <string name="about_update_downloading">Downloading…</string>
     <string name="about_github">GitHub</string>
-    <string name="about_star">Star Tune on GitHub</string>
+    <string name="about_star">Star Trove on GitHub</string>
     <string name="about_license">License</string>
     <string name="theme_system">System</string>
     <string name="theme_light">Light</string>
@@ -361,17 +354,12 @@
     <string name="lyrics_title">Lyrics</string>
     <string name="lyrics_data_sources">Data sources</string>
     <string name="lyrics_preferred_source">Preferred source</string>
-    <string name="lyrics_romanization">Enable romanization</string>
+
     <string name="lyrics_source_auto_fetch">Auto fetch</string>
     <string name="lyrics_info_action">Lyrics information</string>
     <string name="lyrics_info_title">Lyrics sources</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">Show romanization</string>
-    <string name="player_romanization_hide">Hide romanization</string>
-    <string name="player_romanization_loading">Romanizing…</string>
-    <string name="player_romanization_error">Romanization failed. Toggle off and on to retry.</string>
-    <string name="player_romanization_hint">Offline romanization: Chinese and Korean.</string>
-    <string name="player_romanization_mandarin">Han-only lyrics default to Mandarin. Names may have different readings.</string>
+
     <string name="library_duplicates">Duplicates</string>
     <string name="duplicates_empty_title">No duplicates found</string>
     <string name="duplicates_empty_description">Tracks with the same title, artist, and duration will appear here.</string>

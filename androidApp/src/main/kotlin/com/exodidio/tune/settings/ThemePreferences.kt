@@ -8,8 +8,13 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 import com.exodidio.tune.AppDestination
 
@@ -22,11 +27,17 @@ private val FullscreenArtworkKey = booleanPreferencesKey("fullscreen_artwork")
 private val FullscreenLyricsKey = booleanPreferencesKey("fullscreen_lyrics")
 private val VisibleTabsKey = stringSetPreferencesKey("visible_tabs")
 private val KeepScreenOnKey = booleanPreferencesKey("keep_screen_on")
+/** “我的”标签一次性补齐：老用户也默认显示，之后仍可在“显示的标签”里关闭。 */
+private val MineTabMigratedKey = booleanPreferencesKey("mine_tab_migrated")
 /** 歌词字号档位：0 小、1 标准（默认）、2 大。 */
 private val LyricsFontLevelKey = intPreferencesKey("lyrics_font_level")
 /** 媒体库是否显示“流派 / 作曲家”入口，默认隐藏。 */
 private val ShowGenresKey = booleanPreferencesKey("show_genres")
 private val ShowComposersKey = booleanPreferencesKey("show_composers")
+/** 点击底栏时是否回到该标签上次所在的页面；关闭后直接回一级页。 */
+private val RememberTabPageKey = booleanPreferencesKey("remember_tab_page")
+/** 滑动时把底栏和迷你播放条合并成一条；默认开启。 */
+private val MergeBottomBarsKey = booleanPreferencesKey("merge_bottom_bars")
 
 enum class ThemeMode(val storageValue: String, val labelRes: Int) {
     System("system", com.exodidio.tune.R.string.theme_system),
@@ -68,6 +79,8 @@ interface ThemeModeStore {
     val lyricsFontLevel: Flow<Int>
     val showGenres: Flow<Boolean>
     val showComposers: Flow<Boolean>
+    val rememberTabPage: Flow<Boolean>
+    val mergeBottomBars: Flow<Boolean>
 
     suspend fun setThemeMode(themeMode: ThemeMode)
     suspend fun setReduceTransparency(enabled: Boolean)
@@ -80,11 +93,34 @@ interface ThemeModeStore {
     suspend fun setLyricsFontLevel(level: Int)
     suspend fun setShowGenres(enabled: Boolean)
     suspend fun setShowComposers(enabled: Boolean)
+    suspend fun setRememberTabPage(enabled: Boolean)
+    suspend fun setMergeBottomBars(enabled: Boolean)
 }
 
 class ThemePreferences(
     private val context: Context,
 ) : ThemeModeStore {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        scope.launch {
+            val current = context.themeDataStore.data.first()
+            if (current[MineTabMigratedKey] == true) return@launch
+            context.themeDataStore.edit { preferences ->
+                val stored = preferences[VisibleTabsKey]
+                if (stored != null) {
+                    val destinations = stored.mapNotNull { AppDestination.fromStorage(it) }
+                    if (AppDestination.Mine !in destinations) {
+                        preferences[VisibleTabsKey] = (destinations + AppDestination.Mine)
+                            .map { it.storageValue }
+                            .toSet()
+                    }
+                }
+                preferences[MineTabMigratedKey] = true
+            }
+        }
+    }
+
     override val themeMode: Flow<ThemeMode> = context.themeDataStore.data.map { preferences: Preferences ->
         ThemeMode.fromStorage(preferences[ThemeModeKey])
     }
@@ -123,6 +159,14 @@ class ThemePreferences(
     }
     override val showComposers: Flow<Boolean> = context.themeDataStore.data.map { preferences ->
         preferences[ShowComposersKey] ?: false
+    }
+
+    override val rememberTabPage: Flow<Boolean> = context.themeDataStore.data.map { preferences ->
+        preferences[RememberTabPageKey] ?: true
+    }
+
+    override val mergeBottomBars: Flow<Boolean> = context.themeDataStore.data.map { preferences ->
+        preferences[MergeBottomBarsKey] ?: true
     }
 
     override suspend fun setThemeMode(themeMode: ThemeMode) {
@@ -189,5 +233,13 @@ class ThemePreferences(
 
     override suspend fun setShowComposers(enabled: Boolean) {
         context.themeDataStore.edit { preferences -> preferences[ShowComposersKey] = enabled }
+    }
+
+    override suspend fun setRememberTabPage(enabled: Boolean) {
+        context.themeDataStore.edit { preferences -> preferences[RememberTabPageKey] = enabled }
+    }
+
+    override suspend fun setMergeBottomBars(enabled: Boolean) {
+        context.themeDataStore.edit { preferences -> preferences[MergeBottomBarsKey] = enabled }
     }
 }

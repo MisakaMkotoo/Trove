@@ -1,19 +1,17 @@
 package com.exodidio.tune.ui.screens
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -24,17 +22,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.exodidio.tune.R
-import com.exodidio.tune.lastfm.LastFmStatus
 import com.exodidio.tune.lyrics.LyricsSettings
 import com.exodidio.tune.lyrics.LyricsSource
 import com.exodidio.tune.ui.components.ActionList
@@ -44,25 +42,58 @@ import com.exodidio.tune.ui.components.ActionListItem
 import com.exodidio.tune.ui.components.LabeledCard
 import com.exodidio.tune.ui.components.Selection
 import com.exodidio.tune.ui.components.SelectionOption
-import com.exodidio.tune.ui.components.TunePillButton
-import com.exodidio.tune.ui.components.TunePillButtonVariant
-import com.exodidio.tune.ui.components.HeroCard
 import com.exodidio.tune.ui.components.MaterialSymbol
 import com.exodidio.tune.ui.components.MaterialSymbols
-import com.exodidio.tune.ui.components.rememberArtworkThumbnail
 import com.exodidio.tune.sync.RemoteMusicLibrary
 import com.exodidio.tune.ui.theme.LocalTuneColors
 import kotlinx.coroutines.launch
 
 @Composable
 internal fun IntegrationContent(
-    lastFmStatus: LastFmStatus,
-    lyricsSettings: LyricsSettings,
-    onLastFmSelected: () -> Unit,
+    onServiceStatusSelected: () -> Unit,
+    onNeteasePlaylistsSelected: () -> Unit,
+    onNcmImportSelected: () -> Unit,
     onLyricsSelected: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    Column(modifier = modifier) {
+        ActionList(
+            items = listOf(
+                ActionListItem(
+                    R.string.settings_service_status,
+                    leadingSymbol = MaterialSymbols.Sensors,
+                    onClick = onServiceStatusSelected,
+                ),
+                ActionListItem(
+                    R.string.settings_netease_playlists,
+                    leadingSymbol = MaterialSymbols.MusicNote,
+                    onClick = onNeteasePlaylistsSelected,
+                ),
+                ActionListItem(
+                    R.string.settings_ncm_import,
+                    leadingSymbol = MaterialSymbols.Album,
+                    onClick = onNcmImportSelected,
+                ),
+                ActionListItem(
+                    R.string.lyrics_title,
+                    leadingSymbol = MaterialSymbols.Lyrics,
+                    onClick = onLyricsSelected,
+                ),
+            ),
+            containerStyle = ActionListContainerStyle.Card,
+            dividerStyle = ActionListDividerStyle.FullWidth,
+        )
+    }
+}
+
+/** 服务状态 + 电脑音乐库：状态总览与配对/同步放在同一页，不拆开。 */
+@Composable
+internal fun ServiceStatusContent(
+    lyricsSettings: LyricsSettings,
+    modifier: Modifier = Modifier,
+) {
     val remote by RemoteMusicLibrary.status.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
     var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         while (true) {
@@ -71,57 +102,42 @@ internal fun IntegrationContent(
         }
     }
     Column(modifier = modifier) {
-        LabeledCard(label = "服务状态") {
+        LabeledCard(label = stringResource(R.string.settings_service_status)) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 InfoLine(
-                    "电脑音乐库",
+                    stringResource(R.string.integration_computer_library),
                     when {
-                        !remote.configured -> "未配置"
-                        remote.busy -> "同步中…（${remote.kind.ifBlank { "未知" }}）"
-                        remote.online -> "${remote.kind}${if (remote.secure) " · HTTPS" else ""} · 在线"
-                        else -> "离线 · 上次地址 ${remote.base}"
+                        !remote.configured -> stringResource(R.string.integration_remote_unconfigured)
+                        remote.busy -> stringResource(R.string.integration_remote_syncing, remoteKindLabel(context, remote.kind))
+                        remote.online -> stringResource(
+                            R.string.integration_remote_online,
+                            remoteKindLabel(context, remote.kind),
+                            if (remote.secure) " · HTTPS" else "",
+                        )
+                        else -> stringResource(R.string.integration_remote_offline, remote.base)
                     },
                 )
                 if (remote.configured) {
                     InfoLine(
-                        "上次同步",
-                        if (remote.lastSyncAt <= 0) "还没有成功同步过"
-                        else "${relativeTime(remote.lastSyncAt, clock)} · ${remote.tracks} 首电脑曲目",
+                        stringResource(R.string.integration_last_sync),
+                        if (remote.lastSyncAt <= 0) stringResource(R.string.integration_never_synced)
+                        else stringResource(R.string.integration_last_sync_value, relativeTime(remote.lastSyncAt, clock), remote.tracks),
                     )
                 }
                 InfoLine(
-                    "Last.fm",
-                    when {
-                        lastFmStatus.working -> "连接中…"
-                        lastFmStatus.connected -> "已连接：${lastFmStatus.username}"
-                        lastFmStatus.failed -> "连接失败"
-                        else -> "未连接"
-                    },
-                )
-                InfoLine(
-                    "歌词源",
+                    stringResource(R.string.integration_lyrics_sources),
                     buildList {
-                        add(if (lyricsSettings.lrclib) "LRCLIB 开" else "LRCLIB 关")
-                        add(if (lyricsSettings.kugou) "酷狗 开" else "酷狗 关")
-                        add(if (lyricsSettings.romanizationEnabled) "罗马音 开" else "罗马音 关")
+                        add(stringResource(if (lyricsSettings.lrclib) R.string.integration_lrclib_on else R.string.integration_lrclib_off))
+                        add(stringResource(if (lyricsSettings.kugou) R.string.integration_kugou_on else R.string.integration_kugou_off))
                     }.joinToString(" · "),
                 )
             }
         }
         Spacer(modifier = Modifier.height(16.dp))
         RemoteLibraryCard()
-        Spacer(modifier = Modifier.height(16.dp))
-        ActionList(
-            items = listOf(
-                ActionListItem(R.string.lastfm_title, onClick = onLastFmSelected),
-                ActionListItem(R.string.lyrics_title, onClick = onLyricsSelected),
-            ),
-            containerStyle = ActionListContainerStyle.Card,
-            dividerStyle = ActionListDividerStyle.FullWidth,
-        )
     }
 }
 
@@ -143,76 +159,26 @@ private fun InfoLine(label: String, value: String) {
     }
 }
 
-private fun relativeTime(timestamp: Long, now: Long): String {
-    if (timestamp <= 0) return "从未"
-    val seconds = ((now - timestamp) / 1000).coerceAtLeast(0)
-    return when {
-        seconds < 10 -> "刚刚"
-        seconds < 60 -> "$seconds 秒前"
-        seconds < 3600 -> "${seconds / 60} 分钟前"
-        seconds < 86_400 -> "${seconds / 3600} 小时前"
-        else -> "${seconds / 86_400} 天前"
-    }
-}
+private fun remoteKindLabel(context: android.content.Context, kind: RemoteMusicLibrary.RemoteEndpointKind): String =
+    context.getString(
+        when (kind) {
+            RemoteMusicLibrary.RemoteEndpointKind.Lan -> R.string.integration_kind_lan
+            RemoteMusicLibrary.RemoteEndpointKind.Public -> R.string.integration_kind_public
+            RemoteMusicLibrary.RemoteEndpointKind.Mesh -> R.string.integration_kind_mesh
+            RemoteMusicLibrary.RemoteEndpointKind.Unknown -> R.string.common_unknown
+        },
+    )
 
 @Composable
-internal fun LastFmContent(
-    status: LastFmStatus,
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val colors = LocalTuneColors.current
-    val avatar = rememberArtworkThumbnail(status.avatarPath)
-    Column(modifier = modifier) {
-        HeroCard(
-            title = stringResource(R.string.lastfm_title),
-            description = if (status.connected) {
-                stringResource(R.string.lastfm_connected_as, status.username)
-            } else {
-                stringResource(R.string.lastfm_description)
-            },
-            bottomContent = {
-                TunePillButton(
-                    label = stringResource(
-                        when {
-                            status.working -> R.string.lastfm_connecting
-                            status.connected -> R.string.lastfm_disconnect
-                            else -> R.string.lastfm_connect
-                        },
-                    ),
-                    onClick = if (status.connected) onDisconnect else onConnect,
-                    enabled = status.configured && !status.working,
-                    variant = if (status.connected) TunePillButtonVariant.Secondary else TunePillButtonVariant.Primary,
-                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 16.dp),
-                )
-            },
-        ) {
-            if (status.connected && avatar != null) {
-                Image(
-                    bitmap = avatar,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(16.dp)).testTag("lastfm-avatar"),
-                )
-            } else {
-                MaterialSymbol(
-                    symbol = MaterialSymbols.GraphicEq,
-                    contentDescription = null,
-                    size = 40.dp,
-                    tint = colors.textMuted,
-                    modifier = Modifier.testTag("lastfm-icon"),
-                )
-            }
-        }
-        if (!status.configured || status.failed) {
-            Text(
-                text = stringResource(if (status.configured) R.string.lastfm_error else R.string.lastfm_not_configured),
-                modifier = Modifier.padding(top = 16.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = colors.textMuted,
-            )
-        }
+private fun relativeTime(timestamp: Long, now: Long): String {
+    if (timestamp <= 0) return stringResource(R.string.integration_time_never)
+    val seconds = ((now - timestamp) / 1000).coerceAtLeast(0)
+    return when {
+        seconds < 10 -> stringResource(R.string.integration_time_just_now)
+        seconds < 60 -> stringResource(R.string.integration_time_seconds, seconds)
+        seconds < 3600 -> stringResource(R.string.integration_time_minutes, seconds / 60)
+        seconds < 86_400 -> stringResource(R.string.integration_time_hours, seconds / 3600)
+        else -> stringResource(R.string.integration_time_days, seconds / 86_400)
     }
 }
 
@@ -223,7 +189,6 @@ internal fun LyricsContent(
     onLrclibChanged: (Boolean) -> Unit,
     onKugouChanged: (Boolean) -> Unit,
     onNeteaseChanged: (Boolean) -> Unit,
-    onRomanizationEnabledChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LabeledCard(label = stringResource(R.string.lyrics_data_sources), modifier = modifier) {
@@ -241,7 +206,6 @@ internal fun LyricsContent(
                 ActionListItem(R.string.lyrics_lrclib, trailingContent = { Switch(checked = settings.lrclib, onCheckedChange = onLrclibChanged) }, onClick = { onLrclibChanged(!settings.lrclib) }),
                 ActionListItem(R.string.lyrics_kugou, trailingContent = { Switch(checked = settings.kugou, onCheckedChange = onKugouChanged) }, onClick = { onKugouChanged(!settings.kugou) }),
                 ActionListItem(R.string.lyrics_netease, trailingContent = { Switch(checked = settings.netease, onCheckedChange = onNeteaseChanged) }, onClick = { onNeteaseChanged(!settings.netease) }),
-                ActionListItem(R.string.lyrics_romanization, trailingContent = { Switch(checked = settings.romanizationEnabled, onCheckedChange = onRomanizationEnabledChanged) }, onClick = { onRomanizationEnabledChanged(!settings.romanizationEnabled) }),
             ),
             containerStyle = ActionListContainerStyle.Plain,
             dividerStyle = ActionListDividerStyle.FullWidth,
@@ -261,6 +225,14 @@ private fun RemoteLibraryCard() {
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
     var tick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var cacheSizeMb by remember { mutableStateOf(com.exodidio.tune.sync.RemoteAudioCache.sizeLimitMb(context)) }
+    // 目录遍历归 IO：组合期不能因为算用量而打磁盘。
+    var cacheUsage by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(Unit) {
+        cacheUsage = withContext(Dispatchers.IO) {
+            com.exodidio.tune.sync.RemoteAudioCache.usageBytes(context)
+        }
+    }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         while (true) {
             delay(5_000)
@@ -272,13 +244,13 @@ private fun RemoteLibraryCard() {
     val host = remote.host.ifBlank { RemoteMusicLibrary.config(context)?.host.orEmpty() }
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Text(text = "电脑音乐库", style = MaterialTheme.typography.titleMedium)
+        Text(text = stringResource(R.string.integration_computer_library), style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(6.dp))
         if (!configured) {
             OutlinedTextField(
                 value = base,
                 onValueChange = { base = it },
-                label = { Text("主机地址（http://IP:27185 或 https://IP:27186）") },
+                label = { Text(stringResource(R.string.integration_host_hint)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -286,7 +258,7 @@ private fun RemoteLibraryCard() {
             OutlinedTextField(
                 value = code,
                 onValueChange = { value -> code = value.filter(Char::isDigit).take(6) },
-                label = { Text("6 位配对码") },
+                label = { Text(stringResource(R.string.integration_pair_code)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -295,26 +267,29 @@ private fun RemoteLibraryCard() {
                 enabled = !busy && base.isNotBlank() && code.length == 6,
                 onClick = {
                     busy = true
-                    status = "正在连接…"
+                    status = context.getString(R.string.integration_connecting)
                     scope.launch {
                         val paired = RemoteMusicLibrary.pair(context, base, code)
                         if (paired.isSuccess) {
-                            status = "已连接，正在同步曲库…"
+                            status = context.getString(R.string.integration_connected_syncing)
                             val synced = RemoteMusicLibrary.syncWithRetry(context, attempts = 2)
                             status = synced.fold(
-                                onSuccess = { "已同步 $it 首电脑曲目" },
-                                onFailure = { "已连接，但同步失败：${it.message}" },
+                                onSuccess = { context.getString(R.string.integration_synced_count, it) },
+                                onFailure = { context.getString(R.string.integration_connected_sync_failed, it.message.orEmpty()) },
                             )
                         } else {
-                            status = "连接失败：${paired.exceptionOrNull()?.message}"
+                            status = context.getString(
+                                R.string.integration_connect_failed,
+                                paired.exceptionOrNull()?.message.orEmpty(),
+                            )
                         }
                         busy = false
                     }
                 },
-            ) { Text("连接") }
+            ) { Text(stringResource(R.string.integration_connect)) }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "家里填局域网 HTTP 地址；外网填公网 IPv6 的 HTTPS 地址。配对后电脑会把两套地址都发过来，手机自动保存并在换网时切换。",
+                text = stringResource(R.string.integration_address_help),
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.textMuted,
             )
@@ -322,32 +297,36 @@ private fun RemoteLibraryCard() {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
                     text = buildString {
-                        append("已连接：")
+                        append(stringResource(R.string.integration_connected_prefix))
+                        append(" ")
                         append(host.ifBlank { remote.base })
-                        if (remote.kind.isNotBlank()) append(" · ${remote.kind}")
+                        if (remote.kind != RemoteMusicLibrary.RemoteEndpointKind.Unknown) {
+                            append(" · ")
+                            append(remoteKindLabel(context, remote.kind))
+                        }
                         if (remote.secure) append(" · HTTPS")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
                     text = when {
-                        remote.busy -> "状态：同步中…"
-                        remote.online -> "状态：在线"
-                        else -> "状态：离线"
+                        remote.busy -> stringResource(R.string.integration_status_syncing)
+                        remote.online -> stringResource(R.string.integration_status_online)
+                        else -> stringResource(R.string.integration_status_offline)
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (remote.online) colors.textMuted else MaterialTheme.colorScheme.error,
                 )
                 Text(
-                    text = "当前地址：${remote.base.ifBlank { base }}",
+                    text = stringResource(R.string.integration_current_address, remote.base.ifBlank { base }),
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.textMuted,
                 )
                 Text(
-                    text = "上次同步：" + if (remote.lastSyncAt <= 0) {
-                        "还没有成功同步过"
+                    text = stringResource(R.string.integration_last_sync_prefix) + " " + if (remote.lastSyncAt <= 0) {
+                        stringResource(R.string.integration_never_synced)
                     } else {
-                        "${relativeTime(remote.lastSyncAt, tick)} · ${remote.tracks} 首"
+                        stringResource(R.string.integration_last_sync_count, relativeTime(remote.lastSyncAt, tick), remote.tracks)
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.textMuted,
@@ -360,13 +339,13 @@ private fun RemoteLibraryCard() {
                         remote.fingerprint
                     }
                     Text(
-                        text = "证书指纹：$short（已固定）",
+                        text = stringResource(R.string.integration_cert_pinned, short),
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.textMuted,
                     )
                 } else if (remote.secure) {
                     Text(
-                        text = "证书指纹：未固定",
+                        text = stringResource(R.string.integration_cert_unpinned),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -378,14 +357,15 @@ private fun RemoteLibraryCard() {
                 if (addresses.size > 1) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "已保存地址（点一下切换）",
+                        text = stringResource(R.string.integration_saved_addresses),
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.textMuted,
                     )
                     addresses.forEach { address ->
                         val selected = address == remote.base
+                        val kind = RemoteMusicLibrary.kindOf(address)
                         Text(
-                            text = "· ${RemoteMusicLibrary.kindOf(address)} · $address",
+                            text = "· ${remoteKindLabel(context, kind)} · $address",
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             color = if (selected) MaterialTheme.colorScheme.primary else colors.textMuted,
@@ -395,11 +375,11 @@ private fun RemoteLibraryCard() {
                                     busy = true
                                     RemoteMusicLibrary.useAddress(context, address)
                                     scope.launch {
-                                        status = "正在切换到${RemoteMusicLibrary.kindOf(address)}地址…"
+                                        status = context.getString(R.string.integration_switching_to, remoteKindLabel(context, kind))
                                         val result = RemoteMusicLibrary.syncWithRetry(context, attempts = 2)
                                         status = result.fold(
-                                            onSuccess = { "已切换并同步 $it 首" },
-                                            onFailure = { "切换失败：${it.message}" },
+                                            onSuccess = { context.getString(R.string.integration_switched_synced, it) },
+                                            onFailure = { context.getString(R.string.integration_switch_failed, it.message.orEmpty()) },
                                         )
                                         busy = false
                                     }
@@ -414,30 +394,111 @@ private fun RemoteLibraryCard() {
                 enabled = !busy,
                 onClick = {
                     busy = true
-                    status = "正在同步…"
+                    status = context.getString(R.string.integration_syncing)
                     scope.launch {
                         val synced = RemoteMusicLibrary.syncWithRetry(context, attempts = 3)
                         status = synced.fold(
-                            onSuccess = { "已同步 $it 首电脑曲目" },
-                            onFailure = { "同步失败：${it.message}" },
+                            onSuccess = { context.getString(R.string.integration_synced_count, it) },
+                            onFailure = { context.getString(R.string.integration_sync_failed, it.message.orEmpty()) },
                         )
                         busy = false
                     }
                 },
-            ) { Text("重新同步") }
+            ) { Text(stringResource(R.string.integration_resync)) }
             Spacer(modifier = Modifier.height(6.dp))
             Button(
                 enabled = !busy,
                 onClick = {
                     RemoteMusicLibrary.disconnect(context)
                     base = ""
-                    status = "已断开电脑音乐库"
+                    status = context.getString(R.string.integration_disconnected)
                 },
-            ) { Text("断开") }
+            ) { Text(stringResource(R.string.integration_disconnect)) }
         }
         if (status.isNotBlank()) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(text = status, style = MaterialTheme.typography.bodySmall)
         }
+        Spacer(modifier = Modifier.height(14.dp))
+        Text(
+            text = stringResource(R.string.remote_cache_title),
+            style = MaterialTheme.typography.titleSmall,
+            color = colors.textMain,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = stringResource(
+                R.string.netease_cache_usage,
+                cacheUsage?.let(::formatIntegrationBytes) ?: "…",
+                formatIntegrationBytes(cacheSizeMb.toLong() * 1024 * 1024),
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.textMuted,
+        )
+        listOf(500, 1024, 2048, 4096).forEach { preset ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        cacheSizeMb = preset
+                        scope.launch {
+                            cacheUsage = withContext(Dispatchers.IO) {
+                                com.exodidio.tune.sync.RemoteAudioCache.setSizeLimitMb(context, preset)
+                                com.exodidio.tune.sync.RemoteAudioCache.usageBytes(context)
+                            }
+                        }
+                    }
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = formatIntegrationBytes(preset.toLong() * 1024 * 1024),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.textMain,
+                    modifier = Modifier.weight(1f),
+                )
+                if (preset == cacheSizeMb) {
+                    MaterialSymbol(
+                        symbol = MaterialSymbols.Check,
+                        contentDescription = stringResource(R.string.netease_cache_current),
+                        size = 18.dp,
+                        tint = colors.primary,
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    scope.launch {
+                        cacheUsage = withContext(Dispatchers.IO) {
+                            com.exodidio.tune.sync.RemoteAudioCache.clear(context)
+                            com.exodidio.tune.sync.RemoteAudioCache.usageBytes(context)
+                        }
+                    }
+                }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(R.string.netease_cache_clear),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.textMain,
+                modifier = Modifier.weight(1f),
+            )
+            MaterialSymbol(
+                symbol = MaterialSymbols.Delete,
+                contentDescription = null,
+                size = 18.dp,
+                tint = colors.textMuted,
+            )
+        }
     }
+}
+
+private fun formatIntegrationBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes.toDouble() / (1024L * 1024 * 1024))
+    bytes >= 1024L * 1024 -> "%.0f MB".format(bytes.toDouble() / (1024L * 1024))
+    else -> "%.0f KB".format(bytes.toDouble() / 1024)
 }

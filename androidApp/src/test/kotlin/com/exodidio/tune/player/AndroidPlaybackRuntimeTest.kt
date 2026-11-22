@@ -49,7 +49,8 @@ class AndroidPlaybackRuntimeTest {
                 requestedTrackIds = setOf("kept", "missing-file", "removed-from-library"),
             )
 
-            assertEquals(setOf("kept"), available)
+            // 未知 id（曲库还没恢复完/流式曲目）先保留；只有已知但文件失效的本地曲目被丢弃。
+            assertEquals(setOf("kept", "removed-from-library"), available)
         } finally {
             filesDir.deleteRecursively()
         }

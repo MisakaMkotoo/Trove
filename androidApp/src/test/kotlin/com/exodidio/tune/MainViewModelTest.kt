@@ -235,6 +235,10 @@ private class FakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMode.System)
     override val visibleTabs: Flow<List<AppDestination>> = kotlinx.coroutines.flow.MutableStateFlow(AppDestination.entries.toList())
     override val keepScreenOn: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
     override val lyricsFontLevel: Flow<Int> = kotlinx.coroutines.flow.MutableStateFlow(1)
+    override val showGenres: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
+    override val showComposers: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
+    override val rememberTabPage: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(true)
+    override val mergeBottomBars: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(true)
     val savedModes = mutableListOf<ThemeMode>()
     val savedReduceTransparencyValues = mutableListOf<Boolean>()
 
@@ -253,5 +257,9 @@ private class FakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMode.System)
     override suspend fun setFullscreenLyrics(enabled: Boolean) {}
     override suspend fun setVisibleTabs(visibleTabs: List<AppDestination>) {}
     override suspend fun setKeepScreenOn(enabled: Boolean) {}
+    override suspend fun setShowGenres(enabled: Boolean) {}
+    override suspend fun setShowComposers(enabled: Boolean) {}
+    override suspend fun setRememberTabPage(enabled: Boolean) {}
+    override suspend fun setMergeBottomBars(enabled: Boolean) {}
     override suspend fun setLyricsFontLevel(level: Int) {}
 }

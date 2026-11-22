@@ -33,8 +33,11 @@ fun DiscCard(
     subtitle: String,
     modifier: Modifier = Modifier,
     artworkPath: String? = null,
+    artworkUrl: String? = null,
     fallbackSymbol: String = MaterialSymbols.MusicNote,
     artworkShape: Shape = RoundedCornerShape(TuneRadii.LargeArtwork),
+    titleStyle: androidx.compose.ui.text.TextStyle? = null,
+    subtitleStyle: androidx.compose.ui.text.TextStyle? = null,
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
@@ -68,15 +71,27 @@ fun DiscCard(
                 .border(0.5.dp, colors.borderGlass, artworkShape),
             contentAlignment = Alignment.Center,
         ) {
-            if (bitmap != null) {
-                Image(
+            when {
+                bitmap != null -> Image(
                     bitmap = bitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize(),
                 )
-            } else {
-                MaterialSymbol(
+                !artworkUrl.isNullOrBlank() -> TuneRemoteImage(
+                    url = artworkUrl,
+                    sizePx = 400,
+                    modifier = Modifier.matchParentSize(),
+                    fallback = {
+                        MaterialSymbol(
+                            symbol = fallbackSymbol,
+                            contentDescription = null,
+                            size = 36.dp,
+                            tint = colors.textMuted,
+                        )
+                    },
+                )
+                else -> MaterialSymbol(
                     symbol = fallbackSymbol,
                     contentDescription = null,
                     size = 36.dp,
@@ -87,7 +102,7 @@ fun DiscCard(
 
         Text(
             text = title,
-            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+            style = titleStyle ?: MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
             color = colors.textMain,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -96,7 +111,7 @@ fun DiscCard(
 
         Text(
             text = subtitle,
-            style = MaterialTheme.typography.bodyMedium,
+            style = subtitleStyle ?: MaterialTheme.typography.bodyMedium,
             color = colors.textMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

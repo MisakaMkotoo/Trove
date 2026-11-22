@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -44,6 +45,7 @@ import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
@@ -148,8 +150,19 @@ private fun FullScreenPlayerMetadata(
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).clipToBounds().graphicsLayer { translationX = displayedHorizontalSwipeOffset }
             .semantics { testTag = FullScreenPlayerMetadataSwipeTestTag }) {
-            TuneMarqueeText(item.title, colors.onPrimary, if (compact) MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold) else MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold))
-            TuneMarqueeText(item.artist, colors.foregroundSubtle, if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium)
+            TuneMarqueeText(
+                item.title,
+                colors.onPrimary,
+                if (compact) MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                // 苹果播放页标题 24sp、艺人 20sp。
+                else MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, fontSize = 24.sp, lineHeight = 30.sp),
+            )
+            TuneMarqueeText(
+                item.artist,
+                colors.foregroundSubtle,
+                if (compact) MaterialTheme.typography.bodySmall
+                else MaterialTheme.typography.bodyMedium.copy(fontSize = 20.sp, lineHeight = 26.sp),
+            )
         }
         Spacer(Modifier.width(4.dp))
         if (!compact) Box(

@@ -54,6 +54,8 @@ sealed interface ListeningWrite {
     data class AttemptStarted(val value: PlaybackAttempt) : ListeningWrite
     data class AttemptFinished(val value: PlaybackAttempt) : ListeningWrite
     data class QualifiedPlay(val sourceDeviceId: String, val trackId: String, val occurredAt: Long) : ListeningWrite
+    /** 播放进度超过 3 秒即记入“近期播放”（与统计用的 QualifiedPlay 阈值无关）。 */
+    data class RecentPlay(val sourceDeviceId: String, val trackId: String, val occurredAt: Long) : ListeningWrite
 }
 
 fun qualifiesPlayback(positionMs: Long, durationMs: Long): Boolean =
@@ -71,6 +73,7 @@ class ListeningTracker(
     private var listenedMs = 0L
     private var playQualified = false
     private var sessionQualified = false
+    private var recentRecorded = false
     private var attempt: PlaybackAttempt? = null
     private var attemptActiveAt = 0L
     private var attemptListenedMs = 0L
@@ -86,6 +89,7 @@ class ListeningTracker(
         listenedMs = 0
         playQualified = false
         sessionQualified = false
+        recentRecorded = false
         attemptActiveAt = elapsedMs
         attemptListenedMs = 0
         pendingListeningDeductionMs = 0
@@ -97,6 +101,10 @@ class ListeningTracker(
     fun tick(positionMs: Long, durationMs: Long, wallMs: Long, elapsedMs: Long): List<ListeningWrite> {
         val id = trackId ?: return emptyList()
         val writes = mutableListOf<ListeningWrite>()
+        if (!recentRecorded && positionMs >= 3_000) {
+            recentRecorded = true
+            writes += ListeningWrite.RecentPlay(sourceDeviceId, id, wallMs)
+        }
         if (!playQualified && qualifiesPlayback(positionMs, durationMs)) {
             playQualified = true
             sessionQualified = true
@@ -195,6 +203,7 @@ class ListeningTracker(
         listenedMs = 0
         playQualified = false
         sessionQualified = false
+        recentRecorded = false
         attempt = null
         attemptActiveAt = 0
         attemptListenedMs = 0

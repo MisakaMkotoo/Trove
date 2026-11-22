@@ -1,19 +1,5 @@
 # Tune — agent instructions
 
-## PERMANENT RULE: GitHub cloud only
-
-**Anything and everything — coding, building, tests, compilations, runs,
-verification — happens on GitHub cloud. No hardware use. Ever.**
-
-- Never run gradle, npm/pnpm, adb, emulators, compilers, linters, or tests
-  on a local machine for this project. Not once.
-- Coordinate via `gh`: repos, Contents API, Actions logs, releases.
-- Do not keep local working copies of this repo for building. Read-only
-  reference clones of upstream sources (tune, Bitchord) are for reading
-  only — never build or run them either.
-- All code lands via the GitHub API or `git push` (transport only), then
-  GitHub Actions builds, tests, and releases it.
-
 ## Project facts
 
 - Standalone local Android music player (Kotlin Multiplatform:
@@ -360,3 +346,11 @@ JavaScript / Node.js
 ## 已验证无效的旧路径不得作为兜底
 
 完整条款见 `.qoder/rules/verified-path-first.md`：用户未认可、且实测已证明无效的实现，不得因为“一开始就是这么写的”而保留为默认或兜底；实测有效的方法必须作为主路径，无效路径直接删除。
+
+## 禁用 dev / beta 打包 flavor
+
+完整条款见 `.qoder/rules/disabled-flavors.md`：`com.exodidio.tune.dev` 与 `com.exodidio.tune.beta` 已禁用，只使用 prod（`com.mashiro.favmusic`）出包；构建、安装、发布这两个包名必须取得用户明确同意。
+
+## Bug 备忘录
+
+完整条款见 `.qoder/rules/memos.md`：发现或修复交互/动画/状态类 bug 时，在项目根目录 `memos/` 记录现象、根因与状态；备忘录只归档，用户未要求时不主动读取。

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">拾云</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">首页</string>
     <string name="home_greeting_morning">早上好</string>
     <string name="home_greeting_afternoon">下午好</string>
@@ -8,8 +8,52 @@
     <string name="destination_library">资料库</string>
     <string name="destination_insight">数据分析</string>
     <string name="destination_discover">新发现</string>
+    <string name="destination_mine">我的</string>
+    <string name="mine_placeholder_description">这里将放置你的个人内容。</string>
     <string name="discover_placeholder_title">新发现</string>
     <string name="discover_placeholder_description">即将上线。</string>
+    <string name="discover_section_rankings">排行榜</string>
+    <string name="discover_section_curated">甄选歌单</string>
+    <string name="discover_section_recommended">推荐歌单</string>
+    <string name="discover_section_new_songs">新歌新碟</string>
+    <string name="discover_category_rankings">排行榜</string>
+    <string name="discover_category_playlists">歌单</string>
+    <string name="discover_category_japanese">日语</string>
+    <string name="discover_category_acg">二次元</string>
+    <string name="discover_category_explore">探乐</string>
+    <string name="discover_category_vip">VIP</string>
+    <string name="discover_category_ost">OST</string>
+    <string name="discover_category_rock">摇滚</string>
+    <string name="discover_loading">正在加载…</string>
+    <string name="discover_error">加载失败：%1$s</string>
+    <string name="discover_retry">重试</string>
+    <string name="discover_ranking_subtitle">官方榜单</string>
+    <string name="discover_curated_subtitle">编辑精选</string>
+    <string name="discover_recommended_subtitle">为你推荐</string>
+    <string name="discover_new_songs_empty">暂时没有新歌。</string>
+    <string name="home_section_favorite_rec">根据你喜爱的歌曲推荐</string>
+    <string name="home_feed_fallback_title">为你精选</string>
+    <string name="account_title">账户</string>
+    <string name="account_nickname">昵称</string>
+    <string name="account_uid">UID</string>
+    <string name="account_login_name">手机 / 邮箱</string>
+    <string name="account_type">账号类型</string>
+    <string name="account_type_phone">手机号</string>
+    <string name="account_type_email">邮箱</string>
+    <string name="account_joined">注册时间</string>
+    <string name="account_login_title">登录网易云音乐</string>
+    <string name="account_login_desc">登录后可同步歌单、每日推荐和账户信息。</string>
+    <string name="netease_login_go">去登录</string>
+    <string name="discover_login_curated">登录后查看甄选歌单</string>
+    <string name="mine_created_title">自建歌单</string>
+    <string name="mine_saved_title">收藏歌单</string>
+    <string name="mine_artists_title">关注的歌手</string>
+    <string name="mine_more">更多</string>
+    <string name="mine_recent_section">最近播放</string>
+    <string name="mine_downloads_title">已下载的音乐</string>
+    <string name="netease_artist_songs_title">歌手</string>
+    <string name="account_gender_male">男</string>
+    <string name="account_gender_female">女</string>
     <string name="settings_show_genres">显示流派</string>
     <string name="settings_show_composers">显示作曲家</string>
     <string name="settings_data_analysis">数据分析</string>
@@ -115,6 +159,7 @@
     <string name="library_search_online_empty_description">换一个关键词试试。</string>
     <string name="library_search_online_loading">正在搜索网易云…</string>
     <string name="library_search_online_error">在线搜索失败：%1$s</string>
+    <string name="library_search_section_failed">%1$s加载失败：%2$s</string>
     <string name="filter_placeholder_search">搜索...</string>
     <string name="text_field_clear">清除文本</string>
     <string name="filter_no_match_description">尝试使用其他筛选条件。</string>
@@ -191,15 +236,9 @@
     <string name="playback_normalization_target_minimum">-30 LUFS</string>
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">服务集成</string>
+    <string name="settings_service_status">服务状态</string>
     <string name="integration_title">服务集成</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">记录您的播放历史并将收藏曲目同步到 Last.fm。</string>
-    <string name="lastfm_connected_as">已登录为 %1$s</string>
-    <string name="lastfm_connect">连接</string>
-    <string name="lastfm_connecting">正在连接…</string>
-    <string name="lastfm_disconnect">断开连接</string>
-    <string name="lastfm_error">无法连接至 Last.fm，请重试。</string>
-    <string name="lastfm_not_configured">此版本未配置 Last.fm 凭据。</string>
+
     <string name="settings_about">关于</string>
     <string name="about_title">关于</string>
     <string name="about_description">本地曲库与云端推荐</string>
@@ -351,17 +390,15 @@
     <string name="lyrics_title">歌词</string>
     <string name="lyrics_data_sources">数据源</string>
     <string name="lyrics_preferred_source">首选来源</string>
-    <string name="lyrics_romanization">启用罗马化</string>
     <string name="lyrics_source_auto_fetch">自动获取</string>
     <string name="lyrics_info_action">歌词信息</string>
     <string name="lyrics_info_title">歌词数据源</string>
     <string name="lyrics_info_description">歌词会自动从已启用的来源获取。</string>
-    <string name="player_romanization_show">显示罗马化</string>
-    <string name="player_romanization_hide">隐藏罗马化</string>
-    <string name="player_romanization_loading">正在罗马化…</string>
-    <string name="player_romanization_error">罗马化失败。关闭后重新开启以重试。</string>
-    <string name="player_romanization_hint">离线罗马化：中文和韩语。</string>
-    <string name="player_romanization_mandarin">仅含汉字的歌词默认按普通话处理。姓名的读音可能不同。</string>
+
+    <string name="player_translation_show">显示翻译</string>
+    <string name="player_translation_hide">隐藏翻译</string>
+    <string name="playback_lyrics_spring_strength">歌词动效弹簧强度</string>
+    <string name="playback_lyrics_auto_fullscreen">自动进入全屏歌词</string>
     <string name="appearance_player_theme_title">正在播放界面主题</string>
     <string name="appearance_player_standard">标准</string>
     <string name="appearance_player_adaptive">自适应取色</string>
@@ -395,6 +432,8 @@
     <string name="hide_short_audio">隐藏 40 秒以下的音频</string>
     <string name="settings_music_sync">音乐同步</string>
     <string name="settings_tab_layout">显示的标签</string>
+    <string name="settings_remember_tab_page">记住上次页面</string>
+    <string name="settings_merge_bottom_bars">合并底栏与播放条</string>
     <string name="settings_netease_playlists">网易云歌单</string>
     <string name="netease_daily_recommend">每日推荐</string>
     <string name="netease_radar">私人雷达</string>
@@ -408,7 +447,10 @@
     <string name="track_context_similar_songs">相似歌曲</string>
     <string name="similar_songs_empty">没有找到相似歌曲</string>
     <string name="similar_songs_error">相似歌曲加载失败</string>
-    <string name="netease_home_section">为你推荐</string>
+    <string name="netease_home_section">专属精选推荐</string>
+    <string name="netease_daily_intro">根据你的口味每日更新</string>
+    <string name="netease_radar_intro">按你的口味生成的雷达歌单</string>
+    <string name="netease_liked_intro">你在网易云点过“喜欢”的歌曲</string>
     <string name="netease_radar_section">雷达歌单</string>
     <string name="netease_home_loading">正在获取推荐…</string>
     <string name="netease_home_login_hint">登录网易云后，这里会显示每日推荐与私人雷达。</string>
@@ -418,6 +460,8 @@
     <string name="netease_cache_title">流媒体缓存</string>
     <string name="netease_cache_usage">已用 %1$s / 上限 %2$s</string>
     <string name="netease_cache_clear">清空缓存</string>
+    <string name="netease_cover_cache_title">封面缓存</string>
+    <string name="remote_cache_title">资源库缓存</string>
     <string name="netease_cache_current">当前大小</string>
     <string name="netease_playlist_link_hint">歌单链接或 ID</string>
     <string name="netease_import_action">导入歌单</string>
@@ -425,10 +469,14 @@
     <string name="netease_add_to_playlists">加入播放列表</string>
     <string name="netease_remove_from_playlists">移出播放列表</string>
     <string name="netease_download_all">一键下载全部</string>
+    <string name="netease_download_in_progress">正在下载…</string>
+    <string name="netease_download_none">没有需要下载的歌曲</string>
+    <string name="netease_download_result">已下载 %1$d / %2$d 首</string>
     <string name="netease_download_progress">下载中 %1$d / %2$d</string>
     <string name="netease_delete_title">删除这个歌单？</string>
     <string name="netease_delete_desc">只删除网易云歌单记录，已下载的音频文件会保留。</string>
     <string name="netease_login_web">网页登录</string>
+    <string name="netease_login_web_desktop">电脑端网页登录</string>
     <string name="netease_login_done">我已登录</string>
     <string name="netease_login_qr">扫码登录</string>
     <string name="netease_logout">退出登录</string>
@@ -491,7 +539,7 @@
     <string name="about_section_app">应用</string>
     <string name="about_section_project">项目</string>
     <string name="about_update_downloading">正在下载…</string>
-    <string name="about_star">在 GitHub 上给 FavFold Music 点星</string>
+    <string name="about_star">在 GitHub 上给 Trove 点星</string>
     <string name="theme_amoled">纯黑（AMOLED）</string>
     <string name="home_hero_title">为你推荐</string>
     <string name="artist_edit">编辑歌手</string>
@@ -506,5 +554,112 @@
     <string name="duplicates_kept_badge">已保留</string>
     <string name="duplicates_rescan_note">「保留最佳」和已忽略的分组只是在这里隐藏条目，文件仍保留在设备上；重新扫描会把隐藏的副本找回来。</string>
     <string name="track_context_delete_from_device">从设备删除文件</string>
+    <string name="track_context_delete_download">删除下载</string>
+
+    <!-- Shared -->
+    <string name="common_unknown">未知</string>
+    <string name="common_unknown_artist">未知歌手</string>
+    <string name="common_count_tracks">%1$d 首</string>
+
+    <!-- Service status / computer library -->
+    <string name="integration_computer_library">电脑音乐库</string>
+    <string name="integration_remote_unconfigured">未配置</string>
+    <string name="integration_remote_syncing">同步中…（%1$s）</string>
+    <string name="integration_remote_online">%1$s%2$s · 在线</string>
+    <string name="integration_remote_offline">离线 · 上次地址 %1$s</string>
+    <string name="integration_last_sync">上次同步</string>
+    <string name="integration_never_synced">还没有成功同步过</string>
+    <string name="integration_last_sync_value">%1$s · %2$d 首电脑曲目</string>
+
+    <string name="integration_lyrics_sources">歌词源</string>
+    <string name="integration_lrclib_on">LRCLIB 开</string>
+    <string name="integration_lrclib_off">LRCLIB 关</string>
+    <string name="integration_kugou_on">酷狗 开</string>
+    <string name="integration_kugou_off">酷狗 关</string>
+    <string name="integration_time_never">从未</string>
+    <string name="integration_time_just_now">刚刚</string>
+    <string name="integration_time_seconds">%1$d 秒前</string>
+    <string name="integration_time_minutes">%1$d 分钟前</string>
+    <string name="integration_time_hours">%1$d 小时前</string>
+    <string name="integration_time_days">%1$d 天前</string>
+    <string name="integration_host_hint">主机地址（http://IP:27185 或 https://IP:27186）</string>
+    <string name="integration_pair_code">6 位配对码</string>
+    <string name="integration_connecting">正在连接…</string>
+    <string name="integration_connected_syncing">已连接，正在同步曲库…</string>
+    <string name="integration_synced_count">已同步 %1$d 首电脑曲目</string>
+    <string name="integration_connected_sync_failed">已连接，但同步失败：%1$s</string>
+    <string name="integration_connect_failed">连接失败：%1$s</string>
+    <string name="integration_connect">连接</string>
+    <string name="integration_address_help">家里填局域网 HTTP 地址；外网填公网 IPv6 的 HTTPS 地址。配对后电脑会把两套地址都发过来，手机自动保存并在换网时切换。</string>
+    <string name="integration_connected_prefix">已连接：</string>
+    <string name="integration_status_syncing">状态：同步中…</string>
+    <string name="integration_status_online">状态：在线</string>
+    <string name="integration_status_offline">状态：离线</string>
+    <string name="integration_current_address">当前地址：%1$s</string>
+    <string name="integration_last_sync_prefix">上次同步：</string>
+    <string name="integration_last_sync_count">%1$s · %2$d 首</string>
+    <string name="integration_cert_pinned">证书指纹：%1$s（已固定）</string>
+    <string name="integration_cert_unpinned">证书指纹：未固定</string>
+    <string name="integration_saved_addresses">已保存地址（点一下切换）</string>
+    <string name="integration_switching_to">正在切换到%1$s地址…</string>
+    <string name="integration_switched_synced">已切换并同步 %1$d 首</string>
+    <string name="integration_switch_failed">切换失败：%1$s</string>
+    <string name="integration_syncing">正在同步…</string>
+    <string name="integration_sync_failed">同步失败：%1$s</string>
+    <string name="integration_resync">重新同步</string>
+    <string name="integration_disconnected">已断开电脑音乐库</string>
+    <string name="integration_disconnect">断开</string>
+    <string name="integration_kind_lan">局域网</string>
+    <string name="integration_kind_public">公网</string>
+    <string name="integration_switched_message">已切换到%1$s地址</string>
+    <string name="integration_kind_mesh">组网</string>
+    <string name="integration_not_configured">还没有配置电脑音乐库</string>
+    <string name="integration_all_addresses_unreachable">电脑连不上：局域网和公网地址都不通</string>
+    <string name="integration_sync_failed_generic">同步失败</string>
+    <string name="integration_pair_missing_host">请输入主机地址</string>
+    <string name="integration_pair_missing_code">请输入 6 位配对码</string>
+    <string name="integration_pair_fingerprint_failed">读取证书指纹失败，请确认主机开着 HTTPS</string>
+    <string name="integration_pair_failed">配对失败</string>
+    <string name="integration_library_read_failed">读取电脑曲库失败</string>
+    <string name="integration_request_failed">请求失败</string>
+    <string name="integration_tls_client_cert">不接受客户端证书</string>
+    <string name="integration_tls_empty_chain">证书链为空</string>
+    <string name="common_unknown_album">未知专辑</string>
+
+    <!-- NetEase account / login -->
+    <string name="account_qr_fetch_failed">无法获取二维码</string>
+    <string name="account_status_query_failed">查询状态失败：%1$s</string>
+    <string name="account_network_error">网络错误</string>
+    <string name="account_qr_expired">二维码已过期（code=800）</string>
+    <string name="account_qr_waiting">等待扫码（code=801）</string>
+    <string name="account_qr_scanned">已扫码，请在手机上确认（code=802）</string>
+    <string name="account_login_success">登录成功（code=803）</string>
+    <string name="account_qr_missing_cookie">code=803 但没有拿到 MUSIC_U</string>
+    <string name="account_qr_waiting_code">等待扫码（状态 %1$d%2$s）</string>
+    <string name="account_qr_status_suffix">：%1$s</string>
+    <string name="account_qr_scan_hint">请使用网易云音乐 App 扫码</string>
+    <string name="account_credential_obtained">已获取登录凭证</string>
+    <string name="account_login_not_detected">还没有检测到登录状态</string>
+    <string name="account_qr_risk">网易要求完成验证：%1$s。请改用网页登录或更换网络。</string>
+    <string name="account_qr_verify">完成验证</string>
+    <string name="account_qr_verify_title">人机验证</string>
+    <string name="account_qr_verify_done">我已完成验证</string>
+
+    <!-- NetEase lists -->
+    <string name="netease_download_failed">下载失败</string>
+    <string name="netease_loading">正在加载…</string>
+    <string name="netease_radar_refresh_failed">雷达刷新失败</string>
+    <string name="netease_refreshing">正在刷新…</string>
+    <string name="netease_refresh_failed">刷新失败</string>
+    <string name="netease_saved_to_playlists">已保存到播放列表</string>
+    <string name="netease_save_failed">保存失败</string>
+    <string name="netease_playlist_imported">已导入歌单</string>
+    <string name="netease_import_failed">导入失败</string>
+    <string name="netease_heartbeat_start_failed">心动模式启动失败</string>
+    <string name="netease_roam_start_failed">漫游启动失败</string>
+    <string name="netease_login_credential_obtained">已获取登录凭证</string>
+    <string name="netease_login_not_detected">还没有检测到登录状态</string>
+    <string name="netease_track_count">%1$d 首</string>
+    <string name="netease_search_failed">在线搜索失败</string>
 </resources>
 

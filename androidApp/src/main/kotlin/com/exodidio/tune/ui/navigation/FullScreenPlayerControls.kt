@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,7 +45,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -55,8 +59,12 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import com.exodidio.tune.R
 import com.exodidio.tune.player.PlaybackQueueSnapshot
@@ -67,6 +75,8 @@ import com.exodidio.tune.ui.components.AnimatedPlayPauseSymbol
 import com.exodidio.tune.ui.components.AnimatedSkipSymbol
 import com.exodidio.tune.ui.components.MaterialSymbol
 import com.exodidio.tune.ui.components.MaterialSymbols
+import com.exodidio.tune.ui.components.MaterialSymbolsFilledFontFamily
+import com.exodidio.tune.ui.components.MaterialSymbolsOutlinedFontFamily
 import com.exodidio.tune.ui.components.TrackAudioQuality
 import com.exodidio.tune.ui.components.sliderFilledTrackColor
 import com.exodidio.tune.ui.components.trackAudioQuality
@@ -194,8 +204,10 @@ internal fun FullScreenPlayerControls(
     ) {
         // 仿 Apple Music：整组控件贴底，不再在剩余空间里均分。
         Column(
-            Modifier.fillMaxWidth().padding(bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(22.dp, Alignment.Bottom),
+            Modifier.fillMaxWidth().padding(bottom = 14.dp),
+            // 苹果同机实测：底部两图标 64dp、三键 157dp、进度条 260dp（距屏幕底），
+            // 对应的两段间距都是 31dp。
+            verticalArrangement = Arrangement.spacedBy(31.dp, Alignment.Bottom),
         ) {
             Column {
                 TuneTrackSlider(
@@ -241,10 +253,12 @@ internal fun FullScreenPlayerControls(
                 }
                 if (qualityDialogVisible && qualityBadge != null) FullScreenQualityDialog(qualityBadge.first, qualityBadge.second, qualityDetails) { qualityDialogVisible = false }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(32.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
-                FullScreenTransportButton(MaterialSymbols.SkipPrevious, stringResource(R.string.player_previous), onPrevious, enabled = canNavigatePrevious, iconSize = 40.dp, skipForward = false)
+            // 三键中心间距 107dp（苹果实测 80.8 / 187.8 / 294.9）。
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(43.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
+                // 苹果同机实测图形：上一/下一 44.3×25.2dp、播放 39.4×39.7dp。
+                FullScreenTransportButton(MaterialSymbols.SkipPrevious, stringResource(R.string.player_previous), onPrevious, enabled = canNavigatePrevious, iconSize = 51.dp, skipForward = false)
                 FullScreenTransportButton(label = stringResource(if (isPlaying) R.string.player_pause else R.string.player_play), onClick = onPlayPause, enabled = !isPreparing || isPlaying, iconSize = 56.dp, isPlaying = isPlaying)
-                FullScreenTransportButton(MaterialSymbols.SkipNext, stringResource(R.string.player_next), onNext, enabled = canNavigateNext, iconSize = 40.dp, skipForward = true)
+                FullScreenTransportButton(MaterialSymbols.SkipNext, stringResource(R.string.player_next), onNext, enabled = canNavigateNext, iconSize = 51.dp, skipForward = true)
             }
             Column {
                 if (showVolumeSlider) {
@@ -258,44 +272,40 @@ internal fun FullScreenPlayerControls(
                     }
                     Spacer(Modifier.height(4.dp))
                 }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                // 苹果底部两图标中心距屏幕边约 84.6dp：控件列已有 32dp 内边距，这里再补 22.5dp。
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 22.5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
                     // Lyrics is a compulsory player feature: always available. Fullscreen lyrics
                     // only controls presentation (see FullScreenPlayerLyricsPanel fullscreen flag).
-                    FullScreenControlSlot {
+                    FullScreenToggleIcon(
+                        selected = lyricsSelected,
+                        symbol = MaterialSymbols.Lyrics,
+                        label = stringResource(R.string.player_lyrics),
+                        shape = RoundedCornerShape(8.dp),
+                        containerSize = 32.dp,
+                        iconSize = 25.dp,
+                        onClick = { onPanelSelected(if (lyricsSelected) null else FullScreenPlayerPanel.Lyrics) },
+                    )
+                    Box(Modifier.size(60.dp)) {
                         FullScreenToggleIcon(
-                            selected = lyricsSelected,
-                            symbol = MaterialSymbols.Chat,
-                            label = stringResource(R.string.player_lyrics),
+                            selected = queueSelected,
+                            symbol = MaterialSymbols.QueueMusic,
+                            label = stringResource(R.string.player_queue),
                             shape = RoundedCornerShape(8.dp),
                             containerSize = 32.dp,
-                            iconSize = 22.dp,
-                            onClick = { onPanelSelected(if (lyricsSelected) null else FullScreenPlayerPanel.Lyrics) },
+                            iconSize = 25.dp,
+                            onClick = { onPanelSelected(if (queueSelected) null else FullScreenPlayerPanel.Queue) },
+                            modifier = Modifier.align(Alignment.Center),
                         )
-                    }
-                    FullScreenControlSlot {
-                        Box(Modifier.size(48.dp)) {
-                            FullScreenToggleIcon(
-                                selected = queueSelected,
-                                symbol = MaterialSymbols.QueueMusic,
-                                label = stringResource(R.string.player_queue),
-                                shape = RoundedCornerShape(8.dp),
-                                containerSize = 32.dp,
-                                iconSize = 22.dp,
-                                onClick = { onPanelSelected(if (queueSelected) null else FullScreenPlayerPanel.Queue) },
-                                modifier = Modifier.align(Alignment.Center),
-                            )
-                            if (!queueSelected && queueBadgeVisible) queueStatusBadgeSymbol(queue)?.let { QueueStatusBadge(it) }
-                        }
+                        if (!queueSelected && queueBadgeVisible) queueStatusBadgeSymbol(queue)?.let { QueueStatusBadge(it) }
                     }
                 }
             }
         }
     }
-}
-
-@Composable
-internal fun RowScope.FullScreenControlSlot(content: @Composable () -> Unit) {
-    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) { content() }
 }
 
 internal fun queueStatusBadgeSymbol(queue: PlaybackQueueSnapshot): String? = when {
@@ -335,28 +345,33 @@ internal fun FullScreenToggleIcon(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalTuneColors.current
-    val surfaceColor = LocalPlayerSurfaceColor.current
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val containerColor by animateColorAsState(
-        targetValue = if (selected) colors.onPrimary else Color.Transparent,
+    val selectionProgress by animateFloatAsState(
+        targetValue = if (selected) 1f else 0f,
         animationSpec = tween(200, easing = FastOutSlowInEasing),
-        label = "full-screen-toggle-container",
-    )
-    val selectedTint = if (surfaceColor != Color.Unspecified) surfaceColor else colors.playerBackdrop
-    val iconColor by animateColorAsState(
-        targetValue = if (selected) selectedTint else colors.foregroundSubtle,
-        animationSpec = tween(200, easing = FastOutSlowInEasing),
-        label = "full-screen-toggle-icon",
+        label = "full-screen-toggle-selection",
     )
     val pressScale by animateFloatAsState(
         targetValue = if (isPressed) 0.9f else 1f,
         animationSpec = tween(120),
         label = "full-screen-toggle-press",
     )
+    // 真镂空：白色容器画在离屏图层里，再用 DstOut 把图标形状从图层擦掉，
+    // 让图标位置透出真实背景像素，而不是涂一个固定的“假背景色”。
+    val measurer = rememberTextMeasurer()
+    val glyph = remember(symbol, iconSize, selected, measurer) {
+        measurer.measure(
+            text = symbol,
+            style = TextStyle(
+                fontFamily = if (selected) MaterialSymbolsFilledFontFamily else MaterialSymbolsOutlinedFontFamily,
+                fontSize = iconSize.value.sp,
+            ),
+        )
+    }
     Box(
         modifier = modifier
-            .size(48.dp)
+            .size(60.dp)
             .semantics { contentDescription = label }
             .clickable(
                 role = Role.Button,
@@ -372,13 +387,40 @@ internal fun FullScreenToggleIcon(
                 .graphicsLayer {
                     scaleX = pressScale
                     scaleY = pressScale
+                    compositingStrategy = CompositingStrategy.Offscreen
                 }
                 .clip(shape)
-                .background(containerColor),
-            contentAlignment = Alignment.Center,
-        ) {
-            MaterialSymbol(symbol, null, tint = iconColor, size = iconSize, filled = selected)
-        }
+                .background(colors.onPrimary.copy(alpha = selectionProgress))
+                .drawWithContent {
+                    drawContent()
+                    if (selectionProgress > 0.01f) {
+                        drawText(
+                            textLayoutResult = glyph,
+                            color = Color.Black,
+                            topLeft = Offset(
+                                (size.width - glyph.size.width) / 2f,
+                                (size.height - glyph.size.height) / 2f,
+                            ),
+                            alpha = selectionProgress,
+                            blendMode = BlendMode.DstOut,
+                        )
+                    }
+                },
+        )
+        // 过渡期间保留线描图标，随选中进度淡出；选中后不再有实色图标，只剩真实镂空。
+        MaterialSymbol(
+            symbol,
+            null,
+            tint = colors.foregroundSubtle,
+            size = iconSize,
+            filled = selected,
+            modifier = Modifier
+                .graphicsLayer {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                }
+                .alpha(1f - selectionProgress),
+        )
     }
 }
 

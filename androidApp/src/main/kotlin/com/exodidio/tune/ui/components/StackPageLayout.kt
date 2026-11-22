@@ -104,6 +104,7 @@ fun StackPageLayout(
     onBackClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     showHeader: Boolean = true,
+    reserveHeaderSpace: Boolean = true,
     hasActions: Boolean = false,
     animateChanges: Boolean = true,
     titleStackKey: String = "",
@@ -115,7 +116,11 @@ fun StackPageLayout(
     val statusBarPadding = with(density) { WindowInsets.statusBars.getTop(this).toDp() }
     val contentPadding = PaddingValues(
         start = PageHorizontalPadding,
-        top = statusBarPadding + HeaderTopPadding + HeaderHeight + HeaderBottomPadding + StackPageHeaderContentGap,
+        top = if (reserveHeaderSpace) {
+            statusBarPadding + HeaderTopPadding + HeaderHeight + HeaderBottomPadding + StackPageHeaderContentGap
+        } else {
+            statusBarPadding + 16.dp
+        },
         end = PageHorizontalPadding,
         bottom = contentBottomPadding,
     )

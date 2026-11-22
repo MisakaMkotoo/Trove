@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">FavFold Music</string>
+    <string name="app_name">Trove</string>
     <string name="destination_home">หน้าแรก</string>
     <string name="home_greeting_morning">อรุณสวัสดิ์</string>
     <string name="home_greeting_afternoon">สวัสดีตอนบ่าย</string>
@@ -180,14 +180,7 @@
     <string name="playback_normalization_target_maximum">-5 LUFS</string>
     <string name="settings_integration">การเชื่อมต่อ</string>
     <string name="integration_title">การเชื่อมต่อ</string>
-    <string name="lastfm_title">Last.fm</string>
-    <string name="lastfm_description">Scrobble เพลงที่คุณเล่นและซิงค์แทร็กโปรดกับ Last.fm</string>
-    <string name="lastfm_connected_as">เชื่อมต่อในชื่อ %1$s</string>
-    <string name="lastfm_connect">เชื่อมต่อ</string>
-    <string name="lastfm_connecting">กำลังเชื่อมต่อ…</string>
-    <string name="lastfm_disconnect">ยกเลิกการเชื่อมต่อ</string>
-    <string name="lastfm_error">ไม่สามารถเชื่อมต่อกับ Last.fm ได้ โปรดลองอีกครั้ง</string>
-    <string name="lastfm_not_configured">ข้อมูลประจำตัว Last.fm ยังไม่ได้กำหนดค่าสำหรับบิลด์นี้</string>
+
     <string name="settings_about">เกี่ยวกับ</string>
     <string name="about_title">เกี่ยวกับ</string>
     <string name="about_description">เครื่องเล่นเพลงในเครื่องที่ทันสมัย</string>
@@ -339,16 +332,11 @@
     <string name="lyrics_title">เนื้อเพลง</string>
     <string name="lyrics_data_sources">แหล่งข้อมูล</string>
     <string name="lyrics_preferred_source">แหล่งข้อมูลที่ต้องการ</string>
-    <string name="lyrics_romanization">เปิดใช้การถอดเสียง</string>
+
     <string name="lyrics_source_auto_fetch">ดึงข้อมูลอัตโนมัติ</string>
     <string name="lyrics_info_action">ข้อมูลเนื้อเพลง</string>
     <string name="lyrics_info_title">แหล่งข้อมูลเนื้อเพลง</string>
     <string name="lyrics_info_description">Lyrics are fetched automatically from the enabled providers.</string>
-    <string name="player_romanization_show">แสดงคำอ่าน</string>
-    <string name="player_romanization_hide">ซ่อนคำอ่าน</string>
-    <string name="player_romanization_loading">กำลังถอดเสียง…</string>
-    <string name="player_romanization_error">ถอดเสียงไม่สำเร็จ ปิดแล้วเปิดเพื่อลองอีกครั้ง</string>
-    <string name="player_romanization_hint">ถอดเสียงออฟไลน์: จีนและเกาหลี</string>
-    <string name="player_romanization_mandarin">เนื้อเพลงที่มีเฉพาะอักษรฮั่นใช้ภาษาจีนกลางเป็นค่าเริ่มต้น ชื่ออาจมีการอ่านที่ต่างกัน</string>
+
 </resources>
 
