@@ -152,8 +152,8 @@ dependencies {
     debugImplementation(libs.compose.uiTestManifest)
 }
 
-val appVersionCode = 10
-val appVersionName = "1.2.0-beta"
+val appVersionCode = 11
+val appVersionName = "1.3.0-beta"
 val betaVersionCode = 8
 val buildingRelease = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
 val releaseAbiSplitsRequested = gradle.startParameter.projectProperties["enableReleaseAbiSplits"] != "false"
