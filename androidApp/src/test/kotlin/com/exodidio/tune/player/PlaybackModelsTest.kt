@@ -198,4 +198,45 @@ class PlaybackModelsTest {
         assertEquals(5_000L, clampSeekPosition(5_000L, 10_000L))
         assertEquals(10_000L, clampSeekPosition(12_000L, 10_000L))
     }
+
+    @Test
+    fun `consecutive album tracks prefer gapless over crossfade when enabled`() {
+        val t1 = PlaybackItem("1", "Track 1", "Artist", "/a.flac", albumId = "alb1", album = "Concept", trackNumber = 1)
+        val t2 = PlaybackItem("2", "Track 2", "Artist", "/b.flac", albumId = "alb1", album = "Concept", trackNumber = 2)
+        val other = PlaybackItem("3", "Other", "Other", "/c.flac", albumId = "alb2", album = "Other", trackNumber = 1)
+
+        assertTrue(shouldPreferGaplessForAlbum(gaplessEnabled = true, current = t1, next = t2, isShuffled = false))
+        assertFalse(shouldPreferGaplessForAlbum(gaplessEnabled = true, current = t1, next = t2, isShuffled = true))
+        assertFalse(shouldPreferGaplessForAlbum(gaplessEnabled = false, current = t1, next = t2, isShuffled = false))
+        assertFalse(shouldPreferGaplessForAlbum(gaplessEnabled = true, current = t1, next = other, isShuffled = false))
+    }
+
+    @Test
+    fun `loudness normalization respects track album and prevent-clipping rules`() {
+        val trackAnalysis = TrackAnalysis(loudnessLufs = -8f, truePeak = -0.5f)
+        val albumMate = TrackAnalysis(loudnessLufs = -10f, truePeak = -1.0f)
+
+        assertEquals(0f, normalizationGainDb(NormalizationSettings(enabled = false), trackAnalysis), 0.001f)
+        assertEquals(-6f, normalizationGainDb(NormalizationSettings(enabled = true, targetLufs = -14f), trackAnalysis), 0.001f)
+
+        val quietTrack = TrackAnalysis(loudnessLufs = -22f, truePeak = -2.0f)
+        assertEquals(2f, normalizationGainDb(NormalizationSettings(enabled = true, targetLufs = -14f, preventClip = true), quietTrack), 0.001f)
+        assertEquals(8f, normalizationGainDb(NormalizationSettings(enabled = true, targetLufs = -14f, preventClip = false), quietTrack), 0.001f)
+
+        val albumGain = normalizationGainDb(
+            NormalizationSettings(enabled = true, mode = NormalizationMode.Album, targetLufs = -14f, preventClip = true),
+            trackAnalysis,
+            albumAnalyses = listOf(trackAnalysis, albumMate),
+            continuousAlbum = true,
+        )
+        assertEquals(-5f, albumGain, 0.001f)
+    }
+
+    @Test
+    fun `buffering playback retains pause glyph while preparing without resumeIntent does not`() {
+        val item = PlaybackItem("1", "Song", "Artist", "netease://1")
+        assertTrue(PlaybackState.Playing(item, 15_000L, 180_000L, isBuffering = true).showsPauseGlyph())
+        assertTrue(PlaybackState.Preparing(item, resumeIntent = true).showsPauseGlyph())
+        assertFalse(PlaybackState.Preparing(item, resumeIntent = false).showsPauseGlyph())
+    }
 }

@@ -1,5 +1,11 @@
 package com.exodidio.tune.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -14,14 +20,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
@@ -31,12 +41,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import com.exodidio.tune.R
+import com.exodidio.tune.library.SmartPlaylistSpec
 import com.exodidio.tune.ui.components.ArtworkHeroBackdrop
 import com.exodidio.tune.ui.components.DetailHero
 import com.exodidio.tune.ui.components.HeroCard
+import com.exodidio.tune.ui.components.LibraryTextFilter
+import com.exodidio.tune.ui.components.LibraryTextFilterSlot
+import com.exodidio.tune.ui.components.LocalReduceMotion
+import com.exodidio.tune.ui.components.LocalBatchChromeHost
 import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.MaterialSymbol
+import com.exodidio.tune.ui.components.MultiSelectActionBar
+import com.exodidio.tune.ui.components.MultiSelectCheckBadge
+import com.exodidio.tune.ui.components.MultiSelectSelectionHeader
 import com.exodidio.tune.ui.components.PlaylistArtwork
 import com.exodidio.tune.ui.components.TrackRow
 import com.exodidio.tune.ui.components.TrackContextMenu
@@ -46,8 +66,9 @@ import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
 import com.exodidio.tune.ui.components.PlaylistContextMenu
 import com.exodidio.tune.ui.components.TuneDialog
 import com.exodidio.tune.ui.components.TunePillButtonVariant
+import com.exodidio.tune.ui.components.rememberPullDownFilterState
 import com.exodidio.tune.ui.components.trackInfoArtworkSize
-import com.exodidio.tune.ui.components.liquidGlassBackground
+import com.exodidio.tune.ui.components.tuneLiquidGlassBackground
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.ui.theme.LocalTuneColors
 import sh.calvin.reorderable.ReorderableItem
@@ -78,7 +99,10 @@ internal fun PlaylistDetailsContent(
     onPlaylistPlayNext: (List<String>) -> Unit = {},
     onPlaylistAddToQueue: (List<String>) -> Unit = {},
     onPlaylistUpdate: (String, String, android.net.Uri?, Boolean) -> Unit = { _, _, _, _ -> },
+    onSmartPlaylistUpdate: (String, String, SmartPlaylistSpec) -> Unit = { _, _, _ -> },
     onPlaylistDelete: (String) -> Unit = {},
+    onExportM3u: () -> Unit = {},
+    onPlaylistDeduplicate: (String) -> Int = { 0 },
 ) {
     val playlist = uiState.playlist
     if (playlist == null) {
@@ -91,11 +115,15 @@ internal fun PlaylistDetailsContent(
         return
     }
     val colors = LocalTuneColors.current
+    val isSmart = uiState.smartSpec != null
     var contextTrack by remember(playlist.id) { mutableStateOf<String?>(null) }
     var playlistMenuExpanded by remember(playlist.id) { mutableStateOf(false) }
     var showPlaylistEditor by remember(playlist.id) { mutableStateOf(false) }
     var showDeleteConfirmation by remember(playlist.id) { mutableStateOf(false) }
     var isReordering by remember(playlist.id) { mutableStateOf(false) }
+    var multiSelectMode by remember(playlist.id) { mutableStateOf(false) }
+    var selectedTrackIds by remember(playlist.id) { mutableStateOf<Set<String>>(emptySet()) }
+    var filterQuery by rememberSaveable(playlist.id) { mutableStateOf("") }
     var orderedTrackIds by remember(playlist.id) { mutableStateOf(uiState.tracks.map { it.id }) }
     var draggedTrackId by remember { mutableStateOf<String?>(null) }
     var draggedTrackInitialIndex by remember { mutableStateOf(-1) }
@@ -103,6 +131,12 @@ internal fun PlaylistDetailsContent(
     val latestOnTrackMove = rememberUpdatedState(onTrackMove)
     val haptics = LocalHapticFeedback.current
     val listState = rememberLazyListState()
+    val pullDownFilterState = rememberPullDownFilterState(
+        listState = listState,
+        filterKey = "playlist-details:${playlist.id}",
+        filterActive = filterQuery.isNotBlank(),
+        enabled = !isReordering,
+    )
     val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
         if (from.index != to.index) {
             orderedTrackIds = movePlaylistTrack(orderedTrackIds, playlistTrackIndex(from.index), playlistTrackIndex(to.index))
@@ -112,16 +146,33 @@ internal fun PlaylistDetailsContent(
     val context = LocalContext.current
     val count = pluralStringResource(R.plurals.playlist_details_track_count, uiState.tracks.size, uiState.tracks.size)
     val totalDurationSeconds = remember(uiState.tracks) { playlistTotalDurationSeconds(uiState.tracks) }
+    val dayFormat = stringResource(R.string.playlist_duration_day, 987654)
+    val hourFormat = stringResource(R.string.playlist_duration_hour, 987654)
+    val minuteFormat = stringResource(R.string.playlist_duration_minute, 987654)
+    val secondFormat = stringResource(R.string.playlist_duration_second, 987654)
     val duration = formatPlaylistTotalDuration(
         totalDurationSeconds,
-        day = { context.getString(R.string.playlist_duration_day, it) },
-        hour = { context.getString(R.string.playlist_duration_hour, it) },
-        minute = { context.getString(R.string.playlist_duration_minute, it) },
-        second = { context.getString(R.string.playlist_duration_second, it) },
+        day = { dayFormat.replace("987654", it.toString()) },
+        hour = { hourFormat.replace("987654", it.toString()) },
+        minute = { minuteFormat.replace("987654", it.toString()) },
+        second = { secondFormat.replace("987654", it.toString()) },
     )
     val name = if (playlist.id == FavoritesPlaylistId) stringResource(R.string.library_favorites) else playlist.name
     val trackIds = remember(uiState.tracks) { uiState.tracks.map { it.id } }
     val tracksById = remember(uiState.tracks) { uiState.tracks.associateBy { it.id } }
+    val trimmedQuery = filterQuery.trim()
+    val visibleTrackIds = remember(orderedTrackIds, tracksById, trimmedQuery, isReordering) {
+        if (isReordering || trimmedQuery.isEmpty()) {
+            orderedTrackIds
+        } else {
+            orderedTrackIds.filter { id ->
+                val track = tracksById[id] ?: return@filter false
+                track.title.contains(trimmedQuery, ignoreCase = true) ||
+                    track.artists.contains(trimmedQuery, ignoreCase = true) ||
+                    track.album.contains(trimmedQuery, ignoreCase = true)
+            }
+        }
+    }
     // Apple Music 播放列表行：高 56dp、封面 48dp/圆角 4dp、标题 17sp、歌手 15sp、右侧菜单贴边 38dp。
     val appleTitleStyle = MaterialTheme.typography.bodyLarge.copy(
         fontWeight = FontWeight.SemiBold,
@@ -132,60 +183,266 @@ internal fun PlaylistDetailsContent(
     val appleRowPadding = PaddingValues(start = 16.dp, top = 4.dp, end = 0.dp, bottom = 4.dp)
     androidx.compose.runtime.LaunchedEffect(uiState.tracks, isReordering) {
         if (!isReordering) orderedTrackIds = uiState.tracks.map { it.id }
+        if (isReordering && filterQuery.isNotEmpty()) filterQuery = ""
     }
-    LazyColumn(
-        modifier.fillMaxSize(),
-        state = listState,
-        contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding()),
-    ) {
-        item("hero") {
-            ArtworkHeroBackdrop(uiState.artworkPaths.firstOrNull(), Modifier.fillMaxWidth(), onHeroColorChanged, reduceTransparency = reduceTransparency) {
-                DetailHero(
-                    title = name,
-                    metadata = stringResource(R.string.playlist_details_metadata, count, duration),
-                    playLabel = stringResource(R.string.player_play),
-                    shuffleLabel = stringResource(R.string.player_shuffle),
-                    moreLabel = stringResource(if (isReordering) R.string.playlist_reorder_done else R.string.album_row_more_options),
-                    moreSymbol = if (isReordering) MaterialSymbols.Check else MaterialSymbols.MoreVert,
-                    modifier = Modifier.fillMaxWidth().padding(
-                        start = 24.dp,
-                        top = contentPadding.calculateTopPadding(),
-                        end = 24.dp,
-                        bottom = 20.dp,
-                    ),
-                    artworkSize = trackInfoArtworkSize,
-                    reduceTransparency = reduceTransparency,
-                    fallbackSymbol = if (playlist.id == FavoritesPlaylistId) MaterialSymbols.Favorite else MaterialSymbols.QueueMusic,
-                    artworkContent = {
-                        PlaylistArtwork(playlist.id, uiState.artworkPaths, size = trackInfoArtworkSize)
+    BackHandler(enabled = multiSelectMode) {
+        multiSelectMode = false
+        selectedTrackIds = emptySet()
+    }
+    val batchHost = LocalBatchChromeHost.current
+    val batchId = remember(playlist.id) { Any() }
+    val listHazeState = if (batchHost == null && hazeState != null) rememberHazeState() else null
+    val latestTrackIds by rememberUpdatedState(trackIds)
+    val latestOnPlaylistPlayNext by rememberUpdatedState(onPlaylistPlayNext)
+    val latestOnTrackRemoveFromPlaylist by rememberUpdatedState(onTrackRemoveFromPlaylist)
+    val latestOnTrackContextBottomSheet by rememberUpdatedState(onTrackContextBottomSheet)
+    val batchHeroTopExtra by animateDpAsState(
+        targetValue = if (multiSelectMode) 56.dp else 0.dp,
+        animationSpec = tween(260, easing = FastOutSlowInEasing),
+        label = "playlist-batch-top-padding",
+    )
+    if (batchHost != null) {
+        DisposableEffect(batchHost, batchId) {
+            onDispose { batchHost.dismiss(batchId) }
+        }
+        SideEffect {
+            if (multiSelectMode) {
+                batchHost.show(
+                    id = batchId,
+                    topContent = {
+                        val allIds = latestTrackIds
+                        val currentSelected = selectedTrackIds
+                        MultiSelectSelectionHeader(
+                            selectedCount = currentSelected.size,
+                            allSelected = allIds.isNotEmpty() && currentSelected.size == allIds.size,
+                            onToggleSelectAll = {
+                                selectedTrackIds = if (currentSelected.size == allIds.size) emptySet() else allIds.toSet()
+                            },
+                            onExit = {
+                                multiSelectMode = false
+                                selectedTrackIds = emptySet()
+                            },
+                        )
                     },
-                    onPlayClick = onPlay,
-                    onShuffleClick = onShuffle,
-                    onMoreClick = { if (isReordering) isReordering = false else playlistMenuExpanded = true },
-                    moreAction = { action ->
-                        if (isReordering) action()
-                        else PlaylistContextMenu(
-                            playlistId = playlist.id,
-                            trackIds = trackIds,
-                            expanded = playlistMenuExpanded,
-                            onDismiss = { playlistMenuExpanded = false },
-                            hazeState = hazeState,
-                            onPlayNext = onPlaylistPlayNext,
-                            onAddToQueue = onPlaylistAddToQueue,
-                            onReorder = { isReordering = true },
-                            onEdit = { showPlaylistEditor = true },
-                            onDelete = { showDeleteConfirmation = true },
-                            anchor = action,
+                    bottomContent = {
+                        val currentSelected = selectedTrackIds
+                        val selectedIds = latestOrderedTrackIds.value.filter { it in currentSelected }
+                        val addedToastFormat = stringResource(R.string.batch_added_to_queue, 987654)
+                        val removedToastFormat = stringResource(R.string.batch_removed_done, 987654)
+                        val addedToast = addedToastFormat.replace("987654", selectedIds.size.toString())
+                        val removedToast = removedToastFormat.replace("987654", selectedIds.size.toString())
+                        MultiSelectActionBar(
+                            selectedCount = selectedIds.size,
+                            onPlayNext = {
+                                if (selectedIds.isNotEmpty()) {
+                                    latestOnPlaylistPlayNext(selectedIds)
+                                    android.widget.Toast.makeText(context, addedToast, android.widget.Toast.LENGTH_SHORT).show()
+                                    multiSelectMode = false
+                                    selectedTrackIds = emptySet()
+                                }
+                            },
+                            onAddToPlaylist = {
+                                if (selectedIds.isNotEmpty()) {
+                                    latestOnTrackContextBottomSheet(
+                                        TrackContextBottomSheetRequest.Playlist(
+                                            trackIds = selectedIds,
+                                            addOnly = true,
+                                        ),
+                                    )
+                                }
+                            },
+                            onRemove = if (!isSmart && playlist.id != FavoritesPlaylistId) {
+                                {
+                                    if (selectedIds.isNotEmpty()) {
+                                        selectedIds.forEach(latestOnTrackRemoveFromPlaylist)
+                                        android.widget.Toast.makeText(context, removedToast, android.widget.Toast.LENGTH_SHORT).show()
+                                        multiSelectMode = false
+                                        selectedTrackIds = emptySet()
+                                    }
+                                }
+                            } else {
+                                null
+                            },
                         )
                     },
                 )
+            } else {
+                batchHost.dismiss(batchId)
             }
         }
-        items(orderedTrackIds, key = { it }, contentType = { "playlist_track" }) { trackId ->
-            val track = tracksById[trackId] ?: return@items
-            Box(Modifier.fillMaxWidth().padding(start = 76.dp, end = 16.dp).height(1.dp).background(colors.borderGlass).testTag(PlaylistTrackDividerTag))
-            if (isReordering) {
-                ReorderableItem(reorderableState, key = trackId) { isDragging ->
+    }
+    Box(modifier.fillMaxSize().nestedScroll(pullDownFilterState.scrollConnection)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (listHazeState == null) Modifier
+                    else Modifier.background(colors.background).hazeSource(listHazeState),
+                ),
+        ) {
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(
+                bottom = contentPadding.calculateBottomPadding() + if (batchHost == null && multiSelectMode) 84.dp else 0.dp,
+            ),
+        ) {
+            item("hero") {
+                ArtworkHeroBackdrop(uiState.artworkPaths.firstOrNull(), Modifier.fillMaxWidth(), onHeroColorChanged, reduceTransparency = reduceTransparency) {
+                    DetailHero(
+                        title = name,
+                        metadata = stringResource(R.string.playlist_details_metadata, count, duration),
+                        playLabel = stringResource(R.string.player_play),
+                        shuffleLabel = stringResource(R.string.player_shuffle),
+                        moreLabel = stringResource(
+                            when {
+                                isReordering -> R.string.playlist_reorder_done
+                                multiSelectMode -> R.string.batch_select_exit
+                                else -> R.string.album_row_more_options
+                            },
+                        ),
+                        moreSymbol = if (isReordering || multiSelectMode) MaterialSymbols.Check else MaterialSymbols.MoreVert,
+                        modifier = Modifier.fillMaxWidth().padding(
+                            start = 24.dp,
+                            top = contentPadding.calculateTopPadding() + batchHeroTopExtra,
+                            end = 24.dp,
+                            bottom = 20.dp,
+                        ),
+                        artworkSize = trackInfoArtworkSize,
+                        reduceTransparency = reduceTransparency,
+                        fallbackSymbol = if (playlist.id == FavoritesPlaylistId) MaterialSymbols.Library else MaterialSymbols.QueueMusic,
+                        artworkContent = {
+                            PlaylistArtwork(playlist.id, uiState.artworkPaths, size = trackInfoArtworkSize)
+                        },
+                        onPlayClick = onPlay,
+                        onShuffleClick = onShuffle,
+                        onMoreClick = {
+                            when {
+                                isReordering -> isReordering = false
+                                multiSelectMode -> {
+                                    multiSelectMode = false
+                                    selectedTrackIds = emptySet()
+                                }
+                                else -> playlistMenuExpanded = true
+                            }
+                        },
+                        moreAction = { action ->
+                            val dedupDoneTemplate = stringResource(R.string.playlist_deduplicate_done, 987654)
+                            val dedupNoneMsg = stringResource(R.string.playlist_deduplicate_none)
+                            if (isReordering || multiSelectMode) action()
+                            else PlaylistContextMenu(
+                                playlistId = playlist.id,
+                                trackIds = trackIds,
+                                expanded = playlistMenuExpanded,
+                                onDismiss = { playlistMenuExpanded = false },
+                                hazeState = hazeState,
+                                showReorder = !isSmart,
+                                showDeduplicate = !isSmart && playlist.id != FavoritesPlaylistId && trackIds.size > 1,
+                                onPlayNext = onPlaylistPlayNext,
+                                onAddToQueue = onPlaylistAddToQueue,
+                                onMultiSelect = {
+                                    multiSelectMode = true
+                                    selectedTrackIds = emptySet()
+                                },
+                                onReorder = { isReordering = true },
+                                onEdit = { showPlaylistEditor = true },
+                                onExportM3u = onExportM3u,
+                                onDeduplicate = {
+                                    val removed = onPlaylistDeduplicate(playlist.id)
+                                    val msg = if (removed > 0) {
+                                        dedupDoneTemplate.replace("987654", removed.toString())
+                                    } else {
+                                        dedupNoneMsg
+                                    }
+                                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                },
+                                onDelete = { showDeleteConfirmation = true },
+                                anchor = action,
+                            )
+                        },
+                    )
+                }
+            }
+            if (!isReordering) {
+                item(key = "playlist-text-filter", contentType = "playlist-text-filter") {
+                    LibraryTextFilterSlot(state = pullDownFilterState) { showPlaceholder ->
+                        LibraryTextFilter(
+                            value = filterQuery,
+                            onValueChange = { filterQuery = it },
+                            placeholder = stringResource(R.string.filter_placeholder_search),
+                            showPlaceholderAndLeadingSymbol = showPlaceholder,
+                        )
+                    }
+                }
+            }
+            if (visibleTrackIds.isEmpty() && trimmedQuery.isNotEmpty()) {
+                item(key = "playlist-filter-empty", contentType = "playlist-filter-empty") {
+                    HeroCard(
+                        symbol = MaterialSymbols.Search,
+                        title = stringResource(R.string.tracks_no_match_title),
+                        description = stringResource(R.string.filter_no_match_description),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
+                    )
+                }
+            }
+            items(visibleTrackIds, key = { it }, contentType = { "playlist_track" }) { trackId ->
+                val track = tracksById[trackId] ?: return@items
+                Box(Modifier.fillMaxWidth().padding(start = 76.dp, end = 16.dp).height(1.dp).background(colors.borderGlass).testTag(PlaylistTrackDividerTag))
+                if (isReordering) {
+                    ReorderableItem(reorderableState, key = trackId) { isDragging ->
+                        TrackRow(
+                            title = track.title,
+                            artist = track.artists,
+                            artworkPath = track.artworkPath,
+                            contentPadding = appleRowPadding,
+                            artworkCornerRadius = 4.dp,
+                            titleStyle = appleTitleStyle,
+                            artistStyle = appleArtistStyle,
+                            moreButtonWidth = 38.dp,
+                            modifier = Modifier.fillMaxWidth().then(
+                                if (isDragging) {
+                                    if (reduceTransparency) Modifier.background(colors.glassOpaque).border(0.5.dp, colors.borderGlass)
+                                    else Modifier.tuneLiquidGlassBackground(
+                                        hazeState = hazeState,
+                                        colors = colors,
+                                        shape = androidx.compose.ui.graphics.RectangleShape,
+                                        hazeBlurRadius = 30.dp,
+                                        glassTint = colors.glassElevated,
+                                        enableLens = false,
+                                    ).border(0.5.dp, colors.borderGlass)
+                                } else Modifier,
+                            ),
+                            trailingContent = {
+                                PlaylistDragHandle(
+                                    isDragged = isDragging,
+                                    modifier = playlistDragHandleModifier(
+                                        onStart = {
+                                            draggedTrackId = trackId
+                                            draggedTrackInitialIndex = orderedTrackIds.indexOf(trackId)
+                                        },
+                                        onStop = {
+                                            draggedTrackId?.let { movedTrackId ->
+                                                if (latestOrderedTrackIds.value.indexOf(movedTrackId) != draggedTrackInitialIndex) {
+                                                    val (previous, next) = playlistMoveAnchors(latestOrderedTrackIds.value, movedTrackId)
+                                                    latestOnTrackMove.value(movedTrackId, previous, next)
+                                                }
+                                            }
+                                            draggedTrackId = null
+                                            draggedTrackInitialIndex = -1
+                                        },
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                } else if (multiSelectMode) {
+                    val isSelected = track.id in selectedTrackIds
+                    val reduceMotion = LocalReduceMotion.current
+                    val rowTint by animateColorAsState(
+                        targetValue = if (isSelected) colors.primary.copy(alpha = 0.08f) else Color.Transparent,
+                        animationSpec = if (reduceMotion) snap() else tween(180, easing = FastOutSlowInEasing),
+                        label = "playlist-batch-row-tint",
+                    )
                     TrackRow(
                         title = track.title,
                         artist = track.artists,
@@ -195,75 +452,134 @@ internal fun PlaylistDetailsContent(
                         titleStyle = appleTitleStyle,
                         artistStyle = appleArtistStyle,
                         moreButtonWidth = 38.dp,
-                        modifier = Modifier.fillMaxWidth().then(
-                            if (isDragging) {
-                                if (reduceTransparency) Modifier.background(colors.glassOpaque).border(0.5.dp, colors.borderGlass)
-                                else Modifier.liquidGlassBackground(hazeState, colors, hazeBlurRadius = 30.dp, glassTint = colors.glassElevated).border(0.5.dp, colors.borderGlass)
-                            } else Modifier,
-                        ),
+                        modifier = Modifier.fillMaxWidth().background(rowTint),
+                        onClick = {
+                            selectedTrackIds = if (isSelected) selectedTrackIds - track.id else selectedTrackIds + track.id
+                        },
                         trailingContent = {
-                            PlaylistDragHandle(
-                                isDragged = isDragging,
-                                modifier = playlistDragHandleModifier(
-                                    onStart = {
-                                        draggedTrackId = trackId
-                                        draggedTrackInitialIndex = orderedTrackIds.indexOf(trackId)
-                                    },
-                                    onStop = {
-                                        draggedTrackId?.let { movedTrackId ->
-                                            if (latestOrderedTrackIds.value.indexOf(movedTrackId) != draggedTrackInitialIndex) {
-                                                val (previous, next) = playlistMoveAnchors(latestOrderedTrackIds.value, movedTrackId)
-                                                latestOnTrackMove.value(movedTrackId, previous, next)
-                                            }
-                                        }
-                                        draggedTrackId = null
-                                        draggedTrackInitialIndex = -1
-                                    },
-                                ),
-                            )
+                            Box(
+                                modifier = Modifier.padding(end = 16.dp),
+                                contentAlignment = androidx.compose.ui.Alignment.Center,
+                            ) {
+                                MultiSelectCheckBadge(selected = isSelected)
+                            }
                         },
                     )
+                } else {
+                    TrackContextMenu(
+                        track = track,
+                        expanded = contextTrack == track.id,
+                        onDismiss = { if (contextTrack == track.id) contextTrack = null },
+                        actions = TrackContextMenuActions(removeFromPlaylist = !isSmart && playlist.id != FavoritesPlaylistId),
+                        hazeState = hazeState,
+                        playbackQueue = playbackQueue,
+                        onPlayNext = { onTrackPlayNext(it.id) },
+                        onAddToQueue = { onTrackAddToQueue(it.id) },
+                        onFavoriteChange = { item, favorite -> onTrackFavoriteToggle(item.id, favorite) },
+                        onGoToArtist = onTrackArtistClick,
+                        onRemoveFromPlaylist = { onTrackRemoveFromPlaylist(it.id) },
+                        onBottomSheetRequested = onTrackContextBottomSheet,
+                    ) {
+                        TrackRow(
+                            title = track.title, artist = track.artists, artworkPath = track.artworkPath,
+                            contentPadding = appleRowPadding,
+                            artworkCornerRadius = 4.dp,
+                            titleStyle = appleTitleStyle,
+                            artistStyle = appleArtistStyle,
+                            moreButtonWidth = 38.dp,
+                            modifier = Modifier.fillMaxWidth(), onClick = { onTrackClick(track.id) },
+                            onMoreClick = { contextTrack = track.id }, onLongClick = { contextTrack = track.id },
+                        )
+                    }
                 }
-            } else {
-                TrackContextMenu(
-                    track = track,
-                    expanded = contextTrack == track.id,
-                    onDismiss = { if (contextTrack == track.id) contextTrack = null },
-                    actions = TrackContextMenuActions(removeFromPlaylist = playlist.id != FavoritesPlaylistId),
-                    hazeState = hazeState,
-                    playbackQueue = playbackQueue,
-                    onPlayNext = { onTrackPlayNext(it.id) },
-                    onAddToQueue = { onTrackAddToQueue(it.id) },
-                    onFavoriteChange = { item, favorite -> onTrackFavoriteToggle(item.id, favorite) },
-                    onGoToArtist = onTrackArtistClick,
-                    onRemoveFromPlaylist = { onTrackRemoveFromPlaylist(it.id) },
-                    onBottomSheetRequested = onTrackContextBottomSheet,
-                ) {
-                    TrackRow(
-                        title = track.title, artist = track.artists, artworkPath = track.artworkPath,
-                        contentPadding = appleRowPadding,
-                        artworkCornerRadius = 4.dp,
-                        titleStyle = appleTitleStyle,
-                        artistStyle = appleArtistStyle,
-                        moreButtonWidth = 38.dp,
-                        modifier = Modifier.fillMaxWidth(), onClick = { onTrackClick(track.id) },
-                        onMoreClick = { contextTrack = track.id }, onLongClick = { contextTrack = track.id },
-                    )
+                if (trackId == visibleTrackIds.lastOrNull()) {
+                    Box(Modifier.fillMaxWidth().padding(start = 76.dp, end = 16.dp).height(1.dp).background(colors.borderGlass).testTag(PlaylistTrackDividerTag))
                 }
             }
-            if (trackId == orderedTrackIds.lastOrNull()) {
-                Box(Modifier.fillMaxWidth().padding(start = 76.dp, end = 16.dp).height(1.dp).background(colors.borderGlass).testTag(PlaylistTrackDividerTag))
+        }
+        }
+        if (batchHost == null && multiSelectMode) {
+            MultiSelectSelectionHeader(
+                selectedCount = selectedTrackIds.size,
+                allSelected = trackIds.isNotEmpty() && selectedTrackIds.size == trackIds.size,
+                onToggleSelectAll = {
+                    selectedTrackIds = if (selectedTrackIds.size == trackIds.size) emptySet() else trackIds.toSet()
+                },
+                onExit = {
+                    multiSelectMode = false
+                    selectedTrackIds = emptySet()
+                },
+                hazeState = listHazeState,
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.TopCenter)
+                    .padding(start = 16.dp, top = contentPadding.calculateTopPadding() + 4.dp, end = 16.dp),
+            )
+            val selectedIds = remember(selectedTrackIds, orderedTrackIds) {
+                orderedTrackIds.filter { it in selectedTrackIds }
             }
+            val batchAddedToast = stringResource(R.string.batch_added_to_queue, selectedTrackIds.size)
+            val batchRemovedToast = stringResource(R.string.batch_removed_done, selectedTrackIds.size)
+            MultiSelectActionBar(
+                selectedCount = selectedIds.size,
+                onPlayNext = {
+                    if (selectedIds.isNotEmpty()) {
+                        onPlaylistPlayNext(selectedIds)
+                        android.widget.Toast.makeText(context, batchAddedToast, android.widget.Toast.LENGTH_SHORT).show()
+                        multiSelectMode = false
+                        selectedTrackIds = emptySet()
+                    }
+                },
+                onAddToPlaylist = {
+                    if (selectedIds.isNotEmpty()) {
+                        onTrackContextBottomSheet(
+                            TrackContextBottomSheetRequest.Playlist(
+                                trackIds = selectedIds,
+                                addOnly = true,
+                            ),
+                        )
+                    }
+                },
+                onRemove = if (!isSmart && playlist.id != FavoritesPlaylistId) {
+                    {
+                        if (selectedIds.isNotEmpty()) {
+                            selectedIds.forEach(onTrackRemoveFromPlaylist)
+                            android.widget.Toast.makeText(context, batchRemovedToast, android.widget.Toast.LENGTH_SHORT).show()
+                            multiSelectMode = false
+                            selectedTrackIds = emptySet()
+                        }
+                    }
+                } else {
+                    null
+                },
+                hazeState = listHazeState,
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.BottomCenter)
+                    .padding(start = 20.dp, end = 20.dp, bottom = contentPadding.calculateBottomPadding()),
+            )
         }
     }
     if (showPlaylistEditor) {
-        EditPlaylistBottomSheet(
-            initialName = playlist.name,
-            artworkPath = uiState.customArtworkPath,
-            showNameInput = playlist.id != FavoritesPlaylistId,
-            onDismiss = { showPlaylistEditor = false },
-            onSave = { name, artwork, clearArtwork -> onPlaylistUpdate(playlist.id, name, artwork, clearArtwork); showPlaylistEditor = false },
-        )
+        val smartSpec = uiState.smartSpec
+        if (smartSpec != null) {
+            SmartPlaylistEditorBottomSheet(
+                isEdit = true,
+                initialName = playlist.name,
+                initialSpec = smartSpec,
+                onDismiss = { showPlaylistEditor = false },
+                onSave = { newName, newSpec ->
+                    onSmartPlaylistUpdate(playlist.id, newName, newSpec)
+                    showPlaylistEditor = false
+                },
+            )
+        } else {
+            EditPlaylistBottomSheet(
+                initialName = playlist.name,
+                artworkPath = uiState.customArtworkPath,
+                showNameInput = playlist.id != FavoritesPlaylistId,
+                onDismiss = { showPlaylistEditor = false },
+                onSave = { name, artwork, clearArtwork -> onPlaylistUpdate(playlist.id, name, artwork, clearArtwork); showPlaylistEditor = false },
+            )
+        }
     }
     if (showDeleteConfirmation) {
         TuneDialog(

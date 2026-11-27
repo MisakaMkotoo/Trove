@@ -18,6 +18,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,599 +32,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
-
-/** ============================================================================
- *  Data classes recreated from deleted SyncDatabase.kt
- * ============================================================================ */
-
- data class LibraryTrack(
-    val id: String = "",
-    val title: String = "",
-    val artists: String = "",
-    val album: String = "",
-    val albumId: String = "",
-    val artworkKey: String? = null,
-    val playCount: Int = 0,
-    val createdAt: String = "",
-    val updatedAt: String = "",
-    val discNumber: Int = 0,
-    val trackNumber: Int = 0,
-    val syncOrder: Int = 0,
-    val metadataJson: String = "{}",
-    val artworkPath: String? = null,
-    val audioPath: String? = null,
-    val sortTitle: String = "",
-    val sortArtists: String = "",
-)
-
-/** Row type used by sync mapper tests. */
- data class LibraryTrackRow(
-    val id: String = "",
-    val title: String = "",
-    val artists: String = "",
-    val album: String = "",
-    val artworkKey: String? = null,
-    val playCount: Int = 0,
-    val createdAt: String = "",
-    val artworkPath: String? = null,
-    val audioPath: String? = null,
-    val rawJson: String = "{}",
-)
-
- data class LibraryPlaylist(
-    val id: String = "",
-    val name: String = "",
-    val artworkKey: String? = null,
-    val trackIds: List<String> = emptyList(),
-    val createdAt: String = "",
-    val updatedAt: String = "",
-    val sortTitle: String = "",
-    val metadataJson: String = "{}",
-)
-
- data class LibraryPlaylistRow(
-    val id: String = "",
-    val name: String = "",
-    val artworkKey: String? = null,
-    val trackIds: List<String> = emptyList(),
-    val createdAt: String = "",
-    val updatedAt: String = "",
-)
-
- data class LibraryArtist(
-    val id: String = "",
-    val name: String = "",
-    val sortName: String = "",
-    val createdAt: String = "",
-    val artworkPath: String? = null,
-)
-
- data class LibraryAlbum(
-    val id: String = "",
-    val title: String = "",
-    val sortTitle: String = "",
-    val sortArtist: String = "",
-    val artist: String = "",
-    val artworkPath: String? = null,
-    val createdAt: String = "",
-    val year: Int = 0,
-    val copyright: String = "",
-)
-
-val LibraryAlbum.sortName: String
-    get() = sortArtist
-
- data class LibraryGenre(
-    val id: String = "",
-    val name: String = "",
-    val trackCount: Int = 0,
-    val sortName: String = "",
-    val createdAt: String = "",
-)
-
- data class LibraryComposer(
-    val id: String = "",
-    val name: String = "",
-    val sortName: String = "",
-    val createdAt: String = "",
-    val artworkPath: String? = null,
-)
-
- data class LibrarySearchCandidate(
-    val entityType: String,
-    val entityId: String,
-    val title: String,
-    val subtitle: String = "",
-)
-
- data class SyncTrackEntity(
-    val planId: String,
-    val trackId: String,
-    val title: String,
-    val artists: String,
-    val album: String = "",
-    val albumId: String = "",
-    val artworkKey: String? = null,
-    val playCount: Int = 0,
-    val createdAt: String = "",
-    val discNumber: Int = 0,
-    val trackNumber: Int = 0,
-    val syncOrder: Int = 0,
-    val rawJson: String = "{}",
-)
-
- data class SyncAssetEntity(
-    val planId: String,
-    val assetId: String,
-    val kind: String,
-    val sha256: String = "",
-    val size: Long = 0L,
-    val relativePath: String = "",
-)
-
- data class SyncPlaylistEntity(
-    val planId: String,
-    val playlistId: String,
-    val name: String,
-    val trackIds: List<String> = emptyList(),
-    val createdAt: String = "",
-    val updatedAt: String = "",
-)
-
- data class LibrarySearchDocumentEntity(
-    val planId: String,
-    val entityType: String,
-    val entityId: String,
-    val title: String,
-    val subtitle: String = "",
-    val keywords: List<String> = emptyList(),
-)
-
- data class SyncPlanEntity(
-    val planId: String,
-    val source: String,
-    val manifestJson: String,
-    val status: String,
-    val isActive: Boolean = false,
-)
-
-/** ============================================================================
- *  JSON helpers
- * ============================================================================ */
-
- object LibrarySyncProtocol {
-    val json = Json {
-        ignoreUnknownKeys = true
-        explicitNulls = false
-    }
-}
-
-/** ============================================================================
- *  Extension: LibraryTrack.metadataObject()
- * ============================================================================ */
-
- fun LibraryTrack.metadataObject(): JsonObject? =
-    try {
-        LibrarySyncProtocol.json.parseToJsonElement(metadataJson) as? JsonObject
-    } catch (e: Exception) {
-        null
-    }
-
-/** ============================================================================
- *  Display helpers
- * ============================================================================ */
-
- fun trackDisplayTitle(track: LibraryTrack): String =
-    track.title.ifBlank { track.id.ifBlank { "Unknown song" } }
-
- fun trackDisplayArtists(track: LibraryTrack): String =
-    track.artists.ifBlank { "Unknown artist" }
-
-/** ============================================================================
- *  Mapper helpers (recreated for sync mapper tests)
- * ============================================================================ */
-
- fun libraryArtistsFrom(
-    tracks: List<LibraryTrackRow>,
-    artworkPaths: Map<String, String> = emptyMap(),
-): List<LibraryArtist> {
-    val seen = mutableMapOf<String, LibraryArtist>()
-    val trackArtwork = tracks.associateBy({ it.id }, { it.artworkPath })
-    for (track in tracks) {
-        val rawJson = track.rawJson
-        val root = runCatching { LibrarySyncProtocol.json.parseToJsonElement(rawJson) as? JsonObject }.getOrNull()
-            ?: continue
-        val artistsArr = root.get("artists") as? JsonArray ?: continue
-        for (entry in artistsArr) {
-            val obj = entry as? JsonObject ?: continue
-            val id = obj.get("id")?.jsonPrimitive?.contentOrNull ?: continue
-            if (id.isBlank()) continue
-            val name = obj.get("name")?.jsonPrimitive?.contentOrNull ?: continue
-            if (name.isBlank()) continue
-            val explicitSortName = obj.get("sort_name")?.jsonPrimitive?.contentOrNull
-                ?: obj.get("normalization_key")?.jsonPrimitive?.contentOrNull
-            val explicitCreatedAt = obj.get("created_at")?.jsonPrimitive?.contentOrNull
-            val artworkKey = obj.get("artwork_key")?.jsonPrimitive?.contentOrNull
-                ?: obj.get("artwork_key_local")?.jsonPrimitive?.contentOrNull
-            var artworkPath: String? = null
-            if (artworkKey != null) {
-                artworkPath = artworkPaths[artworkKey] ?: artworkPaths["artwork:$id"] ?: artworkPaths[artworkKey.removePrefix("artwork:")]
-                if (artworkPath == null) {
-                    val stagedKey = artworkKey.removePrefix("artwork:")
-                    artworkPath = artworkPaths[stagedKey]
-                }
-            }
-            if (artworkPath == null) {
-                artworkPath = trackArtwork[track.id]
-            }
-            val existing = seen[id]
-            seen[id] = LibraryArtist(
-                id = id,
-                name = name,
-                sortName = explicitSortName ?: existing?.sortName ?: name,
-                createdAt = explicitCreatedAt ?: existing?.createdAt ?: track.createdAt,
-                artworkPath = artworkPath ?: existing?.artworkPath,
-            )
-        }
-    }
-    return seen.values.toList()
-}
-
- fun libraryAlbumsFrom(
-    tracks: List<LibraryTrackRow>,
-    artworkPaths: Map<String, String> = emptyMap(),
-): List<LibraryAlbum> {
-    val seen = mutableMapOf<String, LibraryAlbum>()
-    val trackArtwork = tracks.associateBy({ it.id }, { it.artworkPath })
-    for (track in tracks) {
-        val root = runCatching { LibrarySyncProtocol.json.parseToJsonElement(track.rawJson) as? JsonObject }.getOrNull()
-            ?: continue
-        val albumObj = root.get("album") as? JsonObject ?: continue
-        val albumId = albumObj.get("id")?.jsonPrimitive?.contentOrNull ?: continue
-        if (albumId.isBlank()) continue
-        val title = albumObj.get("title")?.jsonPrimitive?.contentOrNull ?: ""
-        if (title.isBlank()) continue
-        val sortTitle = albumObj.get("sort_title")?.jsonPrimitive?.contentOrNull ?: title
-        val year = albumObj.get("year")?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-        val copyright = albumObj.get("copyright")?.jsonPrimitive?.contentOrNull ?: ""
-        val createdAt = albumObj.get("created_at")?.jsonPrimitive?.contentOrNull ?: track.createdAt
-        var artworkKey = albumObj.get("artwork_key")?.jsonPrimitive?.contentOrNull
-        var artworkPath: String? = null
-        if (artworkKey != null) {
-            artworkPath = artworkPaths[artworkKey] ?: artworkPaths["artwork:$albumId"]
-            if (artworkPath == null) {
-                val stagedKey = artworkKey.removePrefix("artwork:")
-                artworkPath = artworkPaths[stagedKey]
-            }
-        }
-        if (artworkPath == null) {
-            artworkPath = trackArtwork[track.id]
-        }
-        // Resolve album artist
-        var artist = ""
-        var sortArtist = ""
-        var explicitSortArtist = false
-        val albumArtists = root.get("album_artists") as? JsonArray
-        if (albumArtists != null && albumArtists.isNotEmpty()) {
-            val first = albumArtists.firstOrNull { it is JsonObject } as? JsonObject
-            artist = first?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
-            val explicitSortName = first?.get("sort_name")?.jsonPrimitive?.contentOrNull
-            sortArtist = explicitSortName ?: artist
-            explicitSortArtist = explicitSortName != null
-        }
-        if (artist.isBlank()) {
-            val trackArtists = root.get("artists") as? JsonArray
-            val firstTrackArtist = trackArtists?.firstOrNull { it is JsonObject } as? JsonObject
-            artist = firstTrackArtist?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
-            val explicitSortName = firstTrackArtist?.get("sort_name")?.jsonPrimitive?.contentOrNull
-            sortArtist = explicitSortName ?: artist
-            explicitSortArtist = explicitSortName != null
-        }
-        val existing = seen[albumId]
-        seen[albumId] = LibraryAlbum(
-            id = albumId,
-            title = existing?.title?.takeIf { it.isNotBlank() } ?: title,
-            sortTitle = existing?.sortTitle?.takeIf { it.isNotBlank() } ?: sortTitle,
-            sortArtist = if (explicitSortArtist) sortArtist else existing?.sortArtist ?: sortArtist,
-            artist = existing?.artist?.takeIf { it.isNotBlank() } ?: artist,
-            artworkPath = artworkPath ?: existing?.artworkPath,
-            createdAt = existing?.createdAt?.takeIf { it.isNotBlank() } ?: createdAt,
-            year = existing?.year?.takeIf { it > 0 } ?: year,
-            copyright = existing?.copyright?.takeIf { it.isNotBlank() } ?: copyright,
-        )
-    }
-    return seen.values.toList()
-}
-
- fun libraryComposersFrom(
-    tracks: List<LibraryTrackRow>,
-    artworkPaths: Map<String, String> = emptyMap(),
-): List<LibraryComposer> {
-    val seen = mutableMapOf<String, LibraryComposer>()
-    val trackArtwork = tracks.associateBy({ it.id }, { it.artworkPath })
-    for (track in tracks) {
-        val root = runCatching { LibrarySyncProtocol.json.parseToJsonElement(track.rawJson) as? JsonObject }.getOrNull()
-            ?: continue
-        val composersArr = root.get("composers") as? JsonArray ?: continue
-        for (entry in composersArr) {
-            val obj = entry as? JsonObject ?: continue
-            val id = obj.get("id")?.jsonPrimitive?.contentOrNull ?: continue
-            if (id.isBlank()) continue
-            val name = obj.get("name")?.jsonPrimitive?.contentOrNull ?: continue
-            if (name.isBlank()) continue
-            val explicitSortName = obj.get("sort_name")?.jsonPrimitive?.contentOrNull
-                ?: obj.get("normalization_key")?.jsonPrimitive?.contentOrNull
-            val explicitCreatedAt = obj.get("created_at")?.jsonPrimitive?.contentOrNull
-            val artworkKey = obj.get("artwork_key")?.jsonPrimitive?.contentOrNull
-            var artworkPath: String? = null
-            if (artworkKey != null) {
-                artworkPath = artworkPaths[artworkKey] ?: artworkPaths["artwork:$id"]
-                if (artworkPath == null) {
-                    val stagedKey = artworkKey.removePrefix("artwork:")
-                    artworkPath = artworkPaths[stagedKey]
-                }
-            }
-            if (artworkPath == null) {
-                artworkPath = trackArtwork[track.id]
-            }
-            val existing = seen[id]
-            seen[id] = LibraryComposer(
-                id = id,
-                name = name,
-                sortName = explicitSortName ?: existing?.sortName ?: name,
-                createdAt = explicitCreatedAt ?: existing?.createdAt ?: track.createdAt,
-                artworkPath = artworkPath ?: existing?.artworkPath,
-            )
-        }
-    }
-    return seen.values.toList()
-}
-
-fun libraryGenresFrom(
-    tracks: List<LibraryTrackRow>,
-): List<LibraryGenre> {
-    val seen = mutableMapOf<String, LibraryGenre>()
-    for (track in tracks) {
-        val root = runCatching { LibrarySyncProtocol.json.parseToJsonElement(track.rawJson) as? JsonObject }.getOrNull()
-            ?: continue
-        val genresArr = root.get("genres") as? JsonArray ?: continue
-        for (entry in genresArr) {
-            val obj = entry as? JsonObject ?: continue
-            val id = obj.get("id")?.jsonPrimitive?.contentOrNull ?: continue
-            if (id.isBlank()) continue
-            val name = obj.get("name")?.jsonPrimitive?.contentOrNull ?: continue
-            if (name.isBlank()) continue
-            val explicitSortName = obj.get("sort_name")?.jsonPrimitive?.contentOrNull
-                ?: obj.get("normalization_key")?.jsonPrimitive?.contentOrNull
-            val explicitCreatedAt = obj.get("created_at")?.jsonPrimitive?.contentOrNull
-            val existing = seen[id]
-            seen[id] = LibraryGenre(
-                id = id,
-                name = name,
-                sortName = explicitSortName ?: existing?.sortName ?: name,
-                createdAt = explicitCreatedAt ?: existing?.createdAt ?: track.createdAt,
-            )
-        }
-    }
-    return seen.values.toList()
-}
-
-/** ============================================================================
- *  FTS search match builder
- * ============================================================================ */
-
- fun searchFtsMatch(query: String): String? {
-    val normalized = java.text.Normalizer.normalize(query, java.text.Normalizer.Form.NFD)
-        .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
-    val tokens = normalized
-        .lowercase()
-        .split(Regex("[\\s/]+"))
-        .filter { it.isNotBlank() }
-        .map { it.replace(Regex("[^a-z0-9]"), "") }
-        .filter { it.isNotBlank() }
-    return if (tokens.isEmpty()) null else tokens.joinToString(" AND ") { "$it*" }
-}
-
-/** ============================================================================
- *  Search document builder
- * ============================================================================ */
-
- fun searchDocumentsFor(
-    planId: String,
-    entities: List<SyncTrackEntity>,
-    playlists: List<SyncPlaylistEntity>,
-): List<LibrarySearchDocumentEntity> {
-    val docs = mutableListOf<LibrarySearchDocumentEntity>()
-    for (entity in entities) {
-        val root = runCatching { LibrarySyncProtocol.json.parseToJsonElement(entity.rawJson) as? JsonObject }.getOrNull()
-        if (root == null) continue
-        val title = root.get("title")?.jsonPrimitive?.contentOrNull.orEmpty()
-        val artists = root.get("artists") as? JsonArray
-        val artistNames = artists?.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }.orEmpty()
-        val subtitle = artistNames.joinToString(", ")
-        val keywords = mutableListOf(title)
-        keywords.addAll(artistNames)
-        val albumObj = root.get("album") as? JsonObject
-        val albumTitle = albumObj?.get("title")?.jsonPrimitive?.contentOrNull.orEmpty()
-        if (albumTitle.isNotBlank()) keywords.add(albumTitle)
-        docs.add(
-            LibrarySearchDocumentEntity(
-                planId = planId,
-                entityType = "track",
-                entityId = entity.trackId,
-                title = title,
-                subtitle = subtitle,
-                keywords = keywords.distinct(),
-            ),
-        )
-        // Artist documents
-        for (artistName in artistNames) {
-            if (artistName.isNotBlank()) {
-                docs.add(
-                    LibrarySearchDocumentEntity(
-                        planId = planId,
-                        entityType = "artist",
-                        entityId = stableId("local-artist-", artistName),
-                        title = artistName,
-                        keywords = listOf(artistName),
-                    ),
-                )
-            }
-        }
-        // Album documents
-        val albumId = albumObj?.get("id")?.jsonPrimitive?.contentOrNull
-        if (albumId?.isNotBlank() == true && albumTitle.isNotBlank()) {
-            docs.add(
-                LibrarySearchDocumentEntity(
-                    planId = planId,
-                    entityType = "album",
-                    entityId = albumId,
-                    title = albumTitle,
-                    keywords = listOf(albumTitle),
-                ),
-            )
-        }
-        // Composer documents
-        val composersArr = root.get("composers") as? JsonArray
-        if (composersArr != null) {
-            for (entry in composersArr) {
-                val obj = entry as? JsonObject ?: continue
-                val composerId = obj.get("id")?.jsonPrimitive?.contentOrNull ?: continue
-                if (composerId.isBlank()) continue
-                val composerName = obj.get("name")?.jsonPrimitive?.contentOrNull ?: continue
-                if (composerName.isBlank()) continue
-                docs.add(
-                    LibrarySearchDocumentEntity(
-                        planId = planId,
-                        entityType = "composer",
-                        entityId = composerId,
-                        title = composerName,
-                        keywords = listOf(composerName),
-                    ),
-                )
-            }
-        }
-    }
-    for (playlist in playlists) {
-        docs.add(
-            LibrarySearchDocumentEntity(
-                planId = planId,
-                entityType = "playlist",
-                entityId = playlist.playlistId,
-                title = playlist.name,
-                keywords = listOf(playlist.name),
-            ),
-        )
-    }
-    return docs
-}
-
-/** ============================================================================
- *  Artist artwork mutation types
- * ============================================================================ */
-
- enum class ArtistArtworkOperation { SET_ARTWORK, REMOVE_ARTWORK }
-
- data class ArtistArtworkPayload(val sha256: String?)
-
- data class ArtistMutation(
-    val mutationId: String,
-    val artistId: String,
-    val operation: ArtistArtworkOperation,
-    val updatedAt: Long,
-    val payload: ArtistArtworkPayload? = null,
-) {
-    fun validationError(): String? =
-        when {
-            operation == ArtistArtworkOperation.SET_ARTWORK && (payload?.sha256.isNullOrBlank() == true) ->
-                "SET_ARTWORK requires a valid sha256"
-            else -> null
-        }
-}
-
-/** ============================================================================
- *  Staged artwork types (used by ArtistArtworkFiles / PlaylistArtworkFiles)
- * ============================================================================ */
-
- data class StagedArtistArtwork(
-    val sha256: String,
-    val mime: String,
-    val sizeBytes: Long,
-    val relativePath: String,
-)
-
- data class StagedPlaylistArtwork(
-    val sha256: String,
-    val mime: String,
-    val sizeBytes: Long,
-    val relativePath: String,
-)
-
-/** ============================================================================
- *  Playlist mutation types
- * ============================================================================ */
-
- enum class PlaylistMutationOperation {
-    CREATE, ADD_TRACK, REMOVE_TRACK, UPDATE, SET_ARTWORK, REMOVE_ARTWORK, DELETE, MOVE_TRACK
-}
-
- data class PlaylistMutationPayload(
-    val name: String? = null,
-    val trackId: String? = null,
-    val artworkSha256: String? = null,
-    val previousTrackId: String? = null,
-    val nextTrackId: String? = null,
-)
-
- data class PlaylistMutation(
-    val mutationId: String,
-    val playlistId: String,
-    val operation: PlaylistMutationOperation,
-    val updatedAt: Long,
-    val payload: PlaylistMutationPayload = PlaylistMutationPayload(),
-)
-
-/** ============================================================================
- *  applyPendingArtistArtworkMutations
- * ============================================================================ */
-
- fun applyPendingArtistArtworkMutations(
-    existing: Map<String, String>,
-    pending: List<ArtistMutation>,
-): Map<String, String> {
-    var result = existing.toMutableMap()
-    for (mutation in pending) {
-        when (mutation.operation) {
-            ArtistArtworkOperation.SET_ARTWORK -> {
-                mutation.payload?.sha256?.let { result[mutation.artistId] = it }
-            }
-            ArtistArtworkOperation.REMOVE_ARTWORK -> {
-                result.remove(mutation.artistId)
-            }
-        }
-    }
-    return result
-}
-
-/** ============================================================================
- *  Stable ID helpers
- * ============================================================================ */
-
- fun stableId(prefix: String, name: String): String {
-    val digest = MessageDigest.getInstance("SHA-1").digest(name.lowercase().toByteArray())
-    return prefix + digest.joinToString("") { "%02x".format(it) }.take(12)
-}
-
-/** UI 层的收藏歌单使用同一个固定 id。 */
-private const val FavoritesPlaylistId = "favorites"
-
- fun artistIdFor(name: String): String = stableId("local-artist-", name)
- fun albumIdFor(name: String): String = stableId("local-album-", name)
- fun composerIdFor(name: String): String = stableId("local-composer-", name)
- fun genreIdFor(name: String): String = stableId("local-genre-", name)
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** ============================================================================
  *  AndroidLibrarySyncStore — local-only replacement for the Room-backed store
@@ -643,6 +58,7 @@ private const val FavoritesPlaylistId = "favorites"
         val favorites: List<String> = emptyList(),
         val hidden: List<String> = emptyList(),
         val onlineFavorites: List<ImportedTrackData> = emptyList(),
+        val onlinePlaylistTracks: List<ImportedTrackData> = emptyList(),
         val artworkPaths: Map<String, String> = emptyMap(),
         val artistArtworkKeys: Map<String, String> = emptyMap(),
         val playlists: List<PersistedPlaylist> = emptyList(),
@@ -696,6 +112,14 @@ private const val FavoritesPlaylistId = "favorites"
         val tracks: List<DailyTrackListeningStat> = emptyList(),
         val attempts: List<DailyPlaybackAttemptStat> = emptyList(),
         val recent: List<RecentPlayRecord> = emptyList(),
+        val footprints: List<ListeningFootprintRecord> = emptyList(),
+    )
+
+    @Serializable
+    private data class PersistedTrackAnalysis(
+        val trackId: String = "",
+        val loudnessLufs: Float = -14f,
+        val truePeak: Float = 0f,
     )
 
     /** 本地最近播放：合格播放开始时记录；快照足以在重启后恢复在线曲目与封面。 */
@@ -709,22 +133,45 @@ private const val FavoritesPlaylistId = "favorites"
         val coverUrl: String = "",
     )
 
+    /** 本地听歌时序日记/足迹：每次有效播放结束时记录精确时间与曲目快照，100% 本地存储。 */
+    @Serializable
+    data class ListeningFootprintRecord(
+        val id: String = "",
+        val trackId: String = "",
+        val title: String = "",
+        val artists: String = "",
+        val album: String = "",
+        val artworkPath: String? = null,
+        val coverUrl: String = "",
+        val startedAt: Long = 0L,
+        val endedAt: Long = 0L,
+        val listenedSeconds: Int = 0,
+        val endReason: PlaybackEndReason = PlaybackEndReason.COMPLETED,
+    )
+
     private val stateFile = File(context.filesDir, "local-library-state.json")
     private val importedFile = File(context.filesDir, "imported-library.json")
     private val listeningFile = File(context.filesDir, "listening-stats.json")
+    private val analysesFile = File(context.filesDir, "track-analyses.json")
     private val trackDayStats = mutableMapOf<Pair<String, String>, DailyTrackListeningStat>()
     private val attemptDayStats = mutableMapOf<String, DailyPlaybackAttemptStat>()
     private val _recentlyPlayed = MutableStateFlow(emptyList<RecentPlayRecord>())
     /** 最近播放（trackId + 播放时间），最新的在前。 */
     val recentlyPlayed: StateFlow<List<RecentPlayRecord>> = _recentlyPlayed.asStateFlow()
+    private val _listeningFootprints = MutableStateFlow(emptyList<ListeningFootprintRecord>())
+    /** 本地听歌足迹（按播放时间倒序），仅用于本地时序日记/年报/热力图，不上传网络。 */
+    val listeningFootprints: StateFlow<List<ListeningFootprintRecord>> = _listeningFootprints.asStateFlow()
     private var listeningDirty = false
     private var lastListeningPersistAt = 0L
 
     private val _tracks = MutableStateFlow(emptyList<LibraryTrack>())
     val tracks: StateFlow<List<LibraryTrack>> = _tracks.asStateFlow()
+    @Volatile private var tracksById: Map<String, LibraryTrack> = emptyMap()
 
     // 网易云在线歌单按需下载的曲目：可播放、可解析，但不进入曲库列表。
     private val playbackOnlyTracks = MutableStateFlow(emptyList<LibraryTrack>())
+    @Volatile private var playbackOnlyById: Map<String, LibraryTrack> = emptyMap()
+    private val playbackOnlyLock = Any()
     /** 仅播放曲目（含在线搜索/心动模式/歌单流式条目），封面回填后列表可自动刷新。 */
     val playbackOnlyTracksFlow: StateFlow<List<LibraryTrack>> = playbackOnlyTracks.asStateFlow()
 
@@ -735,9 +182,15 @@ private const val FavoritesPlaylistId = "favorites"
     fun putPlaybackOnlyTrack(track: LibraryTrack) {
         val favorite = track.id in favorites
         val patched = if (favorite) track.copy(metadataJson = favoriteJson(track.metadataJson, true)) else track
-        playbackOnlyTracks.value = playbackOnlyTracks.value.filterNot { it.id == track.id } + patched
-        if (favorite && onlineFavoriteTracks.value.any { it.id == track.id }) {
-            onlineFavoriteTracks.value = onlineFavoriteTracks.value.filterNot { it.id == track.id } + patched
+        synchronized(playbackOnlyLock) {
+            val next = playbackOnlyTracks.value.filterNot { it.id == track.id } + patched
+            playbackOnlyById = next.associateBy { it.id }
+            playbackOnlyTracks.value = next
+        }
+        if (favorite) {
+            onlineFavoriteTracks.update { list ->
+                if (list.any { it.id == track.id }) list.filterNot { it.id == track.id } + patched else list
+            }
         }
     }
 
@@ -745,14 +198,19 @@ private const val FavoritesPlaylistId = "favorites"
     fun putPlaybackOnlyTracks(tracks: List<LibraryTrack>) {
         if (tracks.isEmpty()) return
         val updates = tracks.associateBy { it.id }
-        val existing = playbackOnlyTracks.value
-        val existingIds = existing.mapTo(HashSet(existing.size)) { it.id }
-        playbackOnlyTracks.value = existing.map { current ->
-            val update = updates[current.id] ?: return@map current
-            if (current.id in favorites) update.copy(metadataJson = favoriteJson(update.metadataJson, true)) else update
-        } + tracks.filterNot { it.id in existingIds }
-        if (onlineFavoriteTracks.value.isNotEmpty()) {
-            onlineFavoriteTracks.value = onlineFavoriteTracks.value.map { current ->
+        synchronized(playbackOnlyLock) {
+            val existing = playbackOnlyTracks.value
+            val existingIds = existing.mapTo(HashSet(existing.size)) { it.id }
+            val next = existing.map { current ->
+                val update = updates[current.id] ?: return@map current
+                if (current.id in favorites) update.copy(metadataJson = favoriteJson(update.metadataJson, true)) else update
+            } + tracks.filterNot { it.id in existingIds }
+            playbackOnlyById = next.associateBy { it.id }
+            playbackOnlyTracks.value = next
+        }
+        onlineFavoriteTracks.update { existing ->
+            if (existing.isEmpty()) return@update existing
+            existing.map { current ->
                 val update = updates[current.id] ?: return@map current
                 if (current.id in favorites) update.copy(metadataJson = favoriteJson(update.metadataJson, true)) else update
             }
@@ -765,19 +223,19 @@ private const val FavoritesPlaylistId = "favorites"
 
     fun putRestoredQueueTracks(tracks: List<LibraryTrack>) {
         if (tracks.isEmpty()) return
-        restoredQueueTracks.value = restoredQueueTracks.value + tracks.associateBy { it.id }
+        restoredQueueTracks.update { it + tracks.associateBy { track -> track.id } }
     }
 
     /** 播放解析用：先查曲库，再查“仅播放”的在线曲目，最后用恢复的队列元数据兜底。 */
     fun trackForPlayback(trackId: String): LibraryTrack? =
-        _tracks.value.firstOrNull { it.id == trackId }
-            ?: playbackOnlyTracks.value.firstOrNull { it.id == trackId }
+        tracksById[trackId]
+            ?: playbackOnlyById[trackId]
             ?: restoredQueueTracks.value[trackId]
 
     // 本地扫描结果、网易云导入和电脑曲库分开存，任何一方变化后重新拼起来。
-    private var localTracks: List<LibraryTrack> = emptyList()
-    private var importedTracks: List<LibraryTrack> = emptyList()
-    private var remoteTracks: List<LibraryTrack> = emptyList()
+    @Volatile private var localTracks: List<LibraryTrack> = emptyList()
+    @Volatile private var importedTracks: List<LibraryTrack> = emptyList()
+    @Volatile private var remoteTracks: List<LibraryTrack> = emptyList()
 
     private val _playlists = MutableStateFlow(emptyList<LibraryPlaylist>())
     val playlists: StateFlow<List<LibraryPlaylist>> = _playlists.asStateFlow()
@@ -797,7 +255,7 @@ private const val FavoritesPlaylistId = "favorites"
     private val _moodRadioEligibleTrackIds = MutableStateFlow(emptySet<String>())
     val moodRadioEligibleTrackIds: StateFlow<Set<String>> = _moodRadioEligibleTrackIds.asStateFlow()
 
-    private val _analysisAvailable = MutableStateFlow(false)
+    private val _analysisAvailable = MutableStateFlow(true)
     val analysisAvailable: StateFlow<Boolean> = _analysisAvailable.asStateFlow()
 
     private val _libraryAnalysisEnabled = MutableStateFlow(false)
@@ -818,26 +276,52 @@ private const val FavoritesPlaylistId = "favorites"
     private val _dailyPlaybackAttemptStats = MutableStateFlow(emptyList<DailyPlaybackAttemptStat>())
     val dailyPlaybackAttemptStats: StateFlow<List<DailyPlaybackAttemptStat>> = _dailyPlaybackAttemptStats.asStateFlow()
 
-    private val analyses = mutableMapOf<String, TrackAnalysis>()
+    private val analyses = ConcurrentHashMap<String, TrackAnalysis>()
     val activeAnalyses: Map<String, TrackAnalysis> get() = analyses.toMap()
 
-    private val providerLyricsStore = mutableMapOf<String, String>()
-    private val _providerLyrics = mutableMapOf<String, MutableStateFlow<String?>>()
+    private val providerLyricsCache = ProviderLyricsCache()
     fun providerLyrics(trackId: String): Flow<String?> =
-        _providerLyrics.getOrPut(trackId) {
-            MutableStateFlow(providerLyricsStore[trackId])
-        }
+        providerLyricsCache.providerLyrics(trackId)
 
-    private val favorites = mutableSetOf<String>()
+    fun providerLyricsSource(trackId: String): Flow<String?> =
+        providerLyricsCache.providerLyricsSource(trackId)
+
+    fun currentProviderLyrics(trackId: String): String? =
+        providerLyricsCache.currentProviderLyrics(trackId)
+
+    fun currentProviderLyricsSource(trackId: String): String? =
+        providerLyricsCache.currentProviderLyricsSource(trackId)
+
+    fun currentProviderLyricsBaseSource(trackId: String): String? =
+        providerLyricsCache.currentProviderLyricsBaseSource(trackId)
+
+    fun restoreAlignedLyrics(trackId: String): Boolean =
+        providerLyricsCache.restoreAligned(trackId)
+
+    fun clearProviderLyrics(trackId: String) =
+        providerLyricsCache.clearTrack(trackId)
+
+    private val favorites: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val _favoriteIds = MutableStateFlow<Set<String>>(emptySet())
+    val favoriteIds: StateFlow<Set<String>> = _favoriteIds.asStateFlow()
+    private val _favoriteOverrides = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val favoriteOverrides: StateFlow<Map<String, Boolean>> = _favoriteOverrides.asStateFlow()
     fun isFavorite(trackId: String): Boolean = favorites.contains(trackId)
 
-    private val hidden = mutableSetOf<String>()
+    private val hidden: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val _hiddenTracks = MutableStateFlow(emptyList<LibraryTrack>())
     val hiddenTracks: StateFlow<List<LibraryTrack>> = _hiddenTracks.asStateFlow()
 
     // 启动读盘在后台完成：UI 先用空列表/骨架渲染，主线程不再解析三份 JSON。
     private val initialStateLoaded = java.util.concurrent.atomic.AtomicBoolean(false)
     private val initialStateSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private val stateSnapshotLock = Any()
+    private val publishStateLock = Any()
+    private val stateWriteMutex = Mutex()
+    private val listeningMutex = Mutex()
+    private val analysesWriteMutex = Mutex()
+    private val statePersistVersion = AtomicLong(0L)
+    private val statePersistedVersion = AtomicLong(0L)
     @Volatile private var persistBeforeStateLoad = false
 
     /** 依赖曲库内容的启动流程（首页匹配、电脑曲库恢复）先等这份缓存。 */
@@ -849,69 +333,102 @@ private const val FavoritesPlaylistId = "favorites"
         AndroidSyncRuntime.backgroundScope.launch { loadInitialState() }
     }
 
-    private fun loadInitialState() {
+    private suspend fun loadInitialState() {
+        var flushPending = false
         try {
-        val persisted = runCatching {
-            LibrarySyncProtocol.json.decodeFromString<PersistedState>(stateFile.readText())
-        }.getOrDefault(PersistedState())
-        favorites.addAll(persisted.favorites)
-        persisted.onlineFavorites.mapNotNull { it.toLibraryTrackOrNull() }.forEach { restored ->
-            val patched = restored.copy(metadataJson = favoriteJson(restored.metadataJson, true))
-            onlineFavoriteTracks.value = onlineFavoriteTracks.value.filterNot { it.id == patched.id } + patched
-            playbackOnlyTracks.value = playbackOnlyTracks.value.filterNot { it.id == patched.id } + patched
-        }
-        hidden.addAll(persisted.hidden)
-        _artworkPaths.value = persisted.artworkPaths
-        _artistArtworkKeys.value = persisted.artistArtworkKeys
-        _playlists.value = persisted.playlists.map { playlist ->
-            LibraryPlaylist(
-                id = playlist.id,
-                name = playlist.name,
-                trackIds = playlist.trackIds,
-                createdAt = playlist.createdAt,
-                updatedAt = playlist.updatedAt,
-                sortTitle = playlist.name,
-                metadataJson = playlist.metadataJson,
-            )
-        }
-        runCatching {
-            LibrarySyncProtocol.json.decodeFromString<PersistedListening>(listeningFile.readText())
-        }.getOrNull()?.let { persisted ->
-            persisted.tracks.forEach { trackDayStats[it.localDate to it.trackId] = it }
-            persisted.attempts.forEach { attemptDayStats[it.localDate] = it }
-            _dailyTrackListeningStats.value = persisted.tracks
-            _dailyPlaybackAttemptStats.value = persisted.attempts
-            _recentlyPlayed.value = persisted.recent
-        }
-        importedTracks = runCatching {
-            LibrarySyncProtocol.json.decodeFromString<List<ImportedTrackData>>(importedFile.readText())
-        }.getOrDefault(emptyList()).map { track ->
-            LibraryTrack(
-                id = track.id,
-                title = track.title,
-                artists = track.artists,
-                album = track.album,
-                albumId = track.albumId,
-                metadataJson = track.metadataJson,
-                artworkPath = track.artworkPath,
-                audioPath = track.audioPath,
-                createdAt = track.createdAt,
-                updatedAt = track.createdAt,
-                sortTitle = track.title,
-                sortArtists = track.artists,
-            )
-        }.filter { track -> track.audioPath?.let { File(it).isFile } == true }
-        // 收藏标记是发布时写进每首曲目元数据的：读盘期间如果已有扫描/恢复先发布过，
-        // 这里必须重发一次，否则那批曲目会一直显示成未收藏（收藏页缺歌）。
-        publishTracks()
+            val persisted = runCatching {
+                LibrarySyncProtocol.json.decodeFromString<PersistedState>(stateFile.readText())
+            }.getOrDefault(PersistedState())
+            favorites.addAll(persisted.favorites)
+            _favoriteIds.value = favorites.toSet()
+            val restoredOnlineFavorites = persisted.onlineFavorites.mapNotNull { it.toLibraryTrackOrNull() }
+                .map { restored -> restored.copy(metadataJson = favoriteJson(restored.metadataJson, true)) }
+            val restoredOnlinePlaylistTracks = persisted.onlinePlaylistTracks.mapNotNull { it.toLibraryTrackOrNull() }
+                .map { restored ->
+                    if (restored.id in favorites) restored.copy(metadataJson = favoriteJson(restored.metadataJson, true)) else restored
+                }
+            val combinedRestoredOnline = (restoredOnlinePlaylistTracks + restoredOnlineFavorites).associateBy { it.id }.values.toList()
+            if (restoredOnlineFavorites.isNotEmpty()) {
+                val restoredById = restoredOnlineFavorites.associateBy { it.id }
+                onlineFavoriteTracks.update { list ->
+                    list.filterNot { it.id in restoredById } + restoredOnlineFavorites
+                }
+            }
+            if (combinedRestoredOnline.isNotEmpty()) {
+                val restoredById = combinedRestoredOnline.associateBy { it.id }
+                synchronized(playbackOnlyLock) {
+                    val next = playbackOnlyTracks.value.filterNot { it.id in restoredById } + combinedRestoredOnline
+                    playbackOnlyById = next.associateBy { it.id }
+                    playbackOnlyTracks.value = next
+                }
+            }
+            hidden.addAll(persisted.hidden)
+            _artworkPaths.update { persisted.artworkPaths + it }
+            _artistArtworkKeys.update { persisted.artistArtworkKeys + it }
+            if (_playlists.value.isEmpty() && persisted.playlists.isNotEmpty()) {
+                _playlists.value = persisted.playlists.map { playlist ->
+                    LibraryPlaylist(
+                        id = playlist.id,
+                        name = playlist.name,
+                        trackIds = playlist.trackIds,
+                        createdAt = playlist.createdAt,
+                        updatedAt = playlist.updatedAt,
+                        sortTitle = playlist.name,
+                        metadataJson = playlist.metadataJson,
+                    )
+                }
+            }
+            runCatching {
+                LibrarySyncProtocol.json.decodeFromString<PersistedListening>(listeningFile.readText())
+            }.getOrNull()?.let { persistedListening ->
+                listeningMutex.withLock {
+                    persistedListening.tracks.forEach { trackDayStats.putIfAbsent(it.localDate to it.trackId, it) }
+                    persistedListening.attempts.forEach { attemptDayStats.putIfAbsent(it.localDate, it) }
+                    _dailyTrackListeningStats.value = trackDayStats.values.sortedBy { it.localDate }
+                    _dailyPlaybackAttemptStats.value = attemptDayStats.values.sortedBy { it.localDate }
+                    if (_recentlyPlayed.value.isEmpty()) _recentlyPlayed.value = persistedListening.recent
+                    if (_listeningFootprints.value.isEmpty()) _listeningFootprints.value = persistedListening.footprints
+                }
+            }
+            runCatching {
+                LibrarySyncProtocol.json.decodeFromString<List<PersistedTrackAnalysis>>(analysesFile.readText())
+            }.getOrDefault(emptyList()).forEach { item ->
+                if (item.trackId.isNotBlank()) {
+                    analyses[item.trackId] = TrackAnalysis(item.loudnessLufs, item.truePeak)
+                }
+            }
+            importedTracks = runCatching {
+                LibrarySyncProtocol.json.decodeFromString<List<ImportedTrackData>>(importedFile.readText())
+            }.getOrDefault(emptyList()).map { track ->
+                LibraryTrack(
+                    id = track.id,
+                    title = track.title,
+                    artists = track.artists,
+                    album = track.album,
+                    albumId = track.albumId,
+                    metadataJson = track.metadataJson,
+                    artworkPath = track.artworkPath,
+                    audioPath = track.audioPath,
+                    createdAt = track.createdAt,
+                    updatedAt = track.createdAt,
+                    sortTitle = track.title,
+                    sortArtists = track.artists,
+                )
+            }.filter { track -> track.audioPath?.let { File(it).isFile } == true }
+            // 收藏标记是发布时写进每首曲目元数据的：读盘期间如果已有扫描/恢复先发布过，
+            // 这里必须重发一次，否则那批曲目会一直显示成未收藏（收藏页缺歌）。
+            publishTracksSync()
         } finally {
             // 解析失败也必须放行等待方，否则队列恢复会永远挂着。
-            val flushPending = synchronized(this) {
+            synchronized(stateSnapshotLock) {
                 initialStateLoaded.set(true)
-                persistBeforeStateLoad.also { persistBeforeStateLoad = false }
+                flushPending = persistBeforeStateLoad
+                persistBeforeStateLoad = false
             }
             initialStateSignal.complete(Unit)
-            if (flushPending) runCatching { persistState() }
+        }
+        if (flushPending) runCatching { persistState() }
+        listeningMutex.withLock {
             if (listeningDirty) runCatching { persistListening(System.currentTimeMillis()) }
         }
     }
@@ -922,118 +439,245 @@ private const val FavoritesPlaylistId = "favorites"
     suspend fun setImportedTracks(tracks: List<LibraryTrack>) {
         initialStateSignal.await()
         importedTracks = tracks
-        runCatching {
-            importedFile.writeTextAtomically(
-                LibrarySyncProtocol.json.encodeToString(
-                    tracks.map { track ->
-                        ImportedTrackData(
-                            id = track.id,
-                            title = track.title,
-                            artists = track.artists,
-                            album = track.album,
-                            albumId = track.albumId,
-                            metadataJson = track.metadataJson,
-                            artworkPath = track.artworkPath,
-                            audioPath = track.audioPath,
-                            createdAt = track.createdAt,
-                        )
-                    },
-                ),
-            )
+        withContext(Dispatchers.IO) {
+            runCatching {
+                importedFile.writeTextAtomically(
+                    LibrarySyncProtocol.json.encodeToString(
+                        tracks.map { track ->
+                            ImportedTrackData(
+                                id = track.id,
+                                title = track.title,
+                                artists = track.artists,
+                                album = track.album,
+                                albumId = track.albumId,
+                                metadataJson = track.metadataJson,
+                                artworkPath = track.artworkPath,
+                                audioPath = track.audioPath,
+                                createdAt = track.createdAt,
+                            )
+                        },
+                    ),
+                )
+            }
         }
         publishTracks()
     }
 
-    private fun persistState() {
-        synchronized(this) {
-        if (!initialStateLoaded.get()) {
-            // 缓存还没读完就落盘，会把空/半装状态覆盖磁盘；读完后再补写。
-            persistBeforeStateLoad = true
-            return
+    private suspend fun persistState() {
+        val snapshot: Pair<Long, PersistedState> = synchronized(stateSnapshotLock) {
+            if (!initialStateLoaded.get()) {
+                // 缓存还没读完就落盘，会把空/半装状态覆盖磁盘；读完后再补写。
+                persistBeforeStateLoad = true
+                return
+            }
+            val version = statePersistVersion.incrementAndGet()
+            val playlistTrackIds = _playlists.value.flatMapTo(HashSet()) { it.trackIds }
+            val persistedOnlinePlaylistTracks = playbackOnlyTracks.value
+                .filter { it.id in playlistTrackIds && !isFavorite(it.id) }
+                .map { it.toImportedData() }
+            val state = PersistedState(
+                favorites = favorites.toList(),
+                hidden = hidden.toList(),
+                onlineFavorites = onlineFavoriteTracks.value.map { it.toImportedData() },
+                onlinePlaylistTracks = persistedOnlinePlaylistTracks,
+                artworkPaths = _artworkPaths.value,
+                artistArtworkKeys = _artistArtworkKeys.value,
+                playlists = _playlists.value.map { playlist ->
+                    PersistedPlaylist(
+                        id = playlist.id,
+                        name = playlist.name,
+                        trackIds = playlist.trackIds,
+                        createdAt = playlist.createdAt,
+                        updatedAt = playlist.updatedAt,
+                        metadataJson = playlist.metadataJson,
+                    )
+                },
+            )
+            version to state
         }
-        val state = PersistedState(
-            favorites = favorites.toList(),
-            hidden = hidden.toList(),
-            onlineFavorites = onlineFavoriteTracks.value.map { it.toImportedData() },
-            artworkPaths = _artworkPaths.value,
-            artistArtworkKeys = _artistArtworkKeys.value,
-            playlists = _playlists.value.map { playlist ->
-                PersistedPlaylist(
-                    id = playlist.id,
-                    name = playlist.name,
-                    trackIds = playlist.trackIds,
-                    createdAt = playlist.createdAt,
-                    updatedAt = playlist.updatedAt,
-                    metadataJson = playlist.metadataJson,
-                )
-            },
-        )
-        runCatching { stateFile.writeTextAtomically(LibrarySyncProtocol.json.encodeToString(state)) }
+        val (version, state) = snapshot
+        withContext(Dispatchers.IO) {
+            stateWriteMutex.withLock {
+                if (version <= statePersistedVersion.get()) return@withLock
+                statePersistedVersion.set(version)
+                runCatching { stateFile.writeTextAtomically(LibrarySyncProtocol.json.encodeToString(state)) }
+            }
         }
     }
 
-    private fun publishTracks(rebuildEntities: Boolean = true) {
-        val merged = localTracks + importedTracks + remoteTracks
-        _hiddenTracks.value = merged.filter { it.id in hidden }
-        val visible = merged.filterNot { it.id in hidden }
-        val published = if (favorites.isEmpty()) {
-            visible
-        } else {
-            visible.map { track ->
-                if (track.id in favorites) track.copy(metadataJson = favoriteJson(track.metadataJson, true)) else track
-            }
+    private suspend fun publishTracks(rebuildEntities: Boolean = true) {
+        withContext(Dispatchers.Default) {
+            publishTracksSync(rebuildEntities)
         }
-        _tracks.value = published
-        _analysisAvailable.value = published.isNotEmpty()
-        _moodRadioEligibleTrackIds.value = (localTracks + importedTracks).map { it.id }.toSet() - hidden
-        if (rebuildEntities) rebuildEntityLists(published)
+    }
+
+    private fun publishTracksSync(rebuildEntities: Boolean = true) {
+        synchronized(publishStateLock) {
+            val merged = localTracks + importedTracks + remoteTracks
+            _hiddenTracks.value = merged.filter { it.id in hidden }
+            val visible = merged.filterNot { it.id in hidden }
+            val published = if (favorites.isEmpty()) {
+                visible
+            } else {
+                visible.map { track ->
+                    if (track.id in favorites) track.copy(metadataJson = favoriteJson(track.metadataJson, true)) else track
+                }
+            }
+            tracksById = published.associateBy { it.id }
+            _tracks.value = published
+            _analysisAvailable.value = true
+            _moodRadioEligibleTrackIds.value = (localTracks + importedTracks).map { it.id }.toSet() - hidden
+            if (rebuildEntities) rebuildEntityLists(published)
+        }
     }
 
     /**
      * 隐藏/取消隐藏歌曲：隐藏后从所有可见列表、歌单和队列里消失，
      * 只在设置的“已隐藏歌曲”里能找到。
      */
-    suspend fun setHidden(trackId: String, hide: Boolean) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    suspend fun setHidden(trackId: String, hide: Boolean) = withContext(Dispatchers.IO) {
         if (hide) hidden.add(trackId) else hidden.remove(trackId)
         if (hide) {
-            _playlists.value = _playlists.value.map { playlist ->
-                if (trackId in playlist.trackIds) playlist.copy(trackIds = playlist.trackIds - trackId) else playlist
+            _playlists.update { list ->
+                list.map { playlist ->
+                    if (trackId in playlist.trackIds) playlist.copy(trackIds = playlist.trackIds - trackId) else playlist
+                }
             }
         }
         persistState()
         publishTracks()
     }
 
-    /** 艺术家/专辑/流派/作曲家都从曲目元数据派生，本地和电脑曲目走同一条路。 */
+    /** 艺术家/专辑/流派/作曲家都从曲目元数据派生，本地和电脑曲目走同一条路（单次 JSON 解析）。 */
     private fun rebuildEntityLists(tracks: List<LibraryTrack>) {
-        val rows = tracks.map { track ->
-            LibraryTrackRow(
-                id = track.id,
-                title = track.title,
-                artists = track.artists,
-                album = track.album,
-                artworkKey = track.artworkKey,
-                playCount = track.playCount,
-                createdAt = track.createdAt,
-                artworkPath = track.artworkPath,
-                audioPath = track.audioPath,
-                rawJson = track.metadataJson,
-            )
-        }
         val artworkPaths = _artworkPaths.value
+        val artistsSeen = mutableMapOf<String, LibraryArtist>()
+        val albumsSeen = mutableMapOf<String, LibraryAlbum>()
+        val composersSeen = mutableMapOf<String, LibraryComposer>()
+        val genresSeen = mutableMapOf<String, LibraryGenre>()
         val genreCounts = mutableMapOf<String, Int>()
-        rows.forEach { row ->
-            runCatching {
-                val root = LibrarySyncProtocol.json.parseToJsonElement(row.rawJson) as JsonObject
-                (root["genres"] as? JsonArray).orEmpty().mapNotNullTo(mutableSetOf()) { entry ->
-                    ((entry as? JsonObject)?.get("id") as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+        for (track in tracks) {
+            val root = runCatching { LibrarySyncProtocol.json.parseToJsonElement(track.rawMetadataJson()) as? JsonObject }.getOrNull()
+                ?: continue
+            (root["artists"] as? JsonArray)?.forEach { entry ->
+                val obj = entry as? JsonObject ?: return@forEach
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank) ?: return@forEach
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank) ?: return@forEach
+                val explicitSortName = obj["sort_name"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["normalization_key"]?.jsonPrimitive?.contentOrNull
+                val explicitCreatedAt = obj["created_at"]?.jsonPrimitive?.contentOrNull
+                val artworkKey = obj["artwork_key"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["artwork_key_local"]?.jsonPrimitive?.contentOrNull
+                val artworkPath = resolveEntityArtwork(artworkKey, id, artworkPaths, track.artworkPath)
+                val existing = artistsSeen[id]
+                artistsSeen[id] = LibraryArtist(
+                    id = id,
+                    name = name,
+                    sortName = explicitSortName ?: existing?.sortName ?: name,
+                    createdAt = explicitCreatedAt ?: existing?.createdAt ?: track.createdAt,
+                    artworkPath = artworkPath ?: existing?.artworkPath,
+                )
+            }
+            (root["album"] as? JsonObject)?.let { albumObj ->
+                val albumId = albumObj["id"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+                val title = albumObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                if (albumId != null && title.isNotBlank()) {
+                    val sortTitle = albumObj["sort_title"]?.jsonPrimitive?.contentOrNull ?: title
+                    val year = albumObj["year"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                    val copyright = albumObj["copyright"]?.jsonPrimitive?.contentOrNull ?: ""
+                    val createdAt = albumObj["created_at"]?.jsonPrimitive?.contentOrNull ?: track.createdAt
+                    val artworkKey = albumObj["artwork_key"]?.jsonPrimitive?.contentOrNull
+                    val artworkPath = resolveEntityArtwork(artworkKey, albumId, artworkPaths, track.artworkPath)
+                    var artist = ""
+                    var sortArtist = ""
+                    var explicitSortArtist = false
+                    val albumArtists = root["album_artists"] as? JsonArray
+                    if (!albumArtists.isNullOrEmpty()) {
+                        val first = albumArtists.firstOrNull { it is JsonObject } as? JsonObject
+                        artist = first?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
+                        val explicitSortName = first?.get("sort_name")?.jsonPrimitive?.contentOrNull
+                        sortArtist = explicitSortName ?: artist
+                        explicitSortArtist = explicitSortName != null
+                    }
+                    if (artist.isBlank()) {
+                        val firstTrackArtist = (root["artists"] as? JsonArray)?.firstOrNull { it is JsonObject } as? JsonObject
+                        artist = firstTrackArtist?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
+                        val explicitSortName = firstTrackArtist?.get("sort_name")?.jsonPrimitive?.contentOrNull
+                        sortArtist = explicitSortName ?: artist
+                        explicitSortArtist = explicitSortName != null
+                    }
+                    val existing = albumsSeen[albumId]
+                    albumsSeen[albumId] = LibraryAlbum(
+                        id = albumId,
+                        title = existing?.title?.takeIf { it.isNotBlank() } ?: title,
+                        sortTitle = existing?.sortTitle?.takeIf { it.isNotBlank() } ?: sortTitle,
+                        sortArtist = if (explicitSortArtist) sortArtist else existing?.sortArtist ?: sortArtist,
+                        artist = existing?.artist?.takeIf { it.isNotBlank() } ?: artist,
+                        artworkPath = artworkPath ?: existing?.artworkPath,
+                        createdAt = existing?.createdAt?.takeIf { it.isNotBlank() } ?: createdAt,
+                        year = existing?.year?.takeIf { it > 0 } ?: year,
+                        copyright = existing?.copyright?.takeIf { it.isNotBlank() } ?: copyright,
+                    )
                 }
-            }.getOrNull()?.forEach { genreCounts[it] = (genreCounts[it] ?: 0) + 1 }
+            }
+            (root["composers"] as? JsonArray)?.forEach { entry ->
+                val obj = entry as? JsonObject ?: return@forEach
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank) ?: return@forEach
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank) ?: return@forEach
+                val explicitSortName = obj["sort_name"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["normalization_key"]?.jsonPrimitive?.contentOrNull
+                val explicitCreatedAt = obj["created_at"]?.jsonPrimitive?.contentOrNull
+                val artworkKey = obj["artwork_key"]?.jsonPrimitive?.contentOrNull
+                val artworkPath = resolveEntityArtwork(artworkKey, id, artworkPaths, track.artworkPath)
+                val existing = composersSeen[id]
+                composersSeen[id] = LibraryComposer(
+                    id = id,
+                    name = name,
+                    sortName = explicitSortName ?: existing?.sortName ?: name,
+                    createdAt = explicitCreatedAt ?: existing?.createdAt ?: track.createdAt,
+                    artworkPath = artworkPath ?: existing?.artworkPath,
+                )
+            }
+            val trackGenreIds = mutableSetOf<String>()
+            (root["genres"] as? JsonArray)?.forEach { entry ->
+                val obj = entry as? JsonObject ?: return@forEach
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank) ?: return@forEach
+                trackGenreIds.add(id)
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank) ?: return@forEach
+                val explicitSortName = obj["sort_name"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["normalization_key"]?.jsonPrimitive?.contentOrNull
+                val explicitCreatedAt = obj["created_at"]?.jsonPrimitive?.contentOrNull
+                val existing = genresSeen[id]
+                genresSeen[id] = LibraryGenre(
+                    id = id,
+                    name = name,
+                    sortName = explicitSortName ?: existing?.sortName ?: name,
+                    createdAt = explicitCreatedAt ?: existing?.createdAt ?: track.createdAt,
+                )
+            }
+            trackGenreIds.forEach { gid -> genreCounts[gid] = (genreCounts[gid] ?: 0) + 1 }
         }
-        _artists.value = libraryArtistsFrom(rows, artworkPaths)
-        _albums.value = libraryAlbumsFrom(rows, artworkPaths)
-        _genres.value = libraryGenresFrom(rows).map { genre -> genre.copy(trackCount = genreCounts[genre.id] ?: 0) }
-        _composers.value = libraryComposersFrom(rows, artworkPaths)
+        _artists.value = artistsSeen.values.toList()
+        _albums.value = albumsSeen.values.toList()
+        _genres.value = genresSeen.values.map { genre -> genre.copy(trackCount = genreCounts[genre.id] ?: 0) }
+        _composers.value = composersSeen.values.toList()
+    }
+
+    private fun LibraryTrack.rawMetadataJson(): String = metadataJson
+
+    private fun resolveEntityArtwork(
+        artworkKey: String?,
+        entityId: String,
+        artworkPaths: Map<String, String>,
+        fallbackTrackArtwork: String?,
+    ): String? {
+        if (artworkKey != null) {
+            val direct = artworkPaths[artworkKey]
+                ?: artworkPaths["artwork:$entityId"]
+                ?: artworkPaths[artworkKey.removePrefix("artwork:")]
+            if (direct != null) return direct
+        }
+        return fallbackTrackArtwork
     }
 
     private fun favoriteJson(metadataJson: String, favorite: Boolean): String {
@@ -1050,7 +694,7 @@ private const val FavoritesPlaylistId = "favorites"
         initialStateSignal.await()
         val artworkByKey = import.artworkAssets.associate { it.assetId to it.relativePath }
         if (artworkByKey.isNotEmpty()) {
-            _artworkPaths.value = _artworkPaths.value + artworkByKey
+            _artworkPaths.update { it + artworkByKey }
             persistState()
         }
         localTracks = import.tracks.map { entity ->
@@ -1096,7 +740,7 @@ private const val FavoritesPlaylistId = "favorites"
     }
 
     /** Find a track by ID. */
-    fun trackById(trackId: String): LibraryTrack? = tracks.value.firstOrNull { it.id == trackId }
+    fun trackById(trackId: String): LibraryTrack? = tracksById[trackId]
 
     /** Tracks eligible for mood radio. */
     fun moodRadioTracks(): List<MoodRadioTrack> =
@@ -1107,116 +751,192 @@ private const val FavoritesPlaylistId = "favorites"
     /** 收藏落在曲目元数据里（详情页/收藏歌单都读 is_favorite），并落盘保证重启还在。 */
     suspend fun setFavorite(trackId: String, favorite: Boolean) {
         if (favorite) favorites.add(trackId) else favorites.remove(trackId)
-        val patch = { list: List<LibraryTrack> ->
-            list.map { track ->
+        _favoriteIds.value = favorites.toSet()
+        _favoriteOverrides.update { it + (trackId to favorite) }
+        synchronized(publishStateLock) {
+            val next = _tracks.value.map { track ->
                 if (track.id == trackId) track.copy(metadataJson = favoriteJson(track.metadataJson, favorite)) else track
             }
+            tracksById = next.associateBy { it.id }
+            _tracks.value = next
         }
-        _tracks.value = patch(_tracks.value)
-        val online = playbackOnlyTracks.value.firstOrNull { it.id == trackId }
+        val online = synchronized(playbackOnlyLock) {
+            val existing = playbackOnlyById[trackId]
+            if (existing != null) {
+                val patched = existing.copy(metadataJson = favoriteJson(existing.metadataJson, favorite))
+                val next = playbackOnlyTracks.value.map { if (it.id == trackId) patched else it }
+                playbackOnlyById = next.associateBy { it.id }
+                playbackOnlyTracks.value = next
+                patched
+            } else null
+        }
         if (online != null) {
-            val patched = online.copy(metadataJson = favoriteJson(online.metadataJson, favorite))
-            playbackOnlyTracks.value = playbackOnlyTracks.value.map { if (it.id == trackId) patched else it }
-            onlineFavoriteTracks.value = if (favorite) {
-                onlineFavoriteTracks.value.filterNot { it.id == trackId } + patched
-            } else {
-                onlineFavoriteTracks.value.filterNot { it.id == trackId }
+            onlineFavoriteTracks.update { list ->
+                if (favorite) {
+                    list.filterNot { it.id == trackId } + online
+                } else {
+                    list.filterNot { it.id == trackId }
+                }
             }
         } else if (!favorite) {
-            onlineFavoriteTracks.value = onlineFavoriteTracks.value.filterNot { it.id == trackId }
+            onlineFavoriteTracks.update { list -> list.filterNot { it.id == trackId } }
         }
         persistState()
     }
 
     /** Save provider lyrics for a track. */
-    suspend fun saveProviderLyrics(trackId: String, content: String, source: String) {
-        providerLyricsStore[trackId] = content
-        _providerLyrics.getOrPut(trackId) { MutableStateFlow(content) }.value = content
+    suspend fun saveProviderLyrics(
+        trackId: String,
+        content: String,
+        source: String,
+        manual: Boolean = false,
+    ) {
+        providerLyricsCache.save(trackId, content, source, manual)
     }
 
-    /** Get analysis for a track (stubbed — returns null). */
+    /** 关闭自动对齐后，把本进程内所有已对齐曲目恢复到对齐前的原始歌词。 */
+    fun restoreAllAlignedLyrics(): Int =
+        providerLyricsCache.restoreAllAligned()
+
+    /** 歌词源优先级或启用项变更后，清理非手动选择的缓存以触发立即重新抓取。 */
+    fun clearNonManualProviderLyrics() {
+        providerLyricsCache.clearNonManual()
+    }
+
+    /** Get cached ITU-R BS.1770 loudness analysis for a track, if already measured. */
     fun analysis(trackId: String): TrackAnalysis? = analyses[trackId]
+
+    /** Persist measured LUFS and true-peak analysis locally for instant future normalization. */
+    suspend fun saveTrackAnalysis(trackId: String, analysis: TrackAnalysis) {
+        if (trackId.isBlank()) return
+        analyses[trackId] = analysis
+        withContext(Dispatchers.IO) {
+            analysesWriteMutex.withLock {
+                val snapshot = analyses.entries.map { (id, value) ->
+                    PersistedTrackAnalysis(
+                        trackId = id,
+                        loudnessLufs = value.loudnessLufs,
+                        truePeak = value.truePeak,
+                    )
+                }
+                runCatching {
+                    analysesFile.writeTextAtomically(LibrarySyncProtocol.json.encodeToString(snapshot))
+                }
+            }
+        }
+    }
 
     /** 记录播放写入：按天累计每首的收听秒数/播放次数，以及播放尝试统计。 */
     suspend fun recordListening(write: Any) {
         val event = write as? ListeningWrite ?: return
-        val now = System.currentTimeMillis()
-        when (event) {
-            is ListeningWrite.QualifiedPlay -> {
-                if (event.trackId.isBlank()) return
-                val date = dateOf(event.occurredAt)
-                val key = date to event.trackId
-                val current = trackDayStats[key]
-                trackDayStats[key] = DailyTrackListeningStat(
-                    sourceDeviceId = event.sourceDeviceId,
-                    localDate = date,
-                    trackId = event.trackId,
-                    listenedSeconds = current?.listenedSeconds ?: 0,
-                    playCount = (current?.playCount ?: 0) + 1,
-                )
-            }
-            // 近期播放从 3 秒开始记录，与统计口径无关；重复播放会提到最前，最多 100 条。
-            is ListeningWrite.RecentPlay -> {
-                if (event.trackId.isBlank()) return
-                val recent = _recentlyPlayed.value.filterNot { it.trackId == event.trackId }
-                val track = trackForPlayback(event.trackId)
-                val coverUrl = track?.metadataObject()?.get("coverUrl")
-                    ?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
-                _recentlyPlayed.value = (
-                    listOf(
-                        RecentPlayRecord(
+        withContext(Dispatchers.IO) {
+            listeningMutex.withLock {
+                val now = System.currentTimeMillis()
+                when (event) {
+                    is ListeningWrite.QualifiedPlay -> {
+                        if (event.trackId.isBlank()) return@withLock
+                        val date = dateOf(event.occurredAt)
+                        val key = date to event.trackId
+                        val current = trackDayStats[key]
+                        trackDayStats[key] = DailyTrackListeningStat(
+                            sourceDeviceId = event.sourceDeviceId,
+                            localDate = date,
                             trackId = event.trackId,
-                            playedAt = event.occurredAt,
-                            title = track?.title.orEmpty(),
-                            artists = track?.artists.orEmpty(),
-                            album = track?.album.orEmpty(),
-                            coverUrl = coverUrl,
-                        ),
-                    ) + recent
-                    ).take(100)
+                            listenedSeconds = current?.listenedSeconds ?: 0,
+                            playCount = (current?.playCount ?: 0) + 1,
+                        )
+                    }
+                    // 近期播放从 3 秒开始记录，与统计口径无关；重复播放会提到最前，最多 100 条。
+                    is ListeningWrite.RecentPlay -> {
+                        if (event.trackId.isBlank()) return@withLock
+                        val track = trackForPlayback(event.trackId)
+                        val coverUrl = track?.metadataObject()?.get("coverUrl")
+                            ?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+                        _recentlyPlayed.update { list ->
+                            (
+                                listOf(
+                                    RecentPlayRecord(
+                                        trackId = event.trackId,
+                                        playedAt = event.occurredAt,
+                                        title = track?.title.orEmpty(),
+                                        artists = track?.artists.orEmpty(),
+                                        album = track?.album.orEmpty(),
+                                        coverUrl = coverUrl,
+                                    ),
+                                ) + list.filterNot { it.trackId == event.trackId }
+                                ).take(100)
+                        }
+                    }
+                    is ListeningWrite.Session -> {
+                        val session = event.value
+                        if (session.trackId.isBlank() || session.listenedSeconds <= 0) return@withLock
+                        val date = dateOf(session.endedAt)
+                        val key = date to session.trackId
+                        val current = trackDayStats[key]
+                        trackDayStats[key] = DailyTrackListeningStat(
+                            sourceDeviceId = session.sourceDeviceId,
+                            localDate = date,
+                            trackId = session.trackId,
+                            listenedSeconds = (current?.listenedSeconds ?: 0) + session.listenedSeconds,
+                            playCount = current?.playCount ?: 0,
+                        )
+                    }
+                    is ListeningWrite.AttemptFinished -> {
+                        val attempt = event.value
+                        val endedAt = attempt.endedAt.takeIf { it > 0 } ?: now
+                        val date = dateOf(endedAt)
+                        val current = attemptDayStats[date] ?: DailyPlaybackAttemptStat(
+                            sourceDeviceId = attempt.sourceDeviceId,
+                            localDate = date,
+                            attempts = 0,
+                            completed = 0,
+                            skipped = 0,
+                            stopped = 0,
+                            listenedSeconds = 0,
+                        )
+                        attemptDayStats[date] = current.copy(
+                            attempts = current.attempts + 1,
+                            completed = current.completed + if (attempt.endReason == PlaybackEndReason.COMPLETED) 1 else 0,
+                            skipped = current.skipped + if (attempt.endReason == PlaybackEndReason.SKIPPED) 1 else 0,
+                            stopped = current.stopped + if (attempt.endReason == PlaybackEndReason.STOPPED) 1 else 0,
+                            listenedSeconds = current.listenedSeconds + attempt.listenedSeconds.coerceAtLeast(0),
+                        )
+                        val seconds = attempt.listenedSeconds.coerceAtLeast(0)
+                        if (attempt.trackId.isNotBlank() && (seconds >= 3 || attempt.endReason == PlaybackEndReason.COMPLETED)) {
+                            val track = trackForPlayback(attempt.trackId)
+                            val coverUrl = track?.metadataObject()?.get("coverUrl")
+                                ?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+                            val startedAt = attempt.startedAt.takeIf { it > 0 }
+                                ?: (endedAt - seconds * 1_000L).coerceAtLeast(0L)
+                            val entryId = attempt.id.ifBlank { "${attempt.trackId}:$endedAt" }
+                            val record = ListeningFootprintRecord(
+                                id = entryId,
+                                trackId = attempt.trackId,
+                                title = track?.title.orEmpty(),
+                                artists = track?.artists.orEmpty(),
+                                album = track?.album.orEmpty(),
+                                artworkPath = track?.artworkPath,
+                                coverUrl = coverUrl,
+                                startedAt = startedAt,
+                                endedAt = endedAt,
+                                listenedSeconds = seconds,
+                                endReason = attempt.endReason ?: PlaybackEndReason.STOPPED,
+                            )
+                            _listeningFootprints.update { list ->
+                                (listOf(record) + list.filterNot { it.id == entryId }).take(5_000)
+                            }
+                        }
+                    }
+                    is ListeningWrite.AttemptStarted -> Unit
+                }
+                _dailyTrackListeningStats.value = trackDayStats.values.sortedBy { it.localDate }
+                _dailyPlaybackAttemptStats.value = attemptDayStats.values.sortedBy { it.localDate }
+                listeningDirty = true
+                // 写盘节流：尝试结束立即落盘，其余最多 2 秒写一次。
+                if (event is ListeningWrite.AttemptFinished || now - lastListeningPersistAt >= 2_000L) {
+                    persistListening(now)
+                }
             }
-            is ListeningWrite.Session -> {
-                val session = event.value
-                if (session.trackId.isBlank() || session.listenedSeconds <= 0) return
-                val date = dateOf(session.endedAt)
-                val key = date to session.trackId
-                val current = trackDayStats[key]
-                trackDayStats[key] = DailyTrackListeningStat(
-                    sourceDeviceId = session.sourceDeviceId,
-                    localDate = date,
-                    trackId = session.trackId,
-                    listenedSeconds = (current?.listenedSeconds ?: 0) + session.listenedSeconds,
-                    playCount = current?.playCount ?: 0,
-                )
-            }
-            is ListeningWrite.AttemptFinished -> {
-                val attempt = event.value
-                val date = dateOf(attempt.endedAt.takeIf { it > 0 } ?: now)
-                val current = attemptDayStats[date] ?: DailyPlaybackAttemptStat(
-                    sourceDeviceId = attempt.sourceDeviceId,
-                    localDate = date,
-                    attempts = 0,
-                    completed = 0,
-                    skipped = 0,
-                    stopped = 0,
-                    listenedSeconds = 0,
-                )
-                attemptDayStats[date] = current.copy(
-                    attempts = current.attempts + 1,
-                    completed = current.completed + if (attempt.endReason == PlaybackEndReason.COMPLETED) 1 else 0,
-                    skipped = current.skipped + if (attempt.endReason == PlaybackEndReason.SKIPPED) 1 else 0,
-                    stopped = current.stopped + if (attempt.endReason == PlaybackEndReason.STOPPED) 1 else 0,
-                    listenedSeconds = current.listenedSeconds + attempt.listenedSeconds.coerceAtLeast(0),
-                )
-            }
-            is ListeningWrite.AttemptStarted -> Unit
-        }
-        _dailyTrackListeningStats.value = trackDayStats.values.sortedBy { it.localDate }
-        _dailyPlaybackAttemptStats.value = attemptDayStats.values.sortedBy { it.localDate }
-        listeningDirty = true
-        // 写盘节流：尝试结束立即落盘，其余最多 2 秒写一次。
-        if (event is ListeningWrite.AttemptFinished || now - lastListeningPersistAt >= 2_000L) {
-            persistListening(now)
         }
     }
 
@@ -1228,6 +948,7 @@ private const val FavoritesPlaylistId = "favorites"
             tracks = trackDayStats.values.toList(),
             attempts = attemptDayStats.values.toList(),
             recent = _recentlyPlayed.value,
+            footprints = _listeningFootprints.value,
         )
         runCatching { listeningFile.writeTextAtomically(LibrarySyncProtocol.json.encodeToString(payload)) }
         listeningDirty = false
@@ -1245,7 +966,7 @@ private const val FavoritesPlaylistId = "favorites"
 
     /** Stage artist artwork: hash → filesDir 相对路径。 */
     suspend fun stageArtistArtwork(artwork: StagedArtistArtwork) {
-        _artworkPaths.value = _artworkPaths.value + (artwork.sha256 to artwork.relativePath)
+        _artworkPaths.update { it + (artwork.sha256 to artwork.relativePath) }
         persistState()
     }
 
@@ -1254,10 +975,10 @@ private const val FavoritesPlaylistId = "favorites"
         when (mutation.operation) {
             ArtistArtworkOperation.SET_ARTWORK -> {
                 val sha = mutation.payload?.sha256?.takeIf { it.isNotBlank() } ?: return
-                _artistArtworkKeys.value = _artistArtworkKeys.value + (mutation.artistId to sha)
+                _artistArtworkKeys.update { it + (mutation.artistId to sha) }
             }
             ArtistArtworkOperation.REMOVE_ARTWORK -> {
-                _artistArtworkKeys.value = _artistArtworkKeys.value - mutation.artistId
+                _artistArtworkKeys.update { it - mutation.artistId }
             }
         }
         persistState()
@@ -1273,7 +994,7 @@ private const val FavoritesPlaylistId = "favorites"
         val timestamp = Instant.ofEpochMilli(mutation.updatedAt).toString()
         val name = mutation.payload.name.orEmpty().trim()
         val artworkKey = artwork?.let { staged ->
-            _artworkPaths.value = _artworkPaths.value + (staged.sha256 to staged.relativePath)
+            _artworkPaths.update { it + (staged.sha256 to staged.relativePath) }
             staged.sha256
         }
         val playlist = LibraryPlaylist(
@@ -1286,49 +1007,238 @@ private const val FavoritesPlaylistId = "favorites"
             sortTitle = name,
             metadataJson = artworkKey?.let(::playlistArtworkJson) ?: "{}",
         )
-        _playlists.value = _playlists.value.filterNot { it.id == playlist.id } + playlist
+        _playlists.update { it.filterNot { existing -> existing.id == playlist.id } + playlist }
         persistState()
+    }
+
+    suspend fun createSmartPlaylist(
+        playlistId: String,
+        name: String,
+        metadataJson: String,
+    ) {
+        val now = Instant.ofEpochMilli(System.currentTimeMillis()).toString()
+        val trimmed = name.trim()
+        val playlist = LibraryPlaylist(
+            id = playlistId,
+            name = trimmed,
+            artworkKey = null,
+            trackIds = emptyList(),
+            createdAt = now,
+            updatedAt = now,
+            sortTitle = trimmed,
+            metadataJson = metadataJson,
+        )
+        _playlists.update { it.filterNot { existing -> existing.id == playlist.id } + playlist }
+        persistState()
+    }
+
+    suspend fun updateSmartPlaylist(
+        playlistId: String,
+        name: String,
+        metadataJson: String,
+    ) {
+        val now = Instant.ofEpochMilli(System.currentTimeMillis()).toString()
+        val trimmed = name.trim()
+        _playlists.update { list ->
+            list.map { existing ->
+                if (existing.id == playlistId) {
+                    existing.copy(
+                        name = trimmed.ifBlank { existing.name },
+                        sortTitle = trimmed.ifBlank { existing.sortTitle },
+                        metadataJson = metadataJson,
+                        updatedAt = now,
+                    )
+                } else {
+                    existing
+                }
+            }
+        }
+        persistState()
+    }
+
+    suspend fun replacePlaylistTracks(
+        playlistId: String,
+        trackIds: List<String>,
+    ) {
+        if (playlistId.isBlank()) return
+        val now = Instant.ofEpochMilli(System.currentTimeMillis()).toString()
+        val sanitized = trackIds.filter(String::isNotBlank)
+        _playlists.update { list ->
+            list.map { existing ->
+                if (existing.id == playlistId) {
+                    existing.copy(
+                        trackIds = sanitized,
+                        updatedAt = now,
+                    )
+                } else {
+                    existing
+                }
+            }
+        }
+        persistState()
+    }
+
+    data class BackupLibraryPayloads(
+        val stateJson: String,
+        val listeningJson: String,
+    )
+
+    suspend fun exportBackupPayloads(): BackupLibraryPayloads {
+        initialStateSignal.await()
+        val state = synchronized(stateSnapshotLock) {
+            val playlistTrackIds = _playlists.value.flatMapTo(HashSet()) { it.trackIds }
+            val persistedOnlinePlaylistTracks = playbackOnlyTracks.value
+                .filter { it.id in playlistTrackIds && !isFavorite(it.id) }
+                .map { it.toImportedData() }
+            PersistedState(
+                favorites = favorites.toList(),
+                hidden = hidden.toList(),
+                onlineFavorites = onlineFavoriteTracks.value.map { it.toImportedData() },
+                onlinePlaylistTracks = persistedOnlinePlaylistTracks,
+                artworkPaths = _artworkPaths.value,
+                artistArtworkKeys = _artistArtworkKeys.value,
+                playlists = _playlists.value.map { playlist ->
+                    PersistedPlaylist(
+                        id = playlist.id,
+                        name = playlist.name,
+                        trackIds = playlist.trackIds,
+                        createdAt = playlist.createdAt,
+                        updatedAt = playlist.updatedAt,
+                        metadataJson = playlist.metadataJson,
+                    )
+                },
+            )
+        }
+        val listening = listeningMutex.withLock {
+            PersistedListening(
+                tracks = trackDayStats.values.toList(),
+                attempts = attemptDayStats.values.toList(),
+                recent = _recentlyPlayed.value,
+                footprints = _listeningFootprints.value,
+            )
+        }
+        return withContext(Dispatchers.Default) {
+            BackupLibraryPayloads(
+                stateJson = LibrarySyncProtocol.json.encodeToString(state),
+                listeningJson = LibrarySyncProtocol.json.encodeToString(listening),
+            )
+        }
+    }
+
+    /** 从备份全量恢复曲库状态（收藏、隐藏、歌单/智能歌单、自定义封面映射、听歌统计）并立刻刷新流。 */
+    suspend fun restoreFromBackup(stateJson: String?, listeningJson: String?): Pair<Int, Int> {
+        initialStateSignal.await()
+        val persistedState = stateJson?.takeIf { it.isNotBlank() }?.let { raw ->
+            withContext(Dispatchers.Default) {
+                LibrarySyncProtocol.json.decodeFromString<PersistedState>(raw)
+            }
+        }
+        val persistedListening = listeningJson?.takeIf { it.isNotBlank() }?.let { raw ->
+            withContext(Dispatchers.Default) {
+                LibrarySyncProtocol.json.decodeFromString<PersistedListening>(raw)
+            }
+        }
+        if (persistedState != null) {
+            synchronized(stateSnapshotLock) {
+                favorites.clear()
+                favorites.addAll(persistedState.favorites)
+                _favoriteIds.value = favorites.toSet()
+                _favoriteOverrides.value = emptyMap()
+
+                hidden.clear()
+                hidden.addAll(persistedState.hidden)
+
+                val restoredOnlineFavorites = persistedState.onlineFavorites.mapNotNull { it.toLibraryTrackOrNull() }
+                    .map { restored -> restored.copy(metadataJson = favoriteJson(restored.metadataJson, true)) }
+                val restoredOnlinePlaylistTracks = persistedState.onlinePlaylistTracks.mapNotNull { it.toLibraryTrackOrNull() }
+                    .map { restored ->
+                        if (restored.id in favorites) restored.copy(metadataJson = favoriteJson(restored.metadataJson, true)) else restored
+                    }
+                val combinedOnline = (restoredOnlinePlaylistTracks + restoredOnlineFavorites).associateBy { it.id }.values.toList()
+                onlineFavoriteTracks.value = restoredOnlineFavorites
+                synchronized(playbackOnlyLock) {
+                    playbackOnlyById = combinedOnline.associateBy { it.id }
+                    playbackOnlyTracks.value = combinedOnline
+                }
+
+                _artworkPaths.value = persistedState.artworkPaths
+                _artistArtworkKeys.value = persistedState.artistArtworkKeys
+                _playlists.value = persistedState.playlists.map { playlist ->
+                    LibraryPlaylist(
+                        id = playlist.id,
+                        name = playlist.name,
+                        trackIds = playlist.trackIds,
+                        createdAt = playlist.createdAt,
+                        updatedAt = playlist.updatedAt,
+                        sortTitle = playlist.name,
+                        metadataJson = playlist.metadataJson,
+                    )
+                }
+            }
+            persistState()
+            publishTracks()
+        }
+        if (persistedListening != null) {
+            listeningMutex.withLock {
+                trackDayStats.clear()
+                attemptDayStats.clear()
+                persistedListening.tracks.forEach { trackDayStats[it.localDate to it.trackId] = it }
+                persistedListening.attempts.forEach { attemptDayStats[it.localDate] = it }
+                _dailyTrackListeningStats.value = trackDayStats.values.sortedBy { it.localDate }
+                _dailyPlaybackAttemptStats.value = attemptDayStats.values.sortedBy { it.localDate }
+                _recentlyPlayed.value = persistedListening.recent
+                _listeningFootprints.value = persistedListening.footprints
+                listeningDirty = true
+                withContext(Dispatchers.IO) {
+                    persistListening(System.currentTimeMillis())
+                }
+            }
+        }
+        return _playlists.value.size to favorites.size
     }
 
     /** Apply a playlist mutation to the in-memory list and persist it. */
     suspend fun queuePlaylistMutation(mutation: PlaylistMutation) {
-        val existing = _playlists.value.firstOrNull { it.id == mutation.playlistId }
-            ?: defaultFavoritesPlaylist(mutation)
-            ?: return
-        val payload = mutation.payload
-        val timestamp = Instant.ofEpochMilli(mutation.updatedAt).toString()
-        val updated: LibraryPlaylist? = when (mutation.operation) {
-            PlaylistMutationOperation.CREATE ->
-                existing.copy(name = payload.name?.trim().orEmpty().ifBlank { existing.name }, updatedAt = timestamp)
-            PlaylistMutationOperation.ADD_TRACK ->
-                payload.trackId?.takeIf { it.isNotBlank() }?.let { id ->
-                    if (id in existing.trackIds) existing else existing.copy(trackIds = existing.trackIds + id, updatedAt = timestamp)
-                } ?: existing
-            PlaylistMutationOperation.REMOVE_TRACK ->
-                payload.trackId?.let { id -> existing.copy(trackIds = existing.trackIds - id, updatedAt = timestamp) } ?: existing
-            PlaylistMutationOperation.MOVE_TRACK ->
-                payload.trackId?.let { id ->
-                    existing.copy(
-                        trackIds = movePlaylistTrack(existing.trackIds, id, payload.previousTrackId, payload.nextTrackId),
-                        updatedAt = timestamp,
-                    )
-                } ?: existing
-            PlaylistMutationOperation.UPDATE ->
-                payload.name?.trim()?.takeIf { it.isNotBlank() }?.let { name ->
-                    existing.copy(name = name, sortTitle = name, updatedAt = timestamp)
-                } ?: existing
-            PlaylistMutationOperation.SET_ARTWORK ->
-                payload.artworkSha256?.takeIf { it.isNotBlank() }?.let { sha ->
-                    existing.copy(artworkKey = sha, metadataJson = playlistArtworkJson(sha), updatedAt = timestamp)
-                } ?: existing
-            PlaylistMutationOperation.REMOVE_ARTWORK ->
-                existing.copy(artworkKey = null, metadataJson = "{}", updatedAt = timestamp)
-            PlaylistMutationOperation.DELETE -> null
-        }
-        _playlists.value = if (updated == null) {
-            _playlists.value.filterNot { it.id == mutation.playlistId }
-        } else {
-            _playlists.value.map { if (it.id == updated.id) updated else it }
+        _playlists.update { list ->
+            val existing = list.firstOrNull { it.id == mutation.playlistId }
+                ?: defaultFavoritesPlaylist(mutation)
+                ?: return@update list
+            val payload = mutation.payload
+            val timestamp = Instant.ofEpochMilli(mutation.updatedAt).toString()
+            val updated: LibraryPlaylist? = when (mutation.operation) {
+                PlaylistMutationOperation.CREATE ->
+                    existing.copy(name = payload.name?.trim().orEmpty().ifBlank { existing.name }, updatedAt = timestamp)
+                PlaylistMutationOperation.ADD_TRACK ->
+                    payload.trackId?.takeIf { it.isNotBlank() }?.let { id ->
+                        if (id in existing.trackIds) existing else existing.copy(trackIds = existing.trackIds + id, updatedAt = timestamp)
+                    } ?: existing
+                PlaylistMutationOperation.REMOVE_TRACK ->
+                    payload.trackId?.let { id -> existing.copy(trackIds = existing.trackIds - id, updatedAt = timestamp) } ?: existing
+                PlaylistMutationOperation.MOVE_TRACK ->
+                    payload.trackId?.let { id ->
+                        existing.copy(
+                            trackIds = movePlaylistTrack(existing.trackIds, id, payload.previousTrackId, payload.nextTrackId),
+                            updatedAt = timestamp,
+                        )
+                    } ?: existing
+                PlaylistMutationOperation.UPDATE ->
+                    payload.name?.trim()?.takeIf { it.isNotBlank() }?.let { name ->
+                        existing.copy(name = name, sortTitle = name, updatedAt = timestamp)
+                    } ?: existing
+                PlaylistMutationOperation.SET_ARTWORK ->
+                    payload.artworkSha256?.takeIf { it.isNotBlank() }?.let { sha ->
+                        existing.copy(artworkKey = sha, metadataJson = playlistArtworkJson(sha), updatedAt = timestamp)
+                    } ?: existing
+                PlaylistMutationOperation.REMOVE_ARTWORK ->
+                    existing.copy(artworkKey = null, metadataJson = "{}", updatedAt = timestamp)
+                PlaylistMutationOperation.DELETE -> null
+            }
+            if (updated == null) {
+                list.filterNot { it.id == mutation.playlistId }
+            } else {
+                val found = list.any { it.id == updated.id }
+                if (found) list.map { if (it.id == updated.id) updated else it } else list + updated
+            }
         }
         persistState()
     }
@@ -1338,7 +1248,7 @@ private const val FavoritesPlaylistId = "favorites"
 
     /** Stage playlist artwork: hash → filesDir 相对路径。 */
     suspend fun stagePlaylistArtwork(artwork: StagedPlaylistArtwork) {
-        _artworkPaths.value = _artworkPaths.value + (artwork.sha256 to artwork.relativePath)
+        _artworkPaths.update { it + (artwork.sha256 to artwork.relativePath) }
         persistState()
     }
 
@@ -1385,16 +1295,135 @@ private const val FavoritesPlaylistId = "favorites"
     }
 }
 
+/** 进程内歌词缓存：保留对齐前原文以便关闭自动对齐时回退，同时支持切换源后清非手动缓存。 */
+internal class ProviderLyricsCache {
+    private val lock = Any()
+    private val store = ConcurrentHashMap<String, String>()
+    private val sources = ConcurrentHashMap<String, String>()
+    private val rawStore = ConcurrentHashMap<String, Pair<String, String>>()
+    private val manualTrackIds = ConcurrentHashMap.newKeySet<String>()
+    private val flows = ConcurrentHashMap<String, MutableStateFlow<String?>>()
+    private val sourceFlows = ConcurrentHashMap<String, MutableStateFlow<String?>>()
+
+    fun providerLyrics(trackId: String): Flow<String?> =
+        synchronized(lock) {
+            flows.getOrPut(trackId) { MutableStateFlow(store[trackId]) }
+        }
+
+    fun providerLyricsSource(trackId: String): Flow<String?> =
+        synchronized(lock) {
+            sourceFlows.getOrPut(trackId) { MutableStateFlow(sources[trackId]) }
+        }
+
+    fun currentProviderLyrics(trackId: String): String? =
+        synchronized(lock) { store[trackId] }
+
+    fun currentProviderLyricsSource(trackId: String): String? =
+        synchronized(lock) { sources[trackId] }
+
+    fun currentProviderLyricsBaseSource(trackId: String): String? =
+        synchronized(lock) { rawStore[trackId]?.second }
+
+    fun save(trackId: String, content: String, source: String, manual: Boolean = false) {
+        synchronized(lock) {
+            if (manual) {
+                manualTrackIds.add(trackId)
+            }
+            if (source != "autosync") {
+                rawStore[trackId] = content to source
+            }
+            store[trackId] = content
+            sources[trackId] = source
+            flows.getOrPut(trackId) { MutableStateFlow(content) }.value = content
+            sourceFlows.getOrPut(trackId) { MutableStateFlow(source) }.value = source
+        }
+    }
+
+    fun restoreAligned(trackId: String): Boolean {
+        synchronized(lock) {
+            if (sources[trackId] != "autosync") return false
+            val raw = rawStore[trackId]
+            if (raw != null) {
+                store[trackId] = raw.first
+                sources[trackId] = raw.second
+                flows[trackId]?.value = raw.first
+                sourceFlows[trackId]?.value = raw.second
+            } else {
+                store.remove(trackId)
+                sources.remove(trackId)
+                flows[trackId]?.value = null
+                sourceFlows[trackId]?.value = null
+            }
+            return true
+        }
+    }
+
+    fun restoreAllAligned(): Int {
+        var restored = 0
+        synchronized(lock) {
+            val alignedIds = sources.entries
+                .filter { it.value == "autosync" }
+                .map { it.key }
+            for (trackId in alignedIds) {
+                val raw = rawStore[trackId]
+                if (raw != null) {
+                    store[trackId] = raw.first
+                    sources[trackId] = raw.second
+                    flows[trackId]?.value = raw.first
+                    sourceFlows[trackId]?.value = raw.second
+                } else {
+                    store.remove(trackId)
+                    sources.remove(trackId)
+                    flows[trackId]?.value = null
+                    sourceFlows[trackId]?.value = null
+                }
+                restored += 1
+            }
+        }
+        return restored
+    }
+
+    fun clearTrack(trackId: String) {
+        synchronized(lock) {
+            manualTrackIds.remove(trackId)
+            store.remove(trackId)
+            sources.remove(trackId)
+            rawStore.remove(trackId)
+            flows[trackId]?.value = null
+            sourceFlows[trackId]?.value = null
+        }
+    }
+
+    fun clearNonManual() {
+        synchronized(lock) {
+            val toClear = (store.keys + flows.keys + rawStore.keys + sourceFlows.keys)
+                .distinct()
+                .filter { it !in manualTrackIds }
+            for (trackId in toClear) {
+                store.remove(trackId)
+                sources.remove(trackId)
+                rawStore.remove(trackId)
+                flows[trackId]?.value = null
+                sourceFlows[trackId]?.value = null
+            }
+        }
+    }
+}
+
 /** ============================================================================
  *  AndroidSyncRuntime replacement — object with same API as deleted SyncRuntime.kt
  * ============================================================================ */
 
  object AndroidSyncRuntime {
+    @Volatile
     private var currentStore: AndroidLibrarySyncStore? = null
 
     fun initialize(context: Context) {
-        if (currentStore == null) {
-            currentStore = AndroidLibrarySyncStore(context.applicationContext)
+        if (currentStore != null) return
+        synchronized(this) {
+            if (currentStore == null) {
+                currentStore = AndroidLibrarySyncStore(context.applicationContext)
+            }
         }
     }
 
@@ -1404,20 +1433,4 @@ private const val FavoritesPlaylistId = "favorites"
     val syncStore: AndroidLibrarySyncStore
         get() = currentStore
             ?: error("AndroidLibrarySyncStore not initialized. Call AndroidSyncRuntime.initialize(context) first.")
-}
-
-/** Stub: splits listening time across local dates. */
-fun splitListeningByDate(startMs: Long, endMs: Long, intervalMs: Long): Map<String, Int> {
-    val zone = java.time.ZoneId.of("UTC")
-    val startDate = java.time.Instant.ofEpochMilli(startMs).atZone(zone).toLocalDate().toString()
-    val endDate = java.time.Instant.ofEpochMilli(endMs).atZone(zone).toLocalDate().toString()
-    val totalSeconds = ((endMs - startMs) / 1000).coerceAtLeast(0).toInt()
-    val perDate = totalSeconds / 2
-    return mapOf(startDate to perDate, endDate to perDate)
-}
-
-/** Stub: returns cached asset path if the file exists and path is safe. */
-fun cachedAssetPath(filesDir: java.io.File, entity: SyncAssetEntity): String? {
-    val file = java.io.File(filesDir, entity.relativePath)
-    return if (file.exists() && !entity.relativePath.contains("..")) entity.relativePath else null
 }

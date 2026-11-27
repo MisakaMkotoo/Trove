@@ -35,4 +35,34 @@ class TuneTrackSliderTest {
         )
         assertEquals(colors.onPrimary, sliderFilledTrackColor(colors, isInteracting = true))
     }
+
+    @Test
+    fun knobInertiaIgnoresSmallOrReversedReleaseVelocity() {
+        assertEquals(0.5f, computeKnobInertiaTarget(0.5f, 0.2f, 0.1f, 0f..1f), 1e-4f)
+        assertEquals(0.5f, computeKnobInertiaTarget(0.5f, 0.2f, -1.8f, 0f..1f), 1e-4f)
+    }
+
+    @Test
+    fun knobInertiaCoastsGentlyAndClampsToRange() {
+        val target = computeKnobInertiaTarget(0.5f, 0.2f, 1.0f, 0f..1f)
+        assertEquals(0.53f, target, 1e-4f)
+        assertEquals(1.0f, computeKnobInertiaTarget(0.99f, 0.2f, 3.0f, 0f..1f), 1e-4f)
+    }
+
+    @Test
+    fun bufferingBreathPulsePeaksSmoothlyAtMidCycle() {
+        assertEquals(0f, bufferingBreathProgress(0f), 1e-4f)
+        assertEquals(1f, bufferingBreathProgress(0.5f), 1e-4f)
+        assertEquals(0f, bufferingBreathProgress(1f), 1e-4f)
+
+        val dimFill = sliderBufferingFilledColor(colors.onPrimary, colors.onPrimary, breath = 0f)
+        val brightFill = sliderBufferingFilledColor(colors.onPrimary, colors.onPrimary, breath = 1f)
+        assertEquals(0.48f, dimFill.alpha, 1e-2f)
+        assertEquals(1.0f, brightFill.alpha, 1e-2f)
+
+        val dimTrack = sliderBufferingInactiveOverlayColor(colors.onPrimary, breath = 0f)
+        val brightTrack = sliderBufferingInactiveOverlayColor(colors.onPrimary, breath = 1f)
+        assertEquals(0.04f, dimTrack.alpha, 1e-2f)
+        assertEquals(0.24f, brightTrack.alpha, 1e-2f)
+    }
 }

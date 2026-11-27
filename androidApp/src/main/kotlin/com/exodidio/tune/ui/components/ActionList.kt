@@ -1,9 +1,11 @@
 package com.exodidio.tune.ui.components
 
+import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -12,17 +14,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.exodidio.tune.ui.theme.LocalTuneColors
@@ -40,9 +47,12 @@ enum class ActionListDividerStyle {
 data class ActionListItem(
     @StringRes val labelRes: Int,
     val leadingSymbol: String? = null,
+    @DrawableRes val leadingIconRes: Int? = null,
     val leadingIconTint: Color? = null,
+    val subtitle: String? = null,
     val trailingContent: (@Composable RowScope.() -> Unit)? = null,
     val onClick: (() -> Unit)? = null,
+    val key: Any? = null,
 )
 
 /** A vertical list of optional actions with adaptable leading and trailing content. */
@@ -73,9 +83,11 @@ private fun ColumnScope.ActionListItems(
     showTrailingDivider: Boolean = false,
 ) {
     items.forEachIndexed { index, item ->
-        ActionListRow(item = item, horizontalContentPadding = horizontalContentPadding)
-        if (index < items.lastIndex || showTrailingDivider) {
-            ActionListDivider(dividerStyle, horizontalContentPadding)
+        key(item.key ?: index) {
+            ActionListRow(item = item, horizontalContentPadding = horizontalContentPadding)
+            if (index < items.lastIndex || showTrailingDivider) {
+                ActionListDivider(dividerStyle, horizontalContentPadding)
+            }
         }
     }
 }
@@ -87,6 +99,8 @@ private fun ActionListRow(
 ) {
     val colors = LocalTuneColors.current
     val label = stringResource(item.labelRes)
+    val hasLeadingIcon = item.leadingSymbol != null || item.leadingIconRes != null
+    val iconTint = item.leadingIconTint ?: colors.textMain
     val clickModifier = item.onClick?.let { onClick ->
         Modifier.clickable(
             onClick = onClick,
@@ -101,25 +115,49 @@ private fun ActionListRow(
             .heightIn(min = 56.dp)
             .semantics(mergeDescendants = true) { contentDescription = label }
             .then(clickModifier)
-            .padding(horizontal = horizontalContentPadding),
+            .padding(
+                horizontal = horizontalContentPadding,
+                vertical = if (item.subtitle != null) 10.dp else 0.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        item.leadingSymbol?.let { symbol ->
-            MaterialSymbol(
-                symbol = symbol,
+        when {
+            item.leadingSymbol != null -> MaterialSymbol(
+                symbol = item.leadingSymbol,
                 contentDescription = null,
                 size = 20.dp,
-                tint = item.leadingIconTint ?: colors.textMain,
+                tint = iconTint,
+            )
+            item.leadingIconRes != null -> Icon(
+                painter = painterResource(item.leadingIconRes),
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = iconTint,
             )
         }
-        Text(
-            text = label,
+        Column(
             modifier = Modifier
                 .weight(1f)
-                .padding(start = if (item.leadingSymbol != null) 16.dp else 0.dp),
-            style = MaterialTheme.typography.bodyLarge,
-            color = colors.textMain,
-        )
+                .padding(start = if (hasLeadingIcon) 16.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = colors.textMain,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            item.subtitle?.takeIf { it.isNotBlank() }?.let { sub ->
+                Text(
+                    text = sub,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         when {
             item.trailingContent != null -> Row(content = item.trailingContent)
             item.onClick != null -> MaterialSymbol(

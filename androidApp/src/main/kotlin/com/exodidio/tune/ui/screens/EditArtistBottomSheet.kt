@@ -70,10 +70,8 @@ internal fun EditArtistBottomSheet(
         if (uri == null) { artwork = null; return@LaunchedEffect }
         val key = ArtworkThumbnailCache.cacheKey(uri.toString(), 336)
         ArtworkThumbnailCache.get(key)?.let { artwork = it; return@LaunchedEffect }
-        if (!ArtworkThumbnailCache.claimInFlight(key)) return@LaunchedEffect
-        var loaded: ImageBitmap? = null
-        try {
-            loaded = withContext(Dispatchers.IO) {
+        val loaded = runCatching {
+            ArtworkThumbnailCache.loadOrAwait(key) {
                 runCatching {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -85,17 +83,9 @@ internal fun EditArtistBottomSheet(
                         })
                     }?.asImageBitmap()
                 }.getOrNull()
-            }
-            if (loaded != null) {
-                ArtworkThumbnailCache.put(key, loaded)
-                artwork = loaded
-                // Idempotent: put() already clears the claim; release again for symmetry
-                // with the failure path and the playlist editor pattern.
-                ArtworkThumbnailCache.releaseInFlight(key)
-            }
-        } finally {
-            if (loaded == null) ArtworkThumbnailCache.releaseInFlight(key)
-        }
+            }.await()
+        }.getOrNull()
+        if (loaded != null) artwork = loaded
     }
     val existingArtwork = rememberArtworkThumbnail(artworkPath, targetPx = 336)
     TuneBottomSheet(

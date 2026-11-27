@@ -354,3 +354,7 @@ JavaScript / Node.js
 ## Bug 备忘录
 
 完整条款见 `.qoder/rules/memos.md`：发现或修复交互/动画/状态类 bug 时，在项目根目录 `memos/` 记录现象、根因与状态；备忘录只归档，用户未要求时不主动读取。
+
+## 新增依赖必须补 R8 keep 规则
+
+完整条款见 `.qoder/rules/r8-keep-rules.md`：带 `.so`/JNI/反射的依赖必须在同一笔提交里补 keep 规则；触及 native/反射的功能必须用 prod release 包实跑验证，只 compile/debug 通过不算完成。

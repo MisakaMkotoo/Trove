@@ -2,35 +2,32 @@ package com.exodidio.tune.sync
 
 import android.content.Context
 import com.exodidio.tune.R
+import com.exodidio.tune.net.TuneHttp
+import com.exodidio.tune.net.awaitResponse
+import com.exodidio.tune.net.executeCancellable
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.KeyStore
 import java.security.MessageDigest
-import java.security.SecureRandom
-import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
-import javax.net.ssl.HostnameVerifier
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManagerFactory
-import javax.net.ssl.X509TrustManager
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -47,6 +44,10 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import okhttp3.Call
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * 电脑音乐库接入：用主机现有的远程只读接口（/remote/pair、music:list、
@@ -63,8 +64,6 @@ object RemoteMusicLibrary {
     private const val REMOTE_PREFIX = "remote:"
     private const val CACHE_FILE = "remote-library-cache.json"
     private val cacheJson = Json { ignoreUnknownKeys = true }
-    private val pinnedCache =
-        java.util.concurrent.ConcurrentHashMap<String, Pair<SSLContext, X509TrustManager>>()
 
     @Serializable
     private data class CachedTrack(
@@ -227,24 +226,17 @@ object RemoteMusicLibrary {
         return Result.failure(last ?: IllegalStateException(context.getString(R.string.integration_sync_failed_generic)))
     }
 
-    private suspend fun probeBase(base: String, fingerprint: String): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun probeBase(base: String, fingerprint: String): Boolean =
         runCatching {
-            val connection = URL("$base/favicon.ico").openConnection() as HttpURLConnection
-            try {
-                applyPinnedTls(connection, fingerprint)
-                val timeout = when (kindOf(base)) {
-                    RemoteEndpointKind.Lan -> 2_000
-                    RemoteEndpointKind.Mesh -> 4_000
-                    else -> 5_000
-                }
-                connection.connectTimeout = timeout
-                connection.readTimeout = timeout
-                connection.responseCode in 200..399
-            } finally {
-                connection.disconnect()
+            val timeout = when (kindOf(base)) {
+                RemoteEndpointKind.Lan -> 2_000L
+                RemoteEndpointKind.Mesh -> 4_000L
+                else -> 5_000L
             }
+            val request = Request.Builder().url("$base/favicon.ico").get().build()
+            TuneHttp.pinnedClient(fingerprint, connectTimeoutMs = timeout, readTimeoutMs = timeout)
+                .executeCancellable(request) { it.code in 200..399 }
         }.getOrDefault(false)
-    }
 
     /**
      * 当前地址不通时，按 局域网 > 公网 > 组网、同类 HTTPS 优先 并行探测备用地址，
@@ -475,13 +467,13 @@ object RemoteMusicLibrary {
     }
 
     /** 上次同步的结果先垫进曲库，打开 App 立刻能看到电脑歌曲，后台再刷新。 */
-    fun restoreCached(context: Context) {
+    suspend fun restoreCached(context: Context) = withContext(Dispatchers.IO) {
         val file = File(context.filesDir, CACHE_FILE)
-        if (!file.isFile) return
+        if (!file.isFile) return@withContext
         val cached = runCatching {
             cacheJson.decodeFromString<CacheFile>(file.readText())
-        }.getOrNull() ?: return
-        if (cached.tracks.isEmpty()) return
+        }.getOrNull() ?: return@withContext
+        if (cached.tracks.isEmpty()) return@withContext
         val tracks = cached.tracks.map { track ->
             LibraryTrack(
                 id = track.id,
@@ -499,9 +491,7 @@ object RemoteMusicLibrary {
                 sortArtists = track.artists,
             )
         }
-        kotlinx.coroutines.runBlocking {
-            AndroidSyncRuntime.syncStore.setRemoteTracks(tracks)
-        }
+        AndroidSyncRuntime.syncStore.setRemoteTracks(tracks)
     }
 
     private fun saveCache(context: Context, tracks: List<LibraryTrack>) {
@@ -661,7 +651,7 @@ object RemoteMusicLibrary {
         result
     }
 
-    private fun downloadArtwork(config: Config, trackId: String, dir: File): String? {
+    private suspend fun downloadArtwork(config: Config, trackId: String, dir: File): String? {
         // 本地已有封面就别再问主机，否则每次启动都要把整库封面 RPC 一遍。
         val file = File(dir, "cover-${hash(trackId)}.img")
         if (file.isFile && file.length() > 0) return file.absolutePath
@@ -683,56 +673,44 @@ object RemoteMusicLibrary {
         }.getOrNull()
     }
 
-    private fun downloadFile(url: String, target: File, fingerprint: String): Boolean = runCatching {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            applyPinnedTls(connection, fingerprint)
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 30_000
-            connection.instanceFollowRedirects = true
-            if (connection.responseCode !in 200..299) return false
-            val temp = File(target.parentFile, target.name + ".part")
-            connection.inputStream.use { input ->
-                temp.outputStream().use { output -> input.copyTo(output) }
+    private suspend fun downloadFile(url: String, target: File, fingerprint: String): Boolean = runCatching {
+        val request = Request.Builder().url(url).get().build()
+        TuneHttp.pinnedClient(fingerprint, connectTimeoutMs = 15_000L, readTimeoutMs = 30_000L)
+            .executeCancellable(request) { response ->
+                if (!response.isSuccessful) return@executeCancellable false
+                val body = response.body ?: return@executeCancellable false
+                val temp = File(target.parentFile, target.name + ".part")
+                body.byteStream().use { input ->
+                    temp.outputStream().use { output -> input.copyTo(output) }
+                }
+                if (temp.length() <= 0) {
+                    temp.delete()
+                    return@executeCancellable false
+                }
+                temp.renameTo(target)
+                true
             }
-            if (temp.length() <= 0) {
-                temp.delete()
-                return false
-            }
-            temp.renameTo(target)
-            true
-        } finally {
-            connection.disconnect()
-        }
     }.getOrDefault(false)
 
-    private fun postJson(
+    private suspend fun postJson(
         url: String,
         body: String,
         token: String?,
         timeoutMs: Int,
         fingerprint: String = "",
     ): String {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            applyPinnedTls(connection, fingerprint)
-            connection.requestMethod = "POST"
-            connection.connectTimeout = timeoutMs
-            connection.readTimeout = timeoutMs
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (!token.isNullOrBlank()) {
-                connection.setRequestProperty("Authorization", "Bearer $token")
-            }
-            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val text = if (connection.responseCode in 200..299) {
-                connection.inputStream.bufferedReader().use { it.readText() }
-            } else {
-                connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            }
-            return text
-        } finally {
-            connection.disconnect()
+        val requestBody = body.toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = Request.Builder()
+            .url(url)
+            .apply { if (!token.isNullOrBlank()) header("Authorization", "Bearer $token") }
+            .post(requestBody)
+            .build()
+        return TuneHttp.pinnedClient(
+            fingerprint,
+            connectTimeoutMs = timeoutMs.toLong(),
+            readTimeoutMs = timeoutMs.toLong(),
+        ).executeCancellable(request) { response ->
+            response.body?.string().orEmpty()
         }
     }
 
@@ -749,6 +727,7 @@ object RemoteMusicLibrary {
             try {
                 return postJson(url, body, token, timeoutMs, fingerprint)
             } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 last = error
                 if (index < attempts - 1) delay(1_000L)
             }
@@ -756,94 +735,35 @@ object RemoteMusicLibrary {
         throw last ?: IllegalStateException("请求失败")
     }
 
-    private fun getJson(url: String, token: String, timeoutMs: Int, fingerprint: String): String {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            applyPinnedTls(connection, fingerprint)
-            connection.requestMethod = "GET"
-            connection.connectTimeout = timeoutMs
-            connection.readTimeout = timeoutMs
-            if (token.isNotBlank()) {
-                connection.setRequestProperty("Authorization", "Bearer $token")
-            }
-            return if (connection.responseCode in 200..299) {
-                connection.inputStream.bufferedReader().use { it.readText() }
-            } else {
-                ""
-            }
-        } finally {
-            connection.disconnect()
+    private suspend fun getJson(url: String, token: String, timeoutMs: Int, fingerprint: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
+            .get()
+            .build()
+        return TuneHttp.pinnedClient(
+            fingerprint,
+            connectTimeoutMs = timeoutMs.toLong(),
+            readTimeoutMs = timeoutMs.toLong(),
+        ).executeCancellable(request) { response ->
+            if (response.isSuccessful) response.body?.string().orEmpty() else ""
         }
     }
 
     /** 首次连接：用不校验证书的方式读公开的 /remote/tls，拿到指纹后再固定。 */
-    private fun fetchFingerprint(base: String): String = runCatching {
-        val connection = URL("${base.trimEnd('/')}/remote/tls").openConnection() as HttpsURLConnection
-        try {
-            val trustAll = object : X509TrustManager {
-                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    private suspend fun fetchFingerprint(base: String): String = runCatching {
+        val request = Request.Builder()
+            .url("${base.trimEnd('/')}/remote/tls")
+            .get()
+            .build()
+        TuneHttp.trustAllTlsClient(connectTimeoutMs = 10_000L, readTimeoutMs = 5_000L)
+            .executeCancellable(request) { response ->
+                if (!response.isSuccessful) return@executeCancellable ""
+                val text = response.body?.string().orEmpty()
+                Json.parseToJsonElement(text).jsonObject["fingerprint"]
+                    ?.jsonPrimitive?.contentOrNull.orEmpty()
             }
-            val context = SSLContext.getInstance("TLS").apply {
-                init(null, arrayOf(trustAll), SecureRandom())
-            }
-            connection.sslSocketFactory = context.socketFactory
-            connection.hostnameVerifier = HostnameVerifier { _, _ -> true }
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 5_000
-            if (connection.responseCode !in 200..299) return ""
-            val text = connection.inputStream.bufferedReader().use { it.readText() }
-            Json.parseToJsonElement(text).jsonObject["fingerprint"]
-                ?.jsonPrimitive?.contentOrNull.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
     }.getOrDefault("")
-
-    /** HTTPS 连接按固定指纹校验；HTTP 不处理。 */
-    internal fun applyPinnedTls(connection: HttpURLConnection, fingerprint: String) {
-        if (connection !is HttpsURLConnection || fingerprint.isBlank()) return
-        val (context, manager) = pinnedTls(fingerprint)
-        connection.sslSocketFactory = context.socketFactory
-        val fallback = HttpsURLConnection.getDefaultHostnameVerifier()
-        connection.hostnameVerifier = HostnameVerifier { host, session ->
-            runCatching {
-                val leaf = session.peerCertificates.firstOrNull() as? X509Certificate
-                leaf != null && fingerprintOf(leaf).equals(fingerprint, ignoreCase = true)
-            }.getOrDefault(false) || fallback.verify(host, session)
-        }
-    }
-
-    private fun fingerprintOf(certificate: X509Certificate): String =
-        MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
-            .joinToString(":") { "%02X".format(it) }
-
-    internal fun pinnedTls(fingerprint: String): Pair<SSLContext, X509TrustManager> {
-        pinnedCache[fingerprint]?.let { return it }
-        val system = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-            .apply { init(null as KeyStore?) }
-            .trustManagers.filterIsInstance<X509TrustManager>()
-            .first()
-        val manager = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                throw CertificateException("不接受客户端证书")
-            }
-
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                val certs = chain ?: emptyArray()
-                val leaf = certs.firstOrNull() ?: throw CertificateException("证书链为空")
-                if (fingerprintOf(leaf).equals(fingerprint, ignoreCase = true)) return
-                system.checkServerTrusted(certs, authType)
-            }
-
-            override fun getAcceptedIssuers(): Array<X509Certificate> = system.acceptedIssuers
-        }
-        val context = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(manager), SecureRandom())
-        }
-        return (context to manager).also { pinnedCache[fingerprint] = it }
-    }
 
     /** 主机的多歌手/流派字段是拼接字符串，按常见分隔符拆开。 */
     private fun splitNames(value: String): List<String> =
@@ -873,27 +793,32 @@ object RemoteMusicLibrary {
  * 按 URL 加锁而不是全局锁：连续切歌时各首互不排队；[isStale] 变 true 立刻放弃，
  * 避免用户快速点歌时一直在等上一首下完。
  */
-internal fun ensureRemoteAudioFile(
+internal suspend fun ensureRemoteAudioFile(
     context: Context,
     url: String,
     isStale: () -> Boolean = { false },
-): String? {
-    RemoteAudioCache.cached(context, url)?.let { return it.absolutePath }
-    if (isStale()) return null
+): String? = withContext(Dispatchers.IO) {
+    RemoteAudioCache.cached(context, url)?.let { return@withContext it.absolutePath }
+    if (isStale()) return@withContext null
     val dir = RemoteAudioCache.dir(context)
     val target = RemoteAudioCache.target(context, url)
     val key = target.name
-    val lock = downloadLocks.computeIfAbsent(key) { Any() }
+    val gate = synchronized(downloadGateMapLock) {
+        downloadGates.getOrPut(key) { DownloadGate() }.also { it.waiters++ }
+    }
     try {
-        synchronized(lock) {
-            RemoteAudioCache.cached(context, url)?.let { return it.absolutePath }
-            if (isStale()) return null
+        gate.mutex.withLock {
+            RemoteAudioCache.cached(context, url)?.let { return@withLock it.absolutePath }
+            if (isStale()) return@withLock null
             val saved = downloadAudio(url, dir, target, isStale, RemoteMusicLibrary.fingerprint(context))
             if (saved != null) RemoteAudioCache.trim(context)
-            return saved
+            saved
         }
     } finally {
-        downloadLocks.remove(key, lock)
+        synchronized(downloadGateMapLock) {
+            gate.waiters--
+            if (gate.waiters <= 0) downloadGates.remove(key, gate)
+        }
     }
 }
 
@@ -901,89 +826,105 @@ internal fun ensureRemoteAudioFile(
 internal fun remoteAudioCached(context: Context, url: String): Boolean =
     RemoteAudioCache.cached(context, url) != null
 
-private val downloadLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+private class DownloadGate(
+    val mutex: Mutex = Mutex(),
+    var waiters: Int = 0,
+)
+
+private val downloadGateMapLock = Any()
+private val downloadGates = HashMap<String, DownloadGate>()
 
 /**
- * 正在传输音频的连接。切歌时直接 disconnect，让阻塞中的 read 立刻抛错退出——
+ * 正在传输音频的请求。切歌时直接 cancel，让阻塞中的 read 立刻抛错退出——
  * 只靠 isStale 标记的话，要等一次网络读取返回（最长 readTimeout）才能停下，
  * 用户连点几首就会全部排在后面等下载。
  */
-private val activeAudioConnections: MutableSet<HttpURLConnection> =
+private val activeAudioCalls: MutableSet<Call> =
     java.util.concurrent.ConcurrentHashMap.newKeySet()
 
 internal fun cancelRemoteAudioDownloads() {
-    activeAudioConnections.forEach { connection -> runCatching { connection.disconnect() } }
-    activeAudioConnections.clear()
+    activeAudioCalls.forEach { call -> runCatching { call.cancel() } }
+    activeAudioCalls.clear()
 }
 
 /** 整首下载：失败退避重试 3 次，已下载的部分用 Range 续传。 */
-private fun downloadAudio(
+private suspend fun downloadAudio(
     url: String,
     dir: File,
     target: File,
     isStale: () -> Boolean,
     fingerprint: String,
-): String? {
+): String? = withContext(Dispatchers.IO) {
     val temp = File(dir, target.name + ".part")
     val delays = longArrayOf(1_000L, 3_000L)
+    val ctx = currentCoroutineContext()
+    val client = TuneHttp.pinnedClient(fingerprint, connectTimeoutMs = 5_000L, readTimeoutMs = 10_000L)
     for (attempt in 0 until 3) {
-        if (isStale()) return null
+        ctx.ensureActive()
+        if (isStale()) return@withContext null
         val existing = if (temp.isFile) temp.length() else 0L
         try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            val request = Request.Builder()
+                .url(url)
+                .apply { if (existing > 0) header("Range", "bytes=$existing-") }
+                .get()
+                .build()
+            val call = client.newCall(request)
+            val cancelHook = ctx[Job]?.invokeOnCompletion { cause ->
+                if (cause != null) call.cancel()
+            }
+            activeAudioCalls.add(call)
             try {
-                RemoteMusicLibrary.applyPinnedTls(connection, fingerprint)
-                if (existing > 0) {
-                    connection.setRequestProperty("Range", "bytes=$existing-")
-                }
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 10_000
-                activeAudioConnections.add(connection)
-                val code = connection.responseCode
-                if (code == 416) {
-                    temp.delete()
-                    continue
-                }
-                if (code !in 200..299) {
-                    if (attempt >= 2) return null
-                    Thread.sleep(delays[minOf(attempt, delays.size - 1)])
-                    continue
-                }
-                val append = existing > 0 && code == 206
-                if (!append) temp.delete()
-                var aborted = false
-                connection.inputStream.use { input ->
-                    java.io.FileOutputStream(temp, append).use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        while (true) {
-                            if (isStale()) {
-                                aborted = true
-                                break
+                call.awaitResponse().use { response ->
+                    val code = response.code
+                    if (code == 416) {
+                        temp.delete()
+                        return@use
+                    }
+                    if (!response.isSuccessful) {
+                        if (attempt >= 2) return@withContext null
+                        delay(delays[minOf(attempt, delays.size - 1)])
+                        return@use
+                    }
+                    val body = response.body ?: return@use
+                    val append = existing > 0 && code == 206
+                    if (!append) temp.delete()
+                    var aborted = false
+                    body.byteStream().use { input ->
+                        java.io.FileOutputStream(temp, append).use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                if (!ctx.isActive || isStale()) {
+                                    aborted = true
+                                    break
+                                }
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                output.write(buffer, 0, read)
                             }
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            output.write(buffer, 0, read)
                         }
                     }
-                }
-                // 用户切歌中断：保留 .part，下次点回来还能续传。
-                if (aborted) return null
-                if (temp.length() <= 0) {
+                    // 用户切歌中断：保留 .part，下次点回来还能续传。
+                    if (aborted) return@withContext null
+                    if (temp.length() <= 0) {
+                        temp.delete()
+                        return@withContext null
+                    }
+                    if (temp.renameTo(target)) return@withContext target.absolutePath
                     temp.delete()
-                    return null
                 }
-                if (temp.renameTo(target)) return target.absolutePath
-                temp.delete()
             } finally {
-                activeAudioConnections.remove(connection)
-                connection.disconnect()
+                cancelHook?.dispose()
+                activeAudioCalls.remove(call)
+                call.cancel()
             }
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             // 被切歌断连导致的异常：不要再退避重试，直接让调用方走取消分支。
-            if (isStale()) return null
-            if (attempt >= 2) return null
-            Thread.sleep(delays[minOf(attempt, delays.size - 1)])
+            if (!ctx.isActive || isStale()) return@withContext null
+            if (attempt >= 2) return@withContext null
+            delay(delays[minOf(attempt, delays.size - 1)])
         }
     }
-    return null
+    null
 }

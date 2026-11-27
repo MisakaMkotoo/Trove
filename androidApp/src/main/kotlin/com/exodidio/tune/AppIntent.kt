@@ -1,6 +1,9 @@
 package com.exodidio.tune
 
+import com.exodidio.tune.settings.ControlStyle
+import com.exodidio.tune.settings.IconStyle
 import com.exodidio.tune.settings.PlayerTheme
+import com.exodidio.tune.settings.ThemeAccentColor
 import com.exodidio.tune.settings.ThemeMode
 
 /** User-initiated inputs accepted by the app shell. */
@@ -12,22 +15,33 @@ sealed interface AppIntent {
     /** 压入当前 tab 的栈，不切到页面固有目的地（首页打开歌单后返回仍回首页）。 */
     data class OpenPageHere(val page: AppStackPage) : AppIntent
 
-    data class OpenAlbumDetails(val albumId: String) : AppIntent
+    data class OpenAlbumDetails(val albumId: String, val returnToPlayer: Boolean = false) : AppIntent
 
     data class OpenPlaylistDetails(val playlistId: String) : AppIntent
 
-    data class OpenArtistDetails(val artistId: String) : AppIntent
+    data class OpenArtistDetails(val artistId: String, val returnToPlayer: Boolean = false) : AppIntent
+
+    data class OpenFolderDetails(val folderId: String) : AppIntent
 
     data class OpenGenreDetails(val genreId: String) : AppIntent
 
     data class OpenComposerDetails(val composerId: String) : AppIntent
 
-    data class OpenSimilarSongs(val trackId: String) : AppIntent
+    data class OpenSimilarSongs(val trackId: String, val returnToPlayer: Boolean = false) : AppIntent
 
     /** 在线实体页：复用播放列表界面，压在来源标签栈里。 */
-    data class OpenNeteaseArtist(val artistId: Long, val name: String) : AppIntent
+    data class OpenNeteaseArtist(
+        val artistId: Long,
+        val name: String,
+        val returnToPlayer: Boolean = false,
+    ) : AppIntent
 
-    data class OpenNeteaseAlbum(val albumId: Long, val name: String, val coverUrl: String) : AppIntent
+    data class OpenNeteaseAlbum(
+        val albumId: Long,
+        val name: String,
+        val coverUrl: String,
+        val returnToPlayer: Boolean = false,
+    ) : AppIntent
 
     data object NavigateBack : AppIntent
 
@@ -65,6 +79,16 @@ sealed interface AppIntent {
     /** 滑动时是否合并底栏与迷你播放条；关闭后两者始终分开，内容底部留白随之增加。 */
     data class SetMergeBottomBars(val enabled: Boolean) : AppIntent
 
+    data class SetIconStyle(val style: IconStyle) : AppIntent
+
+    data class SetControlStyle(val style: ControlStyle) : AppIntent
+
+    data class SetLiquidGlassBlurDp(val blurDp: Float) : AppIntent
+
+    data class SetAccentColor(val accentColor: ThemeAccentColor) : AppIntent
+
+    data class SetMergeMineAndLibrary(val enabled: Boolean) : AppIntent
+
     /** User picked the "Import M3U playlist" action. */
     data object ImportM3u : AppIntent
 
@@ -85,4 +109,7 @@ sealed interface AppEffect {
 
     /** Launch the system file picker to export an M3U playlist. */
     data class PickM3uExport(val playlistId: String) : AppEffect
+
+    /** Restore the full-screen player after popping back from a player-initiated detail page. */
+    data object RestoreFullScreenPlayer : AppEffect
 }

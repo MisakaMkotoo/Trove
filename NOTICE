@@ -18,6 +18,11 @@ substantially reworked in this repository.
 - **OpenSSL 3.0.x** — Apache-2.0.
   - Source: <https://github.com/openssl/openssl>.
   - License text: `licenses/Apache-2.0.txt`.
+- **ONNX Runtime 1.32.0** — MIT, built from source with a reduced operator and
+  dtype configuration for CPU inference (`libonnxruntime.so`,
+  `libonnxruntime4j_jni.so`).
+  - Exact build configuration: `scripts/build-onnxruntime-android.sh` and
+    `scripts/onnxruntime-required-ops.config`.
 
 ## Third-party libraries
 
@@ -30,8 +35,20 @@ All of the following are distributed under Apache-2.0 unless noted
 - Kotlin standard library, kotlinx-coroutines, kotlinx-serialization.
 - Haze (`dev.chrisbanes.haze`), Vico (`com.patrykandpatrick.vico`),
   Reorderable (`sh.calvin.reorderable`), ZXing Core (`com.google.zxing`).
+- **AndroidLiquidGlass** (`io.github.kyant0:backdrop`, `io.github.kyant0:shapes`,
+  `io.github.kyant0:capsule`) by Kyant0 (<https://github.com/Kyant0/AndroidLiquidGlass>,
+  Apache-2.0).
+- **Glasmio** by NEORUAA (<https://github.com/NEORUAA/Glasmio>, Apache-2.0) —
+  analytical liquid-glass spring oscillator, acceleration-driven `loupeFlex`
+  deformation with leading-edge drift, size-dependent UIKit platter puff,
+  `0.05` compliance drag resistance, and exterior rim shadow / hairline contour
+  adapted in `TuneNavigationTabMotion.kt`, `TuneLiquidButtonPhysics.kt`,
+  `TuneGlassEdgeShadow.kt`, `FloatingNavigationBar.kt`, and `TuneSegmentedTabBar.kt`.
 - Material Symbols icon font (Google), bundled at
   `androidApp/src/main/res/font/material_symbols_rounded.ttf`.
+- SF Pro icon font subset (`sf_pro_vf.ttf`, `sf_pro_subset.ttf`) and icon path
+  mappings adapted from **MeloX-Android** (Apple SF Symbols), optional icon theme
+  alongside Material Symbols.
 
 Additional licenses:
 
@@ -68,3 +85,12 @@ Additional licenses:
 - Application base (via upstream): `misa198/airmedy` (GPLv3).
 - Artist-screen UI elements and transitions adapted from
   `kushagrasinghx/BitChord` (GPLv3).
+- Lyric word-timing alignment (ONNX forced alignment pipeline) adapted from
+  **MeloX-Android** by lladlam (<https://github.com/lladlam/MeloX-Android>,
+  GPLv3), including the Japanese G2P frontend built on a vendored
+  **OpenJTalk** text frontend (r9y9/open_jtalk v1.11.1, Modified BSD; MeCab,
+  Modified BSD — see `androidApp/src/main/cpp/third_party/open_jtalk/COPYING.*`).
+- Alignment models are downloaded at runtime from the MeloX-AutoSync release
+  catalog (`lladlam/MeloX-AutoSync`, models Apache-2.0). The OpenJTalk NAIST
+  dictionary is downloaded at runtime and licensed separately by NAIST.
+  No model weights or dictionaries are redistributed in this APK.

@@ -7,7 +7,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-private val Context.libraryAlbumsPreferencesDataStore by preferencesDataStore(name = "library_albums")
+internal val Context.libraryAlbumsPreferencesDataStore by preferencesDataStore(name = "library_albums")
 private val AlbumLayoutModeKey = stringPreferencesKey("layout_mode")
 
 internal interface LibraryAlbumsLayoutStore {

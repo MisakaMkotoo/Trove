@@ -1,6 +1,7 @@
 package com.exodidio.tune.netease
 
 import android.content.Context
+import android.util.Log
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
@@ -53,7 +54,7 @@ internal object NeteaseImageStore {
                         val file = target.takeIf { result.isSuccess && it.isFile && it.length() > 0 }
                         if (file == null) {
                             negative[url] = System.currentTimeMillis()
-                            System.err.println("IMAGE download failed url=$url")
+                            Log.w("NeteaseImage", "download failed")
                         } else {
                             NeteaseImageCache.trim(app)
                         }

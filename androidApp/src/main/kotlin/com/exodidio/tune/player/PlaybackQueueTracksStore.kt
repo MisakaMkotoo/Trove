@@ -1,6 +1,7 @@
 package com.exodidio.tune.player
 
 import android.content.Context
+import android.util.Log
 import com.exodidio.tune.sync.LibrarySyncProtocol
 import com.exodidio.tune.sync.LibraryTrack
 import com.exodidio.tune.sync.writeTextAtomically
@@ -40,7 +41,7 @@ internal object PlaybackQueueTracksStore {
         val file = File(context.filesDir, FILE_NAME)
         if (!file.isFile) return emptyList()
         val payload = LibrarySyncProtocol.json.decodeFromString<List<QueueTrackData>>(file.readText())
-        System.err.println("QUEUETRACKS read count=${payload.size}")
+        Log.d("QueueTracks", "read count=${payload.size}")
         payload.map { data ->
             LibraryTrack(
                 id = data.id,
@@ -63,7 +64,7 @@ internal object PlaybackQueueTracksStore {
             )
         }
     }.onFailure {
-        System.err.println("QUEUETRACKS read failed: ${it.message}")
+        Log.w("QueueTracks", "read failed: ${it.message}")
     }.getOrDefault(emptyList())
 
     fun write(context: Context, tracks: List<LibraryTrack>) {
@@ -92,9 +93,9 @@ internal object PlaybackQueueTracksStore {
             File(context.filesDir, FILE_NAME).writeTextAtomically(
                 LibrarySyncProtocol.json.encodeToString(payload),
             )
-            System.err.println("QUEUETRACKS write count=${payload.size}")
+            Log.d("QueueTracks", "write count=${payload.size}")
         }.onFailure {
-            System.err.println("QUEUETRACKS write failed: ${it.message}")
+            Log.w("QueueTracks", "write failed: ${it.message}")
         }
     }
 }

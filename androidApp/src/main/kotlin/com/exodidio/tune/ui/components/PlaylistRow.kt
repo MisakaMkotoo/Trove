@@ -1,10 +1,16 @@
 package com.exodidio.tune.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -26,7 +32,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -49,23 +57,64 @@ internal fun PlaylistRow(
     modifier: Modifier = Modifier,
     artworkUrl: String? = null,
     syncFailed: Boolean = false,
+    isSmart: Boolean = false,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = {},
 ) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressTint by animateColorAsState(
+        targetValue = if (pressed && !reduceMotion) colors.textMain.copy(alpha = 0.05f) else Color.Transparent,
+        animationSpec = if (reduceMotion) snap() else tween(140, easing = FastOutSlowInEasing),
+        label = "playlist-row-press-tint",
+    )
     Row(
-        modifier = modifier.fillMaxWidth().combinedClickable(role = Role.Button, onClick = onClick, onLongClick = onLongClick).padding(start = 24.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .background(pressTint)
+            .combinedClickable(
+                role = Role.Button,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            .padding(start = 24.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         PlaylistArtwork(playlistId, artworkPaths, artworkUrl = artworkUrl)
         Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-            Text(
-                text = name,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = colors.textMain,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.textMain,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (isSmart) {
+                    MaterialSymbol(
+                        symbol = MaterialSymbols.Bolt,
+                        contentDescription = stringResource(R.string.smart_playlist_badge),
+                        size = 15.dp,
+                        tint = colors.primary,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+            }
+            if (isSmart) {
+                Text(
+                    text = stringResource(R.string.smart_playlist_badge),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.primary,
+                    maxLines = 1,
+                )
+            }
             if (syncFailed) {
                 Text(
                     text = stringResource(R.string.playlist_sync_failed),
@@ -128,7 +177,7 @@ internal fun PlaylistArtwork(
                 modifier = Modifier.fillMaxSize(),
                 fallback = {
                     MaterialSymbol(
-                        symbol = if (playlistId == "favorites") MaterialSymbols.Favorite else MaterialSymbols.QueueMusic,
+                        symbol = if (playlistId == "favorites") MaterialSymbols.Library else MaterialSymbols.QueueMusic,
                         contentDescription = null,
                         size = 30.dp,
                         tint = colors.textMuted,
@@ -137,7 +186,7 @@ internal fun PlaylistArtwork(
                 },
             )
             else -> MaterialSymbol(
-                symbol = if (playlistId == "favorites") MaterialSymbols.Favorite else MaterialSymbols.QueueMusic,
+                symbol = if (playlistId == "favorites") MaterialSymbols.Library else MaterialSymbols.QueueMusic,
                 contentDescription = null,
                 size = 30.dp,
                 tint = colors.textMuted,
@@ -157,5 +206,8 @@ private fun ColumnScope.PlaylistArtworkPair(paths: List<String>, targetPx: Int) 
 @Composable
 private fun PlaylistArtworkImage(path: String, modifier: Modifier, targetPx: Int) {
     val bitmap = rememberArtworkThumbnail(path, targetPx = targetPx)
-    if (bitmap != null) Image(bitmap, null, modifier = modifier, contentScale = ContentScale.Crop)
+    val bitmapAlpha = rememberArtworkFadeAlpha(path to targetPx, bitmap != null)
+    if (bitmap != null) {
+        Image(bitmap, null, modifier = modifier.alpha(bitmapAlpha), contentScale = ContentScale.Crop)
+    }
 }

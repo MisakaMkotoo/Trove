@@ -1,11 +1,17 @@
 package com.exodidio.tune.ui.components
 
 import androidx.annotation.StringRes
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,7 +29,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.DpOffset
@@ -35,6 +47,9 @@ data class SelectionOption<T>(
     val value: T,
     @StringRes val labelRes: Int? = null,
     val label: String? = null,
+    /** 收起态右侧显示用的短文案；为空时回落到 labelRes。下拉列表仍显示完整 labelRes。 */
+    @StringRes val shortLabelRes: Int? = null,
+    val shortLabel: String? = null,
 )
 
 @Composable
@@ -103,7 +118,10 @@ private fun <T> SelectionValue(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = option?.label.orEmpty().ifBlank { option?.labelRes?.let { stringResource(it) }.orEmpty() },
+                text = option?.shortLabel.orEmpty()
+                    .ifBlank { option?.shortLabelRes?.let { stringResource(it) }.orEmpty() }
+                    .ifBlank { option?.label.orEmpty() }
+                    .ifBlank { option?.labelRes?.let { stringResource(it) }.orEmpty() },
                 style = MaterialTheme.typography.bodyLarge,
                 color = colors.textMuted,
             )
@@ -125,15 +143,47 @@ private fun <T> SelectionMenu(
     onOptionSelected: (T) -> Unit,
 ) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
+    val hoverState = LocalPopupMenuHoverState.current
+    val dark = colors.background.luminance() < 0.5f
+    val hoverPillColor = if (dark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.08f)
+    val pillShape = RoundedCornerShape(14.dp)
 
     androidx.compose.foundation.layout.Column(
-        modifier = Modifier.width(252.dp).heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+        modifier = Modifier
+            .width(252.dp)
+            .heightIn(max = 420.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(vertical = 6.dp),
     ) {
         options.forEachIndexed { index, option ->
             val selected = option.value == selectedValue
+            var rowBounds by remember(index) { mutableStateOf<Rect?>(null) }
+            val isHovered = hoverState?.pointerRootPosition != null &&
+                rowBounds?.contains(hoverState.pointerRootPosition!!) == true
+            val animatedBg by animateColorAsState(
+                targetValue = if (isHovered) hoverPillColor else Color.Transparent,
+                animationSpec = if (reduceMotion) snap() else tween(durationMillis = 120),
+                label = "selection-row-hover-bg",
+            )
+            val hoverScale by animateFloatAsState(
+                targetValue = if (isHovered && !reduceMotion) 1.02f else 1f,
+                animationSpec = if (reduceMotion) snap() else spring(dampingRatio = 0.7f, stiffness = 460f),
+                label = "selection-row-hover-scale",
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = 6.dp)
+                    .onGloballyPositioned { coords ->
+                        if (coords.isAttached) rowBounds = coords.boundsInRoot()
+                    }
+                    .graphicsLayer {
+                        scaleX = hoverScale
+                        scaleY = hoverScale
+                    }
+                    .clip(pillShape)
+                    .background(animatedBg, pillShape)
                     .heightIn(min = 44.dp)
                     .selectable(
                         selected = selected,
@@ -142,7 +192,7 @@ private fun <T> SelectionMenu(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     )
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (selected) {
@@ -166,9 +216,9 @@ private fun <T> SelectionMenu(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 46.dp, end = 16.dp)
-                        .heightIn(min = 1.dp)
-                        .background(colors.borderGlass, RectangleShape),
+                        .padding(start = 46.dp, end = 16.dp, top = 2.dp, bottom = 2.dp)
+                        .height(0.5.dp)
+                        .background(colors.borderGlass.copy(alpha = 0.55f)),
                 )
             }
         }

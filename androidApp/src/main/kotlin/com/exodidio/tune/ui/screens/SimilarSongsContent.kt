@@ -28,6 +28,7 @@ import com.exodidio.tune.player.AndroidPlaybackRuntime
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.player.PlaybackRequest
 import com.exodidio.tune.sync.LibraryTrack
+import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
 import com.exodidio.tune.ui.components.TrackContextMenu
 import com.exodidio.tune.ui.components.TrackContextMenuActions
 import com.exodidio.tune.ui.components.TrackRow
@@ -40,6 +41,8 @@ internal fun SimilarSongsContent(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     playbackQueue: PlaybackQueueSnapshot = PlaybackQueueSnapshot(),
+    onTrackFavoriteToggle: (LibraryTrack, Boolean) -> Unit = { _, _ -> },
+    onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit = {},
 ) {
     val context = LocalContext.current
     val colors = LocalTuneColors.current
@@ -95,9 +98,13 @@ internal fun SimilarSongsContent(
                 playbackQueue = playbackQueue,
                 onPlayNext = { item -> AndroidPlaybackRuntime.controller().playNext(item.id) },
                 onAddToQueue = { item -> AndroidPlaybackRuntime.controller().append(listOf(item.id)) },
+                onFavoriteChange = onTrackFavoriteToggle,
+                onBottomSheetRequested = onTrackContextBottomSheet,
                 actions = TrackContextMenuActions(
-                    favorite = false,
-                    addToPlaylist = false,
+                    favorite = true,
+                    neteaseLike = true,
+                    allowNeteasePlaylists = true,
+                    addToPlaylist = true,
                     goToAlbum = true,
                     goToArtists = true,
                     hide = false,

@@ -47,9 +47,142 @@ import com.patrykandpatrick.vico.compose.pie.PieSize
 import com.patrykandpatrick.vico.compose.pie.data.PieChartModelProducer
 import com.patrykandpatrick.vico.compose.pie.data.pieSeries
 import com.patrykandpatrick.vico.compose.pie.rememberPieChart
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
+import com.exodidio.tune.R
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
 private const val ChartAnimationMillis = 400
+
+@Composable
+internal fun InsightHeatmapGrid(
+    state: InsightHeatmapState,
+    selectedDate: String?,
+    onSelectDate: (String) -> Unit,
+    description: String,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTuneColors.current
+    val weeks = state.weeks.coerceAtLeast(1)
+    val levelColors = listOf(
+        colors.borderGlass.copy(alpha = 0.35f),
+        colors.primary.copy(alpha = 0.25f),
+        colors.primary.copy(alpha = 0.48f),
+        colors.primary.copy(alpha = 0.74f),
+        colors.primary,
+    )
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val density = LocalDensity.current
+            val gapDp = 3.dp
+            val cellDp = ((maxWidth - gapDp * (weeks - 1)) / weeks).coerceIn(6.dp, 16.dp)
+            val gridHeight = cellDp * 7 + gapDp * 6
+            val cellPx = with(density) { cellDp.toPx() }
+            val gapPx = with(density) { gapDp.toPx() }
+            val stepPx = cellPx + gapPx
+            val radiusPx = with(density) { 2.5.dp.toPx() }
+            val strokePx = with(density) { 1.5.dp.toPx() }
+
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(gridHeight)
+                    .semantics { contentDescription = description }
+                    .pointerInput(state.cells, weeks, stepPx) {
+                        detectTapGestures { offset ->
+                            val col = (offset.x / stepPx).toInt().coerceIn(0, weeks - 1)
+                            val row = (offset.y / stepPx).toInt().coerceIn(0, 6)
+                            val index = col * 7 + row
+                            val cell = state.cells.getOrNull(index)
+                            if (cell != null && !cell.inFuture) {
+                                onSelectDate(cell.dateText)
+                            }
+                        }
+                    },
+            ) {
+                state.cells.forEachIndexed { index, cell ->
+                    val col = index / 7
+                    val row = index % 7
+                    val topLeft = Offset(col * stepPx, row * stepPx)
+                    val cellColor = if (cell.inFuture) {
+                        colors.borderGlass.copy(alpha = 0.14f)
+                    } else {
+                        levelColors[cell.level.coerceIn(0, 4)]
+                    }
+                    drawRoundRect(
+                        color = cellColor,
+                        topLeft = topLeft,
+                        size = Size(cellPx, cellPx),
+                        cornerRadius = CornerRadius(radiusPx, radiusPx),
+                    )
+                    if (!cell.inFuture && cell.dateText == selectedDate) {
+                        drawRoundRect(
+                            color = colors.textMain,
+                            topLeft = topLeft,
+                            size = Size(cellPx, cellPx),
+                            cornerRadius = CornerRadius(radiusPx, radiusPx),
+                            style = Stroke(width = strokePx),
+                        )
+                    }
+                }
+            }
+        }
+        val selectedCell = selectedDate?.let { target -> state.cells.firstOrNull { it.dateText == target } }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val detailText = when {
+                selectedCell == null -> stringResource(R.string.insight_heatmap_subtitle, state.activeDays)
+                selectedCell.listenedSeconds > 0 || selectedCell.plays > 0 -> stringResource(
+                    R.string.insight_heatmap_day_detail,
+                    selectedCell.dateText,
+                    formatDuration(selectedCell.listenedSeconds),
+                    selectedCell.plays,
+                )
+                else -> stringResource(R.string.insight_heatmap_day_empty, selectedCell.dateText)
+            }
+            Text(
+                text = detailText,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(stringResource(R.string.insight_heatmap_less), style = MaterialTheme.typography.labelSmall, color = colors.textMuted)
+                levelColors.forEach { shade ->
+                    Box(
+                        Modifier
+                            .size(9.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(shade)
+                            .border(0.5.dp, colors.borderGlass.copy(alpha = 0.2f), RoundedCornerShape(2.dp)),
+                    )
+                }
+                Text(stringResource(R.string.insight_heatmap_more), style = MaterialTheme.typography.labelSmall, color = colors.textMuted)
+            }
+        }
+    }
+}
 
 @Composable
 internal fun InsightBarChart(points: List<InsightPoint>, description: String, modifier: Modifier = Modifier) {

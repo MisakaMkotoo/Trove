@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -64,6 +65,9 @@ fun TuneTextField(
     enabled: Boolean = true,
     trailingContent: (@Composable RowScope.() -> Unit)? = null,
     onDone: () -> Unit = {},
+    keyboardType: KeyboardType = KeyboardType.Text,
+    imeAction: ImeAction = ImeAction.Done,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
     val colors = LocalTuneColors.current
     val focusManager = LocalFocusManager.current
@@ -87,7 +91,8 @@ fun TuneTextField(
         singleLine = true,
         textStyle = TextStyle(fontSize = size.textSize.sp, fontWeight = FontWeight.Medium, color = colors.textMain),
         cursorBrush = SolidColor(colors.primary),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Done),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
+        visualTransformation = visualTransformation,
         keyboardActions = KeyboardActions(onDone = {
             focusManager.clearFocus()
             onDone()

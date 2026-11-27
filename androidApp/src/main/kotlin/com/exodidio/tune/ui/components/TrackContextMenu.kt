@@ -12,9 +12,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,8 +32,10 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
@@ -38,6 +43,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import com.exodidio.tune.R
+import com.exodidio.tune.netease.NeteaseRepository
 import com.exodidio.tune.player.AndroidPlaybackRuntime
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.sync.AndroidSyncRuntime
@@ -45,6 +51,7 @@ import com.exodidio.tune.sync.LibraryTrack
 import com.exodidio.tune.sync.LibraryPlaylist
 import com.exodidio.tune.sync.LibrarySyncProtocol
 import com.exodidio.tune.sync.metadataObject
+import com.exodidio.tune.ui.screens.NeteasePlaylistEditorBottomSheet
 import com.exodidio.tune.ui.screens.isFavoriteOf
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
@@ -54,8 +61,12 @@ data class TrackContextMenuActions(
     val playNext: Boolean = true,
     val addToQueue: Boolean = true,
     val trackInfo: Boolean = true,
-    val findLyrics: Boolean = true,
+    val findLyrics: Boolean = false,
+    val lyricsControl: Boolean = false,
+    val comments: Boolean = true,
     val favorite: Boolean = true,
+    val neteaseLike: Boolean = false,
+    val allowNeteasePlaylists: Boolean = false,
     val addToPlaylist: Boolean = true,
     val goToAlbum: Boolean = true,
     val goToArtists: Boolean = true,
@@ -119,7 +130,13 @@ internal fun trackContextArtists(track: LibraryTrack): List<TrackContextArtist> 
 sealed interface TrackContextBottomSheetRequest {
     data class Info(val track: LibraryTrack) : TrackContextBottomSheetRequest
     data class FindLyrics(val track: LibraryTrack) : TrackContextBottomSheetRequest
-    data class Playlist(val trackIds: List<String>, val addOnly: Boolean = false) : TrackContextBottomSheetRequest
+    data class LyricsControl(val track: LibraryTrack) : TrackContextBottomSheetRequest
+    data class Comments(val track: LibraryTrack) : TrackContextBottomSheetRequest
+    data class Playlist(
+        val trackIds: List<String>,
+        val addOnly: Boolean = false,
+        val allowNeteasePlaylists: Boolean = false,
+    ) : TrackContextBottomSheetRequest
     data class Artists(val artists: List<TrackContextArtist>) : TrackContextBottomSheetRequest
 }
 
@@ -179,17 +196,26 @@ fun TrackContextMenu(
         trackContextQueueAvailability(track.id, playbackQueue)
     }
     val metadata = remember(track.metadataJson) { track.metadataObject() }
-    val favorite = remember(metadata) { isFavoriteOf(metadata) }
+    val storeFavoriteIds by AndroidSyncRuntime.syncStore.favoriteIds.collectAsStateWithLifecycle()
+    val storeFavoriteOverrides by AndroidSyncRuntime.syncStore.favoriteOverrides.collectAsStateWithLifecycle()
+    val favorite = remember(metadata, storeFavoriteIds, storeFavoriteOverrides, track.id) {
+        storeFavoriteOverrides[track.id] ?: (track.id in storeFavoriteIds || isFavoriteOf(metadata))
+    }
+    val neteaseSongId = remember(track.id) {
+        if (actions.neteaseLike) NeteaseRepository.songIdForTrack(track.id) else null
+    }
+    val neteaseLikedIds by NeteaseRepository.likedSongIds.collectAsStateWithLifecycle()
+    val neteaseLiked = neteaseSongId != null && neteaseSongId in neteaseLikedIds
     val moodRadio = LocalMoodRadioMenuActions.current
     val showMoodRadio = actions.moodRadio || track.id in moodRadio.eligibleTrackIds
     val similarMenu = LocalSimilarSongsMenuActions.current
     val showSimilarSongs = actions.similarSongs && similarMenu.available && similarMenu.isAvailable(track.id)
     val neteaseEntityActions = LocalNeteaseEntityMenuActions.current
     val neteaseArtistId = remember(track.metadataJson) {
-        com.exodidio.tune.netease.NeteaseRepository.neteaseArtistIdForTrack(track)
+        NeteaseRepository.neteaseArtistIdForTrack(track)
     }
     val neteaseAlbumId = remember(track.metadataJson) {
-        com.exodidio.tune.netease.NeteaseRepository.neteaseAlbumIdForTrack(track)
+        NeteaseRepository.neteaseAlbumIdForTrack(track)
     }
     val dismissAll = {
         detailSheet = null
@@ -231,14 +257,80 @@ fun TrackContextMenu(
             if (showAddToQueue) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_add_to_queue), MaterialSymbols.AddToQueue) { closeAfter { onAddToQueue(track) } })
             if (actions.trackInfo) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_track_info), MaterialSymbols.Info) { requestBottomSheet(TrackContextBottomSheetRequest.Info(track)) })
             if (actions.findLyrics) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_find_lyrics), MaterialSymbols.Search) { requestBottomSheet(TrackContextBottomSheetRequest.FindLyrics(track)) })
-            if (showMoodRadio && (showPlayNext || showAddToQueue || actions.trackInfo || actions.findLyrics)) add(ContextActionMenuEntry.Divider)
+            if (actions.lyricsControl) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_lyrics_control), MaterialSymbols.Lyrics) { requestBottomSheet(TrackContextBottomSheetRequest.LyricsControl(track)) })
+            if (actions.comments) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_comments), MaterialSymbols.Chat) { requestBottomSheet(TrackContextBottomSheetRequest.Comments(track)) })
+            val hasTopSectionEntries = showPlayNext ||
+                showAddToQueue ||
+                actions.trackInfo ||
+                actions.findLyrics ||
+                actions.lyricsControl ||
+                actions.comments
+            if (showMoodRadio && hasTopSectionEntries) add(ContextActionMenuEntry.Divider)
             if (showMoodRadio) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_start_mood_radio), MaterialSymbols.Sensors) { closeAfter { if (actions.moodRadio) onStartMoodRadio(track) else moodRadio.onStart(track.id) } })
             if (showSimilarSongs) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_similar_songs), MaterialSymbols.Sensors) { closeAfter { similarMenu.onOpen(track.id) } })
-            if (showMoodRadio && (actions.favorite || actions.addToPlaylist || hasNavigationActions || actions.removeFromPlaylist)) add(ContextActionMenuEntry.Divider)
-            if (!showMoodRadio && (showPlayNext || showAddToQueue || actions.trackInfo || actions.findLyrics)) add(ContextActionMenuEntry.Divider)
-            if (actions.favorite) add(ContextActionMenuEntry.Action(stringResource(if (favorite) R.string.track_context_remove_from_favorites else R.string.track_context_add_to_favorites), if (favorite) MaterialSymbols.HeartMinus else MaterialSymbols.HeartPlus) { closeAfter { if (!favorite) hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm); onFavoriteChange(track, !favorite) } })
-            if (actions.addToPlaylist) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_add_to_playlist), MaterialSymbols.PlaylistAdd) { requestBottomSheet(TrackContextBottomSheetRequest.Playlist(listOf(track.id))) })
-            if ((actions.favorite || actions.addToPlaylist) && (hasNavigationActions || actions.removeFromPlaylist)) {
+            if (showMoodRadio && (actions.favorite || neteaseSongId != null || actions.addToPlaylist || hasNavigationActions || actions.removeFromPlaylist)) add(ContextActionMenuEntry.Divider)
+            if (!showMoodRadio && hasTopSectionEntries) add(ContextActionMenuEntry.Divider)
+            if (actions.favorite) {
+                add(
+                    ContextActionMenuEntry.Action(
+                        label = stringResource(if (favorite) R.string.track_context_remove_from_library else R.string.track_context_add_to_library),
+                        symbol = MaterialSymbols.Library,
+                        filled = favorite,
+                    ) {
+                        closeAfter {
+                            if (!favorite) hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                            onFavoriteChange(track, !favorite)
+                        }
+                    },
+                )
+            }
+            if (neteaseSongId != null) {
+                val targetLiked = !neteaseLiked
+                val likeFailedTemplate = stringResource(R.string.netease_like_failed, "{err}")
+                add(
+                    ContextActionMenuEntry.Action(
+                        label = stringResource(if (neteaseLiked) R.string.netease_unlike_track else R.string.netease_like_track),
+                        symbol = if (neteaseLiked) MaterialSymbols.HeartMinus else MaterialSymbols.HeartPlus,
+                        filled = neteaseLiked,
+                    ) {
+                        closeAfter {
+                            if (targetLiked) hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                            if (NeteaseRepository.cookie(context).isNullOrBlank()) {
+                                Toast.makeText(context, R.string.netease_login_required_action, Toast.LENGTH_SHORT).show()
+                            } else {
+                                scope.launch {
+                                    NeteaseRepository.setTrackLiked(context, track, neteaseSongId, targetLiked)
+                                        .onSuccess {
+                                            Toast.makeText(
+                                                context,
+                                                if (targetLiked) R.string.netease_liked_toast else R.string.netease_unliked_toast,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
+                                        .onFailure { err ->
+                                            Toast.makeText(
+                                                context,
+                                                likeFailedTemplate.replace("{err}", err.message.orEmpty()),
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
+                                }
+                            }
+                        }
+                    },
+                )
+            }
+            if (actions.addToPlaylist) add(
+                ContextActionMenuEntry.Action(stringResource(R.string.track_context_add_to_playlist), MaterialSymbols.PlaylistAdd) {
+                    requestBottomSheet(
+                        TrackContextBottomSheetRequest.Playlist(
+                            trackIds = listOf(track.id),
+                            allowNeteasePlaylists = actions.allowNeteasePlaylists,
+                        ),
+                    )
+                },
+            )
+            if ((actions.favorite || neteaseSongId != null || actions.addToPlaylist) && (hasNavigationActions || actions.removeFromPlaylist)) {
                 add(ContextActionMenuEntry.Divider)
             }
             if (actions.goToAlbum && hasAlbum) add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_go_to_album), MaterialSymbols.Album) {
@@ -247,7 +339,7 @@ fun TrackContextMenu(
                         neteaseEntityActions.onOpenAlbum(
                             neteaseAlbumId,
                             track.album,
-                            com.exodidio.tune.netease.NeteaseRepository.coverUrlForTrack(track),
+                            NeteaseRepository.coverUrlForTrack(track),
                         )
                     } else {
                         onGoToAlbum(track)
@@ -334,6 +426,54 @@ internal fun TrackContextBottomSheet(
 ) {
     val root: TrackContextSheet = remember(request) { TrackContextSheet.Root(request) }
     val stack = rememberTuneBottomSheetStack(root)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var createNeteaseTarget by remember(request) { mutableStateOf<List<Pair<Long, LibraryTrack?>>?>(null) }
+    var creatingNetease by remember(request) { mutableStateOf(false) }
+    var createNeteaseError by remember(request) { mutableStateOf<String?>(null) }
+    val createdToast = stringResource(R.string.netease_playlist_created)
+    val addedToast = stringResource(R.string.netease_track_added_to_playlist)
+    val failedTemplate = stringResource(R.string.netease_operation_failed, "{err}")
+
+    val activeCreateTarget = createNeteaseTarget
+    if (activeCreateTarget != null) {
+        NeteasePlaylistEditorBottomSheet(
+            isCreate = true,
+            busy = creatingNetease,
+            errorMessage = createNeteaseError,
+            onDismiss = {
+                createNeteaseTarget = null
+                createNeteaseError = null
+            },
+            onSubmit = { name, description, isPrivate ->
+                if (creatingNetease) return@NeteasePlaylistEditorBottomSheet
+                creatingNetease = true
+                createNeteaseError = null
+                scope.launch {
+                    NeteaseRepository.createNeteasePlaylist(
+                        context = context,
+                        name = name,
+                        description = description,
+                        privacyPrivate = isPrivate,
+                        initialSongs = activeCreateTarget,
+                    ).onSuccess {
+                        creatingNetease = false
+                        createNeteaseTarget = null
+                        val message = if (activeCreateTarget.isNotEmpty()) addedToast else createdToast
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        onDismiss()
+                    }.onFailure { err ->
+                        creatingNetease = false
+                        val message = err.message.orEmpty()
+                        createNeteaseError = message
+                        Toast.makeText(context, failedTemplate.replace("{err}", message), Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+        )
+        return
+    }
+
     TuneBottomSheetStack(
         stack = stack,
         onDismiss = onDismiss,
@@ -344,6 +484,8 @@ internal fun TrackContextBottomSheet(
                     is TrackContextSheet.Root -> when (sheet.request) {
                         is TrackContextBottomSheetRequest.Info -> R.string.track_context_track_info_title
                         is TrackContextBottomSheetRequest.FindLyrics -> R.string.track_context_find_lyrics_title
+                        is TrackContextBottomSheetRequest.LyricsControl -> R.string.lyrics_control_title
+                        is TrackContextBottomSheetRequest.Comments -> R.string.comments_sheet_title
                         is TrackContextBottomSheetRequest.Playlist -> R.string.track_context_playlist_picker_title
                         is TrackContextBottomSheetRequest.Artists -> R.string.track_context_artist_picker_title
                     }
@@ -361,12 +503,20 @@ internal fun TrackContextBottomSheet(
                         onSearch = onSearchLyrics,
                         onPreview = { lyric -> stack.push(TrackContextSheet.LyricsPreview(rootRequest.track, lyric)) },
                     )
+                    is TrackContextBottomSheetRequest.LyricsControl -> LyricsControlSection(
+                        track = rootRequest.track,
+                    )
+                    is TrackContextBottomSheetRequest.Comments -> SongCommentsSheetContent(
+                        track = rootRequest.track,
+                    )
                     is TrackContextBottomSheetRequest.Playlist -> PlaylistPickerContent(
                         trackIds = rootRequest.trackIds,
                         addOnly = rootRequest.addOnly,
+                        allowNeteasePlaylists = rootRequest.allowNeteasePlaylists,
                         playlists = playlists,
                         onPlaylistMembershipChange = onPlaylistMembershipChange,
                         onCreatePlaylistRequested = onCreatePlaylistRequested,
+                        onCreateNeteasePlaylistRequested = { songs -> createNeteaseTarget = songs },
                     )
                     is TrackContextBottomSheetRequest.Artists -> ContextActionMenu(
                         rootRequest.artists.map { artist ->
@@ -391,61 +541,231 @@ internal fun TrackContextBottomSheet(
 private fun PlaylistPickerContent(
     trackIds: List<String>,
     addOnly: Boolean,
+    allowNeteasePlaylists: Boolean,
     playlists: List<LibraryPlaylist>,
     onPlaylistMembershipChange: (playlistId: String, trackIds: List<String>, add: Boolean) -> Unit,
     onCreatePlaylistRequested: (trackIds: List<String>) -> Unit,
+    onCreateNeteasePlaylistRequested: (List<Pair<Long, LibraryTrack?>>) -> Unit = {},
 ) {
     val colors = LocalTuneColors.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val editable = remember(playlists) { playlists.filter(::playlistIsEditable) }
     val singleTrack = trackIds.distinct().singleOrNull()
     var locallyAddedPlaylistIds by remember(trackIds, addOnly) { mutableStateOf<Set<String>>(emptySet()) }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable { onCreatePlaylistRequested(trackIds) }.padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-                MaterialSymbol(MaterialSymbols.Add, null, size = 18.dp, tint = colors.primary)
-            }
-            Text(stringResource(R.string.track_context_create_playlist), modifier = Modifier.padding(start = 12.dp), color = colors.textMain)
-        }
-        if (editable.isEmpty()) {
-            Text(stringResource(R.string.track_context_no_editable_playlists), modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp), color = colors.textMuted)
+
+    val loggedIn by NeteaseRepository.loggedIn.collectAsStateWithLifecycle()
+    val mine by NeteaseRepository.mine.collectAsStateWithLifecycle()
+    val activeNeteasePlaylists by NeteaseRepository.activePlaylists.collectAsStateWithLifecycle()
+    val likedSongIds by NeteaseRepository.likedSongIds.collectAsStateWithLifecycle()
+    val neteaseSongs = remember(trackIds, allowNeteasePlaylists) {
+        if (!allowNeteasePlaylists) {
+            emptyList()
         } else {
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
-                items(editable, key = LibraryPlaylist::id, contentType = { "playlist_picker_row" }) { playlist ->
-                    // Genre-scope adds deliberately skip membership inspection. The
-                    // mutation/projection layer deduplicates playlist track IDs, so
-                    // checking every selected track here only adds query/work cost.
-                    val checked = if (addOnly) {
-                        playlist.id in locallyAddedPlaylistIds
-                    } else if (singleTrack != null) {
-                        singleTrack in playlist.trackIds
-                    } else {
-                        trackIds.isNotEmpty() && trackIds.all { it in playlist.trackIds }
+            trackIds.distinct().mapNotNull { id ->
+                val songId = NeteaseRepository.songIdForTrack(id) ?: return@mapNotNull null
+                songId to AndroidSyncRuntime.syncStore.trackForPlayback(id)
+            }
+        }
+    }
+    val showNeteaseSection = allowNeteasePlaylists && loggedIn && neteaseSongs.isNotEmpty()
+    LaunchedEffect(showNeteaseSection, mine.loaded) {
+        if (showNeteaseSection && !mine.loaded) {
+            NeteaseRepository.loadMine()
+        }
+    }
+    var busyNeteasePlaylistId by remember(trackIds) { mutableStateOf<String?>(null) }
+    var locallyAddedNeteaseIds by remember(trackIds) { mutableStateOf<Set<String>>(emptySet()) }
+    var locallyRemovedNeteaseIds by remember(trackIds) { mutableStateOf<Set<String>>(emptySet()) }
+    val activeNeteaseById = remember(activeNeteasePlaylists) { activeNeteasePlaylists.associateBy { it.id } }
+    val likedRemoteId = NeteaseRepository.likedPlaylistRemoteId()
+    val addedToast = stringResource(R.string.netease_track_added_to_playlist)
+    val removedToast = stringResource(R.string.netease_track_removed_from_playlist)
+    val failedTemplate = stringResource(R.string.netease_operation_failed, "{err}")
+
+    LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 12.dp).heightIn(max = 420.dp)) {
+        if (showNeteaseSection) {
+            item("netease_section_header") {
+                Text(
+                    text = stringResource(R.string.netease_playlists_section),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.textMuted,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+            item("netease_create_playlist") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .clickable(enabled = busyNeteasePlaylistId == null) {
+                            onCreateNeteasePlaylistRequested(neteaseSongs)
+                        }
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                        MaterialSymbol(MaterialSymbols.Add, null, size = 18.dp, tint = colors.primary)
                     }
-                    val add = addOnly || !checked
-                    val targetIds = when {
-                        addOnly -> if (checked) emptyList() else trackIds
-                        singleTrack != null -> listOf(singleTrack)
-                        add -> trackIds.filter { it !in playlist.trackIds }
-                        else -> trackIds
+                    Text(
+                        text = stringResource(R.string.netease_create_playlist_action),
+                        modifier = Modifier.padding(start = 12.dp),
+                        color = colors.textMain,
+                    )
+                }
+            }
+            items(mine.created, key = { "netease_${it.id}" }, contentType = { "netease_playlist_picker_row" }) { playlist ->
+                val isLikedPlaylist = playlist.id == NeteaseRepository.LIKED_ID ||
+                    (likedRemoteId != null && playlist.id == likedRemoteId)
+                val record = activeNeteaseById[playlist.id]
+                    ?: if (isLikedPlaylist) activeNeteaseById[NeteaseRepository.LIKED_ID] else null
+                val entryIds = remember(record?.entries) {
+                    record?.entries?.mapTo(HashSet()) { it.songId }
+                }
+                val membershipKnown = isLikedPlaylist ||
+                    (record != null && (record.entries.isNotEmpty() || record.remoteTrackCount == 0))
+                val checked = when {
+                    isLikedPlaylist -> neteaseSongs.all { (sid, _) -> sid in likedSongIds }
+                    record != null && (record.entries.isNotEmpty() || record.remoteTrackCount == 0) -> {
+                        val ids = entryIds.orEmpty()
+                        neteaseSongs.all { (sid, _) -> sid in ids }
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable {
-                            if (targetIds.isNotEmpty()) {
-                                if (addOnly) locallyAddedPlaylistIds += playlist.id
-                                onPlaylistMembershipChange(playlist.id, targetIds, add)
+                    playlist.id in locallyAddedNeteaseIds -> true
+                    playlist.id in locallyRemovedNeteaseIds -> false
+                    else -> false
+                }
+                val add = addOnly || !checked
+                val targetSongs = when {
+                    !add -> neteaseSongs
+                    membershipKnown && entryIds != null -> neteaseSongs.filter { (sid, _) -> sid !in entryIds }.ifEmpty { neteaseSongs }
+                    isLikedPlaylist -> neteaseSongs.filter { (sid, _) -> sid !in likedSongIds }.ifEmpty { neteaseSongs }
+                    else -> neteaseSongs
+                }
+                val isBusy = busyNeteasePlaylistId == playlist.id
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .clickable(enabled = busyNeteasePlaylistId == null) {
+                            busyNeteasePlaylistId = playlist.id
+                            scope.launch {
+                                NeteaseRepository.manipulateNeteasePlaylistTracks(
+                                    context = context,
+                                    playlistId = playlist.id,
+                                    tracks = targetSongs,
+                                    add = add,
+                                ).onSuccess {
+                                    if (add) {
+                                        locallyAddedNeteaseIds += playlist.id
+                                        locallyRemovedNeteaseIds -= playlist.id
+                                    } else {
+                                        locallyRemovedNeteaseIds += playlist.id
+                                        locallyAddedNeteaseIds -= playlist.id
+                                    }
+                                    Toast.makeText(
+                                        context,
+                                        if (add) addedToast else removedToast,
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }.onFailure { err ->
+                                    Toast.makeText(
+                                        context,
+                                        failedTemplate.replace("{err}", err.message.orEmpty()),
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                                busyNeteasePlaylistId = null
                             }
-                        }.padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                        }
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (isBusy) {
+                        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        }
+                    } else {
                         PlaylistPickerCheckbox(
                             checked = checked,
                             modifier = Modifier.size(24.dp),
                         )
-                        Text(playlist.name, modifier = Modifier.padding(start = 12.dp), color = colors.textMain)
                     }
+                    Column(modifier = Modifier.weight(1f).padding(start = 12.dp)) {
+                        Text(playlist.name, color = colors.textMain)
+                        val count = record?.entries?.size?.takeIf { it > 0 } ?: record?.remoteTrackCount ?: playlist.trackCount
+                        if (count > 0) {
+                            Text(
+                                text = stringResource(R.string.netease_playlist_entry_count, count),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textMuted,
+                            )
+                        }
+                    }
+                }
+            }
+            item("netease_local_divider") {
+                HorizontalDivider(
+                    color = colors.borderGlass,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+            item("local_section_header") {
+                Text(
+                    text = stringResource(R.string.local_playlists_section),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.textMuted,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+        }
+        item("local_create_playlist") {
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable { onCreatePlaylistRequested(trackIds) }.padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                    MaterialSymbol(MaterialSymbols.Add, null, size = 18.dp, tint = colors.primary)
+                }
+                Text(stringResource(R.string.track_context_create_playlist), modifier = Modifier.padding(start = 12.dp), color = colors.textMain)
+            }
+        }
+        if (editable.isEmpty()) {
+            item("local_empty_playlists") {
+                Text(stringResource(R.string.track_context_no_editable_playlists), modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp), color = colors.textMuted)
+            }
+        } else {
+            items(editable, key = LibraryPlaylist::id, contentType = { "playlist_picker_row" }) { playlist ->
+                // Genre-scope adds deliberately skip membership inspection. The
+                // mutation/projection layer deduplicates playlist track IDs, so
+                // checking every selected track here only adds query/work cost.
+                val checked = if (addOnly) {
+                    playlist.id in locallyAddedPlaylistIds
+                } else if (singleTrack != null) {
+                    singleTrack in playlist.trackIds
+                } else {
+                    trackIds.isNotEmpty() && trackIds.all { it in playlist.trackIds }
+                }
+                val add = addOnly || !checked
+                val targetIds = when {
+                    addOnly -> if (checked) emptyList() else trackIds
+                    singleTrack != null -> listOf(singleTrack)
+                    add -> trackIds.filter { it !in playlist.trackIds }
+                    else -> trackIds
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable {
+                        if (targetIds.isNotEmpty()) {
+                            if (addOnly) locallyAddedPlaylistIds += playlist.id
+                            onPlaylistMembershipChange(playlist.id, targetIds, add)
+                        }
+                    }.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PlaylistPickerCheckbox(
+                        checked = checked,
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Text(playlist.name, modifier = Modifier.padding(start = 12.dp), color = colors.textMain)
                 }
             }
         }
@@ -463,7 +783,7 @@ private fun PlaylistPickerCheckbox(checked: Boolean, modifier: Modifier = Modifi
             .border(0.5.dp, if (checked) colors.primary else colors.borderGlass, shape),
         contentAlignment = Alignment.Center,
     ) {
-        if (checked) MaterialSymbol(MaterialSymbols.Check, null, size = 14.dp, tint = colors.onPrimary)
+        if (checked) MaterialSymbol(MaterialSymbols.Check, null, size = 16.dp, tint = colors.onPrimary, filled = true)
     }
 }
 

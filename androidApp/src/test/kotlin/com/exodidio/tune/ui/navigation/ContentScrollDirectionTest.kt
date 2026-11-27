@@ -82,4 +82,12 @@ class ContentScrollDirectionTest {
             ),
         )
     }
+
+    @Test
+    fun mapsFastVerticalFlingsDirectlyByDirectionWithoutThresholdDelay() {
+        assertEquals(ContentScrollDirection.Up, flingScrollDelta(-600f)?.direction)
+        assertEquals(ContentScrollDirection.Down, flingScrollDelta(600f)?.direction)
+        assertEquals(null, flingScrollDelta(0f))
+        assertEquals(null, flingScrollDelta(120f))
+    }
 }

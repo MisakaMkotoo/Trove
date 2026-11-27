@@ -1,5 +1,6 @@
 package com.exodidio.tune
 
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -16,16 +17,24 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.exodidio.tune.netease.NeteaseRepository
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -59,7 +68,6 @@ import com.exodidio.tune.ui.components.LibrarySortOption
 import com.exodidio.tune.ui.navigation.AppDestinationContent
 import com.exodidio.tune.ui.navigation.CompactNavigationHeight
 import com.exodidio.tune.ui.navigation.ContentScrollDirection
-import com.exodidio.tune.ui.navigation.FloatingNavigationBottomMargin
 import com.exodidio.tune.ui.navigation.FloatingNavigationContentGap
 import com.exodidio.tune.ui.navigation.FloatingNavigationHeight
 import com.exodidio.tune.ui.navigation.FullScreenPlayer
@@ -67,11 +75,13 @@ import com.exodidio.tune.ui.navigation.MiniPlayerHeight
 import com.exodidio.tune.ui.navigation.MiniPlayerNavigationGap
 import com.exodidio.tune.ui.navigation.NavigationChrome
 import com.exodidio.tune.ui.navigation.NavigationChromeScrollAccumulator
+import com.exodidio.tune.ui.navigation.navigationChromeBottomPadding
 import com.exodidio.tune.ui.navigation.showsMiniPlayer
 import com.exodidio.tune.ui.navigation.titleRes
 import com.exodidio.tune.sync.metadataObject
 import com.exodidio.tune.ui.screens.ArtistSortOption
 import com.exodidio.tune.ui.screens.AlbumSortOption
+import com.exodidio.tune.ui.screens.FolderSortOption
 import com.exodidio.tune.ui.screens.GenreSortOption
 import com.exodidio.tune.ui.screens.ComposerSortOption
 import com.exodidio.tune.ui.screens.TrackSortOption
@@ -84,11 +94,23 @@ import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
 import com.exodidio.tune.ui.theme.TuneTheme
 import com.exodidio.tune.ui.theme.LocalTuneColors
 import com.exodidio.tune.ui.theme.TuneColors
+import com.exodidio.tune.ui.theme.rememberAnimatedTuneColors
 import android.app.ActivityManager
 import android.content.Context
+import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
+import com.exodidio.tune.ui.components.BatchChromeHostState
+import com.exodidio.tune.ui.components.BatchChromeOverlay
+import com.exodidio.tune.ui.components.LocalBatchChromeHost
+import com.exodidio.tune.ui.components.LocalControlStyle
+import com.exodidio.tune.ui.components.LocalIconStyle
+import com.exodidio.tune.ui.components.LocalLiquidGlassBlurDp
 import com.exodidio.tune.ui.components.LocalReduceMotion
+import com.exodidio.tune.ui.components.LocalTuneBackdrop
+import com.exodidio.tune.ui.screens.NeteasePlaylistEditorBottomSheet
 import com.exodidio.tune.player.PlaybackState
+import com.exodidio.tune.settings.ControlStyle
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 private enum class EqualizerProfileSheet { Menu, Create, DeleteConfirmation }
 
@@ -163,19 +185,44 @@ internal fun App(
     destinations: AppDestinationModels = AppDestinationModels(),
     playback: PlaybackModel = PlaybackModel(),
     onIntent: (AppIntent) -> Unit = {},
+    restoreFullScreenPlayerNonce: Int = 0,
     onFullScreenPlayerVisibilityChanged: (Boolean) -> Unit = {},
+    onTerminalModeChanged: (Boolean) -> Unit = {},
 ) {
     val library = destinations.library
     val settings = destinations.settings
     val tracksUiState = library.tracks.state
     val artistsUiState = library.artists.state
     val albumsUiState = library.albums.state
+    val foldersUiState = library.folders.state
     val genresUiState = library.genres.state
     val composersUiState = library.composers.state
     val playlistsUiState = library.playlists.state
     val playbackState = playback.state
     val playbackQueue = playback.queue
-    TuneTheme(themeMode = uiState.themeMode) {
+    var isTerminalMode by rememberSaveable { mutableStateOf(false) }
+    fun setTerminalMode(enabled: Boolean) {
+        if (isTerminalMode == enabled) return
+        isTerminalMode = enabled
+        onTerminalModeChanged(enabled)
+    }
+    LaunchedEffect(isTerminalMode) {
+        onTerminalModeChanged(isTerminalMode)
+    }
+    if (isTerminalMode) {
+        BackHandler {
+            setTerminalMode(false)
+        }
+        com.exodidio.tune.ui.navigation.TerminalPlayerScreen(
+            playback = playback,
+            onExitTerminalMode = { setTerminalMode(false) },
+        )
+        return
+    }
+    TuneTheme(
+        themeMode = uiState.themeMode,
+        accentColor = uiState.accentColor,
+    ) {
         val context = LocalContext.current
         val isLowRamDevice = remember(context) {
             (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).isLowRamDevice
@@ -193,15 +240,31 @@ internal fun App(
         } else {
             null
         }
-        val pageTuneColors = remember(baseTuneColors, playlistTint) {
+        val targetPageTuneColors = remember(baseTuneColors, playlistTint) {
             adaptiveTuneColors(baseTuneColors, playlistTint)
         }
+        val pageTuneColors = rememberAnimatedTuneColors(
+            target = targetPageTuneColors,
+            animate = !reduceMotion,
+        )
+        val batchChromeHost = remember { BatchChromeHostState() }
+        LaunchedEffect(currentStackPage) {
+            batchChromeHost.dismissAll()
+        }
+        val isBatchChromeActive = batchChromeHost.isActive
         // 换页时清掉上一页的封面取色，避免新页面在拿到自己的颜色前套用旧色。
         LaunchedEffect(currentPage) {
             albumHeroColor = null
         }
+        val rootBackdrop = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) rememberLayerBackdrop() else null
+        val activeBackdrop = if (uiState.controlStyle == ControlStyle.LiquidGlass && !reduceMotion) rootBackdrop else null
         CompositionLocalProvider(
             LocalTuneColors provides pageTuneColors,
+            LocalIconStyle provides uiState.iconStyle,
+            LocalControlStyle provides uiState.controlStyle,
+            LocalLiquidGlassBlurDp provides uiState.liquidGlassBlurDp,
+            LocalTuneBackdrop provides activeBackdrop,
+            LocalBatchChromeHost provides batchChromeHost,
             com.exodidio.tune.ui.components.LocalMoodRadioMenuActions provides com.exodidio.tune.ui.components.MoodRadioMenuActions(
                 playback.moodRadioEligibleTrackIds, playback.onStartMoodRadio,
             ),
@@ -219,6 +282,7 @@ internal fun App(
                         onIntent(AppIntent.OpenNeteaseAlbum(albumId, name, coverUrl.orEmpty()))
                     },
                 ),
+            com.exodidio.tune.ui.components.LocalLyricsMenuActions provides playback.lyricsMenu,
         ) {
         val hazeState = if (uiState.reduceTransparency) null else rememberHazeState()
         val homeListState = remember(uiState.pageStateGenerationFor(AppDestination.Home, AppStackPage.Root)) { LazyListState() }
@@ -236,8 +300,12 @@ internal fun App(
             LazyListState()
         }
         val artistDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ArtistDetails), uiState.selectedArtistId) { LazyListState() }
+        val folderDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryFolderDetails), uiState.selectedFolderId) { LazyListState() }
         val genreDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.GenreDetails), uiState.selectedGenreId) { LazyListState() }
         val composerDetailsListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ComposerDetails), uiState.selectedComposerId) { LazyListState() }
+        val foldersListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryFolders), foldersUiState.sortOption, foldersUiState.sortOrder) {
+            LazyListState()
+        }
         val genresListState = remember(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryGenres), genresUiState.sortOption, genresUiState.sortOrder) {
             LazyListState()
         }
@@ -255,8 +323,10 @@ internal fun App(
         artistsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryArtists))
         albumsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryAlbums))
         artistDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ArtistDetails))
+        folderDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryFolderDetails))
         genreDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.GenreDetails))
         composerDetailsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.ComposerDetails))
+        foldersListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryFolders))
         genresListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryGenres))
         composersListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryComposers))
         playlistsListState.resetAfterPagePop(uiState.pageStateGenerationFor(AppDestination.Library, AppStackPage.LibraryPlaylists))
@@ -274,8 +344,11 @@ internal fun App(
         var isFullScreenPlayerOpeningFromSwipe by remember { mutableStateOf(false) }
         var fullScreenPlayerDragProgress by remember { mutableFloatStateOf(0f) }
         var isFullScreenPlayerDragging by remember { mutableStateOf(false) }
+        var miniPlayerBounds by remember { mutableStateOf(com.exodidio.tune.ui.navigation.MiniPlayerTransitionBounds()) }
+        var fullScreenExpansionProgress by remember { mutableFloatStateOf(0f) }
         var pendingFullScreenPlayerAction by remember { mutableStateOf<(() -> Unit)?>(null) }
         var trackContextSheet by remember { mutableStateOf<TrackContextBottomSheetRequest?>(null) }
+        var trackContextSheetFromPlayer by remember { mutableStateOf(false) }
         // F1: hoisted library-removal set. No per-track delete/hide mutation exists
         // in the store (library is scan-replaced), so keep-best losers + confirmed
         // device-deletes accumulate here and are filtered out of every library
@@ -290,7 +363,7 @@ internal fun App(
         var equalizerProfileSheet by remember { mutableStateOf<EqualizerProfileSheet?>(null) }
         var isNavigationCompact by remember { mutableStateOf(false) }
         val navigationScrollAccumulator = remember { NavigationChromeScrollAccumulator() }
-        val navigationScrollThresholdPx = with(LocalDensity.current) { 24.dp.toPx() }
+        val navigationScrollThresholdPx = with(LocalDensity.current) { 8.dp.toPx() }
         fun setFullScreenPlayerVisible(visible: Boolean) {
             if (isFullScreenPlayerVisible == visible) return
             isFullScreenPlayerVisible = visible
@@ -310,6 +383,13 @@ internal fun App(
             isFullScreenPlayerDragging = false
             fullScreenPlayerDragProgress = 0f
         }
+        LaunchedEffect(restoreFullScreenPlayerNonce) {
+            if (restoreFullScreenPlayerNonce > 0 && showsMiniPlayer) {
+                pendingFullScreenPlayerAction = null
+                isFullScreenPlayerOpeningFromSwipe = false
+                setFullScreenPlayerVisible(true)
+            }
+        }
         LaunchedEffect(showsMiniPlayer) {
             if (!showsMiniPlayer) {
                 // Keep the chrome geometry while destinations and pages change.
@@ -321,6 +401,7 @@ internal fun App(
                 isFullScreenPlayerOpeningFromSwipe = false
                 isFullScreenPlayerDragging = false
                 fullScreenPlayerDragProgress = 0f
+                fullScreenExpansionProgress = 0f
             }
         }
         val mergeBottomBars = uiState.mergeBottomBars
@@ -332,13 +413,16 @@ internal fun App(
         }
         // 合并开启时底部留白只算固定底栏（音乐条可收起，避免滚动回弹）；
         // 关闭合并后音乐条始终单独显示，留白必须把它算进去，否则内容会被挡住。
-        val separatePlayerPadding = if (!mergeBottomBars && showsMiniPlayer) {
+        // 批量多选模式时底栏和音乐条会淡出，底部操作栏占一个底栏高度。
+        val separatePlayerPadding = if (!isBatchChromeActive && !mergeBottomBars && showsMiniPlayer) {
             MiniPlayerHeight + MiniPlayerNavigationGap
         } else {
             0.dp
         }
-        val targetNavigationBottomPadding = FloatingNavigationHeight + FloatingNavigationBottomMargin + FloatingNavigationContentGap +
-            WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + separatePlayerPadding
+        val navBarBottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val chromeBottomPadding = navigationChromeBottomPadding(navBarBottomInset)
+        val targetNavigationBottomPadding = FloatingNavigationHeight + chromeBottomPadding + FloatingNavigationContentGap +
+            separatePlayerPadding
         val navigationBottomPadding by animateDpAsState(
             targetValue = targetNavigationBottomPadding,
             animationSpec = tween(420, easing = FastOutSlowInEasing),
@@ -351,7 +435,7 @@ internal fun App(
         }
         val pageTitle = when {
             currentPage == AppStackPage.NeteasePlaylistDetails && neteasePageTitle.isNotBlank() -> neteasePageTitle
-            currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails -> ""
+            currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.LibraryFolderDetails || currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails -> ""
             // 资料库一级页的大标题放在内容里，随页面滚动；顶栏只保留悬浮按钮。
             uiState.selectedDestination == AppDestination.Library && currentPage == AppStackPage.Root -> ""
             uiState.selectedDestination == AppDestination.Home && currentPage == AppStackPage.Root -> ""
@@ -368,21 +452,34 @@ internal fun App(
         val hideRootHeader = currentPage == AppStackPage.Root &&
             (uiState.selectedDestination == AppDestination.Home || uiState.selectedDestination == AppDestination.Library ||
                 uiState.selectedDestination == AppDestination.Discover || uiState.selectedDestination == AppDestination.Mine)
-        // 底栏标签：只允许可停靠的目的地；顺序固定按 dockable，隐藏只影响显隐。
-        val dockDestinations = run {
-            val saved = uiState.visibleTabs.filter { it in AppDestination.dockable }
-            val enabled = if (saved.none { it == AppDestination.Discover || it == AppDestination.Search }) {
-                AppDestination.dockable
-            } else {
-                saved
-            }
-            AppDestination.dockable.filter { it in enabled }
+        // 底栏标签：只允许可停靠的目的地，并保留用户调整后的顺序；合并模式下隐藏“我的”。
+        val dockDestinations = remember(uiState.visibleTabs, uiState.mergeMineAndLibrary) {
+            uiState.visibleTabs
+                .distinct()
+                .filter { it in AppDestination.dockable && (!uiState.mergeMineAndLibrary || it != AppDestination.Mine) }
+                .ifEmpty {
+                    AppDestination.dockable.filter { !uiState.mergeMineAndLibrary || it != AppDestination.Mine }
+                }
         }
+        var mergedLibraryRootTab by rememberSaveable { mutableIntStateOf(0) }
+        var mergedPlaylistsTab by rememberSaveable { mutableIntStateOf(0) }
+        var mergedArtistsTab by rememberSaveable { mutableIntStateOf(0) }
         val showLibrarySortAction = currentPage == AppStackPage.LibraryTracks ||
-            currentPage == AppStackPage.LibraryArtists || currentPage == AppStackPage.LibraryAlbums ||
+            (currentPage == AppStackPage.LibraryArtists && (!uiState.mergeMineAndLibrary || mergedArtistsTab == 1)) ||
+            currentPage == AppStackPage.LibraryAlbums ||
+            currentPage == AppStackPage.LibraryFolders ||
             currentPage == AppStackPage.LibraryGenres || currentPage == AppStackPage.LibraryComposers
-        val showPlaylistAddAction = currentPage == AppStackPage.LibraryPlaylists
+        val showPlaylistAddAction = currentPage == AppStackPage.LibraryPlaylists &&
+            (!uiState.mergeMineAndLibrary || mergedPlaylistsTab == 2)
+        val neteaseLoggedIn by NeteaseRepository.loggedIn.collectAsStateWithLifecycle()
+        val showMinePlaylistAddAction = (
+            currentPage == AppStackPage.MineCreatedPlaylists ||
+                (currentPage == AppStackPage.LibraryPlaylists && uiState.mergeMineAndLibrary && mergedPlaylistsTab == 0)
+            ) && neteaseLoggedIn
         var showCreatePlaylistSheet by rememberSaveable { mutableStateOf(false) }
+        var showCreateNeteasePlaylistSheet by rememberSaveable { mutableStateOf(false) }
+        var createNeteaseBusy by remember { mutableStateOf(false) }
+        var createNeteaseError by remember { mutableStateOf<String?>(null) }
         var showSettingsMenu by remember { mutableStateOf(false) }
         LaunchedEffect(uiState.selectedDestination, currentStackPage) { showSettingsMenu = false }
         var showLyricsInfoSheet by rememberSaveable { mutableStateOf(false) }
@@ -462,6 +559,7 @@ internal fun App(
                 artistsListState = artistsListState,
                 albumsListState = albumsListState,
                 genresListState = genresListState,
+                foldersListState = foldersListState,
                 composersListState = composersListState,
                 playlistsListState = playlistsListState,
                 duplicatesListState = duplicatesListState,
@@ -469,13 +567,26 @@ internal fun App(
                 selectedPlaylistId = uiState.selectedPlaylistId,
                 selectedSimilarSongId = uiState.selectedSimilarSongId,
                 selectedArtistId = uiState.selectedArtistId,
+                selectedFolderId = uiState.selectedFolderId,
                 selectedGenreId = uiState.selectedGenreId,
                 selectedComposerId = uiState.selectedComposerId,
                 showGenres = uiState.showGenres,
                 showComposers = uiState.showComposers,
                 rememberTabPage = uiState.rememberTabPage,
                 mergeBottomBars = uiState.mergeBottomBars,
+                iconStyle = uiState.iconStyle,
+                controlStyle = uiState.controlStyle,
+                liquidGlassBlurDp = uiState.liquidGlassBlurDp,
+                accentColor = uiState.accentColor,
+                mergeMineAndLibrary = uiState.mergeMineAndLibrary,
+                mergedLibraryRootTab = mergedLibraryRootTab,
+                onMergedLibraryRootTabSelected = { mergedLibraryRootTab = it },
+                mergedPlaylistsTab = mergedPlaylistsTab,
+                onMergedPlaylistsTabSelected = { mergedPlaylistsTab = it },
+                mergedArtistsTab = mergedArtistsTab,
+                onMergedArtistsTabSelected = { mergedArtistsTab = it },
                 artistDetailsListState = artistDetailsListState,
+                folderDetailsListState = folderDetailsListState,
                 genreDetailsListState = genreDetailsListState,
                 composerDetailsListState = composerDetailsListState,
                 onIntent = onIntent,
@@ -492,6 +603,7 @@ internal fun App(
                     library.details.onHeroColorChanged(color)
                 },
                 onSettingsContentScrolled = { settingsContentScrolled = it },
+                onEnterTerminalMode = { setTerminalMode(true) },
                 onContentScroll = { delta ->
                     if (!showsMiniPlayer) return@AppDestinationContent
                     if (navigationScrollAccumulator.update(delta, navigationScrollThresholdPx)) {
@@ -502,8 +614,8 @@ internal fun App(
             AlbumHeroHeaderGradient(
                 color = albumHeroColor,
                 visible = currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails ||
-                    currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.GenreDetails ||
-                    currentPage == AppStackPage.ComposerDetails,
+                    currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.LibraryFolderDetails ||
+                    currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails,
             )
             if (!hideRootHeader) {
             StackPageHeader(
@@ -515,11 +627,11 @@ internal fun App(
                 } else {
                     null
                 },
-                hasActions = showSettingsButton || showCreatePlaylistAction || showLibrarySortAction || showPlaylistAddAction || currentPage == AppStackPage.SettingsEqualizer || currentPage == AppStackPage.SettingsLyrics,
+                hasActions = showSettingsButton || showCreatePlaylistAction || showLibrarySortAction || showPlaylistAddAction || showMinePlaylistAddAction || currentPage == AppStackPage.SettingsEqualizer || currentPage == AppStackPage.SettingsLyrics,
                 animateChanges = animateHeaderChanges,
                 titleStackKey = "${uiState.selectedDestination.name}:${currentPage.name}",
                 isForward = isForwardHeaderTransition,
-                backGlassTintAlpha = if (currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails) 0.08f else null,
+                backGlassTintAlpha = if (currentPage == AppStackPage.AlbumDetails || currentPage == AppStackPage.PlaylistDetails || currentPage == AppStackPage.ArtistDetails || currentPage == AppStackPage.LibraryFolderDetails || currentPage == AppStackPage.GenreDetails || currentPage == AppStackPage.ComposerDetails) 0.08f else null,
             ) {
                 if (showSettingsButton) {
                     Row(
@@ -559,6 +671,16 @@ internal fun App(
                             onClick = { onIntent(AppIntent.ImportM3u) },
                         )
                     }
+                } else if (showMinePlaylistAddAction) {
+                    TuneGlassIconButton(
+                        hazeState = hazeState,
+                        symbol = MaterialSymbols.Add,
+                        label = stringResource(R.string.netease_create_playlist_action),
+                        onClick = {
+                            createNeteaseError = null
+                            showCreateNeteasePlaylistSheet = true
+                        },
+                    )
                 } else if (currentPage == AppStackPage.SettingsEqualizer) {
                     TuneGlassIconButton(
                         hazeState = hazeState,
@@ -587,7 +709,7 @@ internal fun App(
                         onSortOptionSelected = library.tracks.onSortOptionSelected,
                         onToggleSortOrder = library.tracks.onToggleSortOrder,
                     )
-                } else if (currentPage == AppStackPage.LibraryArtists) {
+                } else if (currentPage == AppStackPage.LibraryArtists && (!uiState.mergeMineAndLibrary || mergedArtistsTab == 1)) {
                     LibrarySortHeaderButton(
                         hazeState = hazeState,
                         options = listOf(
@@ -613,6 +735,19 @@ internal fun App(
                         onToggleSortOrder = library.albums.onToggleSortOrder,
                         layoutMode = albumsUiState.layoutMode,
                         onLayoutModeSelected = library.albums.onLayoutModeSelected,
+                    )
+                } else if (currentPage == AppStackPage.LibraryFolders) {
+                    LibrarySortHeaderButton(
+                        hazeState = hazeState,
+                        options = listOf(
+                            LibrarySortOption(FolderSortOption.Name, R.string.sort_name),
+                            LibrarySortOption(FolderSortOption.TrackCount, R.string.sort_play_count),
+                            LibrarySortOption(FolderSortOption.DateAdded, R.string.sort_date_added),
+                        ),
+                        selectedOption = foldersUiState.sortOption,
+                        sortOrder = foldersUiState.sortOrder,
+                        onSortOptionSelected = library.folders.onSortOptionSelected,
+                        onToggleSortOrder = library.folders.onToggleSortOrder,
                     )
                 } else if (currentPage == AppStackPage.LibraryGenres) {
                     LibrarySortHeaderButton(
@@ -650,11 +785,26 @@ internal fun App(
                     horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
                 ) {
                     if (uiState.selectedDestination == AppDestination.Library) {
+                        if (uiState.mergeMineAndLibrary) {
+                            TuneGlassIconButton(
+                                hazeState = hazeState,
+                                symbol = MaterialSymbols.ArrowDownward,
+                                label = stringResource(R.string.mine_downloads_title),
+                                onClick = { onIntent(AppIntent.OpenPageHere(AppStackPage.MineDownloads)) },
+                            )
+                        }
                         TuneGlassIconButton(
                             hazeState = hazeState,
                             symbol = MaterialSymbols.PlaylistAdd,
                             label = stringResource(R.string.playlist_create),
                             onClick = { showCreatePlaylistSheet = true },
+                        )
+                    } else if (uiState.selectedDestination == AppDestination.Mine) {
+                        TuneGlassIconButton(
+                            hazeState = hazeState,
+                            symbol = MaterialSymbols.ArrowDownward,
+                            label = stringResource(R.string.mine_downloads_title),
+                            onClick = { onIntent(AppIntent.OpenPageHere(AppStackPage.MineDownloads)) },
                         )
                     }
                     AnchoredPopupMenu(
@@ -704,6 +854,44 @@ internal fun App(
                     },
                 )
             }
+            if (showCreateNeteasePlaylistSheet) {
+                val createdToast = stringResource(R.string.netease_playlist_created)
+                val failedTemplate = stringResource(R.string.netease_operation_failed, "{err}")
+                val appContext = LocalContext.current
+                NeteasePlaylistEditorBottomSheet(
+                    isCreate = true,
+                    busy = createNeteaseBusy,
+                    errorMessage = createNeteaseError,
+                    onDismiss = {
+                        if (!createNeteaseBusy) {
+                            showCreateNeteasePlaylistSheet = false
+                            createNeteaseError = null
+                        }
+                    },
+                    onSubmit = { name, description, isPrivate ->
+                        if (createNeteaseBusy) return@NeteasePlaylistEditorBottomSheet
+                        createNeteaseBusy = true
+                        createNeteaseError = null
+                        coroutineScope.launch {
+                            NeteaseRepository.createNeteasePlaylist(
+                                context = appContext,
+                                name = name,
+                                description = description,
+                                privacyPrivate = isPrivate,
+                            ).onSuccess {
+                                createNeteaseBusy = false
+                                showCreateNeteasePlaylistSheet = false
+                                Toast.makeText(appContext, createdToast, Toast.LENGTH_SHORT).show()
+                            }.onFailure { err ->
+                                createNeteaseBusy = false
+                                val msg = err.message.orEmpty()
+                                createNeteaseError = msg
+                                Toast.makeText(appContext, failedTemplate.replace("{err}", msg), Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                )
+            }
             if (showLyricsInfoSheet) {
                 TuneBottomSheet(
                     title = { Text(stringResource(R.string.lyrics_info_title)) },
@@ -748,72 +936,101 @@ internal fun App(
                 )
                 null -> Unit
             }
-            NavigationChrome(
-                selectedDestination = uiState.selectedDestination,
-                visibleDestinations = dockDestinations,
-                playbackState = playbackState,
-                playbackQueue = playbackQueue,
-                hazeState = hazeState,
-                compact = showCompactChrome,
-                onExpandClick = {
-                    isNavigationCompact = false
-                    navigationScrollAccumulator.reset()
+            AnimatedVisibility(
+                visible = !isBatchChromeActive,
+                enter = if (reduceMotion) {
+                    EnterTransition.None
+                } else {
+                    fadeIn(animationSpec = tween(280, delayMillis = 60, easing = FastOutSlowInEasing)) +
+                        slideInVertically(
+                            initialOffsetY = { it / 2 },
+                            animationSpec = tween(300, delayMillis = 40, easing = FastOutSlowInEasing),
+                        )
                 },
-                onDestinationSelected = { destination ->
-                    if (destination == uiState.selectedDestination) {
-                        if (destination == AppDestination.Home) {
-                            coroutineScope.launch {
-                                homeListState.animateScrollToItem(0)
-                            }
-                        } else if (destination == AppDestination.Discover) {
-                            coroutineScope.launch {
-                                discoverListState.animateScrollToItem(0)
-                            }
-                        } else if (destination == AppDestination.Mine) {
-                            coroutineScope.launch {
-                                mineListState.animateScrollToItem(0)
-                            }
-                        } else if (destination == AppDestination.Insight) {
-                            coroutineScope.launch {
-                                insightListState.animateScrollToItem(0)
-                            }
-                        } else if (destination == AppDestination.Library && currentPage == AppStackPage.Root) {
-                            coroutineScope.launch {
-                                libraryListState.animateScrollToItem(0)
-                            }
-                        }
-                    }
-                    onIntent(AppIntent.SelectDestination(destination))
-                },
-                onPreviousClick = playback.onPrevious,
-                onPlayPauseClick = playback.onPlayPause,
-                onNextClick = playback.onNext,
-                onMiniPlayerDismiss = {
-                    isNavigationCompact = false
-                    navigationScrollAccumulator.reset()
-                    playback.onMiniPlayerDismiss()
-                },
-                onOpenFullScreenPlayer = {
-                    isFullScreenPlayerOpeningFromSwipe = false
-                    setFullScreenPlayerVisible(true)
-                },
-                onFullScreenPlayerDrag = { progress ->
-                    isFullScreenPlayerDragging = true
-                    fullScreenPlayerDragProgress = progress
-                },
-                onFullScreenPlayerDragEnd = { shouldOpen ->
-                    isFullScreenPlayerDragging = false
-                    // A partial pull must not remain as the overlay's source of truth
-                    // once the pointer is released. The overlay then animates to either
-                    // its closed or fully-open resting state.
-                    fullScreenPlayerDragProgress = 0f
-                    isFullScreenPlayerOpeningFromSwipe = shouldOpen
-                    setFullScreenPlayerVisible(shouldOpen)
+                exit = if (reduceMotion) {
+                    ExitTransition.None
+                } else {
+                    fadeOut(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
+                        slideOutVertically(
+                            targetOffsetY = { it / 2 },
+                            animationSpec = tween(240, easing = FastOutSlowInEasing),
+                        )
                 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(start = 20.dp, end = 20.dp, bottom = FloatingNavigationBottomMargin),
+                    .padding(start = 20.dp, end = 20.dp, bottom = chromeBottomPadding),
+            ) {
+                NavigationChrome(
+                    selectedDestination = uiState.selectedDestination,
+                    visibleDestinations = dockDestinations,
+                    playbackState = playbackState,
+                    playbackQueue = playbackQueue,
+                    hazeState = hazeState,
+                    compact = showCompactChrome,
+                    onExpandClick = {
+                        isNavigationCompact = false
+                        navigationScrollAccumulator.reset()
+                    },
+                    onDestinationSelected = { destination ->
+                        if (destination == uiState.selectedDestination) {
+                            if (destination == AppDestination.Home) {
+                                coroutineScope.launch {
+                                    homeListState.animateScrollToItem(0)
+                                }
+                            } else if (destination == AppDestination.Discover) {
+                                coroutineScope.launch {
+                                    discoverListState.animateScrollToItem(0)
+                                }
+                            } else if (destination == AppDestination.Mine) {
+                                coroutineScope.launch {
+                                    mineListState.animateScrollToItem(0)
+                                }
+                            } else if (destination == AppDestination.Insight) {
+                                coroutineScope.launch {
+                                    insightListState.animateScrollToItem(0)
+                                }
+                            } else if (destination == AppDestination.Library && currentPage == AppStackPage.Root) {
+                                coroutineScope.launch {
+                                    libraryListState.animateScrollToItem(0)
+                                }
+                            }
+                        }
+                        onIntent(AppIntent.SelectDestination(destination))
+                    },
+                    onPreviousClick = playback.onPrevious,
+                    onPlayPauseClick = playback.onPlayPause,
+                    onNextClick = playback.onNext,
+                    onMiniPlayerDismiss = {
+                        isNavigationCompact = false
+                        navigationScrollAccumulator.reset()
+                        playback.onMiniPlayerDismiss()
+                    },
+                    onOpenFullScreenPlayer = {
+                        isFullScreenPlayerOpeningFromSwipe = false
+                        setFullScreenPlayerVisible(true)
+                    },
+                    onFullScreenPlayerDrag = { progress ->
+                        isFullScreenPlayerDragging = true
+                        fullScreenPlayerDragProgress = progress
+                    },
+                    onFullScreenPlayerDragEnd = { shouldOpen ->
+                        isFullScreenPlayerDragging = false
+                        // A partial pull must not remain as the overlay's source of truth
+                        // once the pointer is released. The overlay then animates to either
+                        // its closed or fully-open resting state.
+                        fullScreenPlayerDragProgress = 0f
+                        isFullScreenPlayerOpeningFromSwipe = shouldOpen
+                        setFullScreenPlayerVisible(shouldOpen)
+                    },
+                    fullScreenExpansionProgress = fullScreenExpansionProgress,
+                    bottomPadding = chromeBottomPadding,
+                    onMiniPlayerBoundsChanged = { miniPlayerBounds = it },
+                )
+            }
+            BatchChromeOverlay(
+                host = batchChromeHost,
+                hazeState = hazeState,
+                reduceMotion = reduceMotion,
             )
             val currentPlayingId = when (val state = playbackState) {
                 is PlaybackState.Preparing -> state.item.trackId
@@ -828,8 +1045,39 @@ internal fun App(
                 currentPlayingTrack?.metadataObject()
             }
             val isCurrentFavorite = remember(currentPlayingMetadata) { isFavoriteOf(currentPlayingMetadata) }
+            val neteaseLikedIds by com.exodidio.tune.netease.NeteaseRepository.likedSongIds.collectAsStateWithLifecycle()
+            val currentNeteaseSongId = remember(currentPlayingId) {
+                com.exodidio.tune.netease.NeteaseRepository.songIdForTrack(currentPlayingId)
+            }
+            val isCurrentNeteaseTrack = currentNeteaseSongId != null
+            val isCurrentNeteaseLiked = currentNeteaseSongId != null && currentNeteaseSongId in neteaseLikedIds
             // 播放器主题独立于页面染色，使用进入歌单前的主题色。
-            CompositionLocalProvider(LocalTuneColors provides baseTuneColors) {
+            CompositionLocalProvider(
+                LocalTuneColors provides baseTuneColors,
+                com.exodidio.tune.ui.components.LocalSimilarSongsMenuActions provides
+                    com.exodidio.tune.ui.components.SimilarSongsMenuActions(
+                        available = true,
+                        isAvailable = { trackId -> com.exodidio.tune.netease.NeteaseRepository.songIdForTrack(trackId) != null },
+                        onOpen = { trackId ->
+                            closeFullScreenPlayerThen {
+                                onIntent(AppIntent.OpenSimilarSongs(trackId, returnToPlayer = true))
+                            }
+                        },
+                    ),
+                com.exodidio.tune.ui.components.LocalNeteaseEntityMenuActions provides
+                    com.exodidio.tune.ui.components.NeteaseEntityMenuActions(
+                        onOpenArtist = { artistId, name ->
+                            closeFullScreenPlayerThen {
+                                onIntent(AppIntent.OpenNeteaseArtist(artistId, name, returnToPlayer = true))
+                            }
+                        },
+                        onOpenAlbum = { albumId, name, coverUrl ->
+                            closeFullScreenPlayerThen {
+                                onIntent(AppIntent.OpenNeteaseAlbum(albumId, name, coverUrl.orEmpty(), returnToPlayer = true))
+                            }
+                        },
+                    ),
+            ) {
             FullScreenPlayer(
                 visible = isFullScreenPlayerVisible,
                 dragProgress = fullScreenPlayerDragProgress,
@@ -844,10 +1092,13 @@ internal fun App(
                 onTranslationToggle = playback.onTranslationToggle,
                 lyricSpringStrength = playback.lyricSpringStrength,
                 lyricAutoFullscreen = playback.lyricAutoFullscreen,
+                lyricFocusReturnDelayMs = playback.lyricFocusReturnDelayMs,
+                lyricAutoFullscreenDelayMs = playback.lyricAutoFullscreenDelayMs,
                 artworkCrossfade = playback.artworkCrossfade,
                 blendArtworkDuringCrossfade = playback.blendArtworkDuringCrossfade,
                 showQualityBadge = playback.showFullscreenQualityBadge,
                 appleBackdrop = playback.appleBackdrop,
+                dynamicBackdrop = playback.dynamicBackdrop,
                 adaptiveTextColor = playback.adaptiveTextColor,
                 playerTheme = uiState.playerTheme,
                 showVolumeSlider = uiState.showVolumeSlider,
@@ -870,12 +1121,42 @@ internal fun App(
                 moodRadioActive = playback.moodRadioActive,
                 isFavorite = isCurrentFavorite,
                 onFavoriteToggle = playback.onFavoriteToggle,
+                isNeteaseTrack = isCurrentNeteaseTrack,
+                isNeteaseLiked = isCurrentNeteaseLiked,
+                onNeteaseLikeToggle = playback.onNeteaseLikeToggle,
                 onTrackPlayNext = playback.onTrackPlayNext,
                 onTrackAddToQueue = playback.onTrackAddToQueue,
-                onTrackGoToAlbum = { albumId -> onIntent(AppIntent.OpenAlbumDetails(albumId)) },
-                onTrackGoToArtist = { artistId -> onIntent(AppIntent.OpenArtistDetails(artistId)) },
-                onTrackContextBottomSheet = { request -> trackContextSheet = request },
+                onTrackGoToAlbum = { albumId ->
+                    closeFullScreenPlayerThen {
+                        onIntent(AppIntent.OpenAlbumDetails(albumId, returnToPlayer = true))
+                    }
+                },
+                onTrackGoToArtist = { artistId ->
+                    closeFullScreenPlayerThen {
+                        onIntent(AppIntent.OpenArtistDetails(artistId, returnToPlayer = true))
+                    }
+                },
+                onTrackContextBottomSheet = { request ->
+                    trackContextSheetFromPlayer = true
+                    trackContextSheet = request
+                },
                 onCloseFullscreenThen = ::closeFullScreenPlayerThen,
+                playbackSpeed = playback.playbackSpeed,
+                abLoopState = playback.abLoopState,
+                sleepTimerState = playback.sleepTimerState,
+                onPlaybackSpeedSelected = playback.onPlaybackSpeedSelected,
+                onSetAbLoopPointA = playback.onSetAbLoopPointA,
+                onSetAbLoopPointB = playback.onSetAbLoopPointB,
+                onFineTuneAbLoop = playback.onFineTuneAbLoop,
+                onClearAbLoop = playback.onClearAbLoop,
+                onDeduplicateQueue = playback.onDeduplicateQueue,
+                onSleepTimerMinutes = playback.onSleepTimerMinutes,
+                onSleepTimerAfterTrack = playback.onSleepTimerAfterTrack,
+                onCancelSleepTimer = playback.onCancelSleepTimer,
+                onExportLrc = playback.onExportLrc,
+                funFeatures = playback.funFeatures,
+                currentTrackPlayCount = playback.currentTrackPlayCount,
+                onCassetteScrubChange = playback.onCassetteScrubChange,
                 onOpenMediaOutputSwitcher = playback.onOpenMediaOutputSwitcher,
                 onDismiss = {
                     setFullScreenPlayerVisible(false)
@@ -887,16 +1168,29 @@ internal fun App(
                         action()
                     }
                 },
+                miniPlayerBounds = miniPlayerBounds,
+                onExpansionProgressChanged = { fullScreenExpansionProgress = it },
                 hazeState = hazeState,
             )
             }
             trackContextSheet?.let { request ->
                 TrackContextBottomSheet(
                     request = request,
-                    onDismiss = { trackContextSheet = null },
-                    onArtistSelected = { artist ->
+                    onDismiss = {
                         trackContextSheet = null
-                        onIntent(AppIntent.OpenArtistDetails(artist.id))
+                        trackContextSheetFromPlayer = false
+                    },
+                    onArtistSelected = { artist ->
+                        val fromPlayer = trackContextSheetFromPlayer
+                        trackContextSheet = null
+                        trackContextSheetFromPlayer = false
+                        if (fromPlayer) {
+                            closeFullScreenPlayerThen {
+                                onIntent(AppIntent.OpenArtistDetails(artist.id, returnToPlayer = true))
+                            }
+                        } else {
+                            onIntent(AppIntent.OpenArtistDetails(artist.id))
+                        }
                     },
                     onSearchLyrics = playback.onSearchLyrics,
                     onLyricsSelected = playback.onLyricsSelected,

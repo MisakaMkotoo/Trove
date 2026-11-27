@@ -62,11 +62,17 @@ internal data class LocalTrack(
     val copyright: String?,
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
+    val folderPath: String? = null,
 )
 
 internal fun MediaRow.toLocalTrack(): LocalTrack? {
     if (mediaId <= 0L || uri.isBlank()) return null
     val fileTitle = displayName?.substringBeforeLast('.')?.takeIf { it.isNotBlank() }
+    val resolvedFilePath = scanPathForRow(this)
+    val folderPath = resolvedFilePath
+        ?.let { canonicalizeScanPath(it).substringBeforeLast('/', missingDelimiterValue = "").ifBlank { null } }
+        ?: relativePath?.trim()?.trim('/')?.takeIf { it.isNotBlank() }
+            ?.let { canonicalizeScanPath("/storage/emulated/0/$it") }
     return LocalTrack(
         mediaId = mediaId,
         uri = uri,
@@ -90,6 +96,7 @@ internal fun MediaRow.toLocalTrack(): LocalTrack? {
         copyright = copyright,
         sampleRateHz = null,
         bitDepth = null,
+        folderPath = folderPath,
     )
 }
 
@@ -257,6 +264,7 @@ internal fun metadataJsonFor(
         optStr("raw_composer_names", track.composer) +
         optStr("label", track.label) +
         optStr("copyright", track.copyright) +
+        optStr("folder_path", track.folderPath) +
         "}"
 }
 

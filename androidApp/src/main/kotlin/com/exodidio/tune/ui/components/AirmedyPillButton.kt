@@ -1,5 +1,9 @@
 package com.exodidio.tune.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -10,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,13 +41,20 @@ fun TunePillButton(
     enabled: Boolean = true,
 ) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
+    val interactionSource = remember { MutableInteractionSource() }
     val shape = RoundedCornerShape(28.dp)
-    val background = when (variant) {
+    val baseBackground = when (variant) {
         TunePillButtonVariant.Primary,
         TunePillButtonVariant.Destructive,
         -> colors.primary
         TunePillButtonVariant.Secondary -> colors.buttonSecondary
     }
+    val background by animateColorAsState(
+        targetValue = if (enabled) baseBackground else baseBackground.copy(alpha = 0.45f),
+        animationSpec = if (reduceMotion) snap() else tween(180, easing = FastOutSlowInEasing),
+        label = "pill-button-background",
+    )
     val contentColor = when (variant) {
         TunePillButtonVariant.Primary,
         TunePillButtonVariant.Destructive,
@@ -51,15 +63,16 @@ fun TunePillButton(
     }
     Box(
         modifier = modifier
+            .then(if (enabled) Modifier.pressScale(interactionSource, pressedScale = 0.97f) else Modifier)
             .fillMaxWidth()
             .defaultMinSize(minHeight = 52.dp)
             .clip(shape)
-            .background(if (enabled) background else background.copy(alpha = 0.45f))
+            .background(background)
             .semantics { contentDescription = label }
             .clickable(
                 enabled = enabled,
                 role = Role.Button,
-                interactionSource = remember { MutableInteractionSource() },
+                interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
             ),

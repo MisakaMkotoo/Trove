@@ -196,11 +196,14 @@ internal class LocalLibraryScanner(
         while (bounds.outWidth / sample > 1024 || bounds.outHeight / sample > 1024) sample *= 2
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
             ?: return null
-        val out = java.io.ByteArrayOutputStream().use { stream ->
-            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)) return null
-            stream.toByteArray()
+        val out = try {
+            java.io.ByteArrayOutputStream().use { stream ->
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)) return null
+                stream.toByteArray()
+            }
+        } finally {
+            if (!bitmap.isRecycled) bitmap.recycle()
         }
-        if (!bitmap.isRecycled) bitmap.recycle()
         val hash = MessageDigest.getInstance("SHA-256").digest(out).joinToString("") { "%02x".format(it) }
         val relativePath = "artwork-local/${trackIdFor(track.mediaId)}.jpg"
         val target = File(context.filesDir, relativePath)

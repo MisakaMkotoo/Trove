@@ -1,32 +1,23 @@
 package com.exodidio.tune.player
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Notification
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import android.content.IntentFilter
-import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaDescription
-import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState as AndroidMediaPlaybackState
-import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import java.io.File
 import java.util.UUID
 import android.util.LruCache
+import android.graphics.Bitmap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,73 +26,90 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import com.exodidio.tune.MainActivity
-import com.exodidio.tune.R
 import com.exodidio.tune.library.AudioTarget
 import com.exodidio.tune.library.resolveAudioTarget
+import com.exodidio.tune.lyrics.LyricOffsetStore
+import com.exodidio.tune.lyrics.LyricsPreferences
+import com.exodidio.tune.lyrics.LyricsSettings
+import com.exodidio.tune.lyrics.SystemLyricMode
+import com.exodidio.tune.ui.navigation.PlayerLyricLine
+import com.exodidio.tune.ui.navigation.parsePlayerLyricsDocument
 import com.exodidio.tune.sync.AndroidSyncRuntime
-import com.exodidio.tune.mood.MoodRadioBatchSize
-import com.exodidio.tune.mood.MoodRadioRefillThreshold
-import com.exodidio.tune.mood.selectMoodRadio
 import com.exodidio.tune.netease.NeteaseRepository
-
-/** 远程音频还没缓存：准备流程要交还给命令锁之外去下载。 */
-private class RemoteAudioNotReady(val path: String, val url: String) : Exception("Remote audio not cached")
-
-/** 流播直链还没取到：准备流程交还给命令锁之外去请求。 */
-private class StreamUrlNotReady(val songId: Long) : Exception("Streaming url not ready")
-
-/** 用户点播放后等直链取回的托管状态；被新指令取代或取回失败时清空。 */
-private class PendingStreamResume(
-    val songId: Long,
-    val item: PlaybackItem,
-    val positionMs: Long,
-    val durationMs: Long,
-    val token: Int,
-)
-
 
 /** Owns Android transport; queue semantics are delegated to sharedLogic. */
 class PlaybackService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val commandMutex = Mutex()
+    internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    internal val commandMutex = Mutex()
     // 每次指令进来就自增：正在下载的上一首尽快放弃，连续切歌不必排队等整首下完。
-    private val loadToken = java.util.concurrent.atomic.AtomicInteger(0)
+    internal val loadToken = java.util.concurrent.atomic.AtomicInteger(0)
     // 在线流播放状态：用于识别“打开后立刻结束”的失败流。
     // 位置 ticker 在锁外读写这几个字段：用 @Volatile 保证跨线程可见性。
-    @Volatile private var currentStreamSongId: Long? = null
+    @Volatile internal var currentStreamSongId: Long? = null
+    internal val mainHandler = Handler(Looper.getMainLooper())
+    internal var lastPreviewToastTrackId: String? = null
+    // 参考 MeiloX：临时失败的原地重试状态，同一首歌连续失败有上限。
+    internal var recoveryTrackId: String? = null
+    internal var temporaryRecoveryAttempts = 0
+    internal var lastRecoveryPositionMs = -1L
+    internal var cleanEofRetriedTrackId: String? = null
+    internal var cleanEofRetriedPositionMs = -1L
+    internal var recoveryJob: Job? = null
     private var currentStreamStartedAt = 0L
-    @Volatile private var lastStreamPositionMs = 0L
-    @Volatile private var lastStreamSongId: Long? = null
-    private var pendingStreamResume: PendingStreamResume? = null
+    @Volatile internal var lastStreamPositionMs = 0L
+    @Volatile internal var lastStreamSongId: Long? = null
+    @Volatile internal var pendingRecoverySeek: Pair<String, Long>? = null
+    @Volatile internal var lastSeekAtMs = 0L
+    @Volatile internal var lastSeekTrackId: String? = null
+    @Volatile internal var seekBufferingGraceUntilMs = 0L
+    internal var bufferingStallAnchor: BufferingStallAnchor? = null
+    internal var pendingStreamResume: PendingStreamResume? = null
     // 点选类指令的代际号：连点十来下时，旧指令轮到自己时已被更新，直接丢弃，
     // 只执行最后点的那一首，避免积压指令依次准备、自动连切。
     private val selectionGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+    private val seekGeneration = java.util.concurrent.atomic.AtomicInteger(0)
     private val restored = CompletableDeferred<Unit>()
     private lateinit var restoreJob: Job
-    private val queue = PlaybackQueue()
-    @Volatile private var decoder: FfmpegDecoder? = null
-    private var preloadedItem: PlaybackItem? = null
+    internal val queue = PlaybackQueue()
+    @Volatile internal var decoder: FfmpegDecoder? = null
+    internal val decoderAccessLock = java.util.concurrent.locks.ReentrantReadWriteLock()
+    private var pauseSpinDownJob: Job? = null
+    @Volatile internal var preparingStartedAt: Pair<String, Long>? = null
+    internal var preloadedItem: PlaybackItem? = null
     private lateinit var sessionStore: PlaybackSessionStore
     private lateinit var playbackPreferences: PlaybackPreferences
     private lateinit var equalizerPreferences: EqualizerPreferences
-    private lateinit var normalizationPreferences: NormalizationPreferences
+    internal lateinit var normalizationPreferences: NormalizationPreferences
+    private lateinit var lyricsPreferences: LyricsPreferences
+    internal var lyriconPublisher: LyriconPublisher? = null
+    // 系统歌词（媒体通知/独立通知/超级岛）的状态：ticker 与歌词流协程共享，
+    // 只在本服务进程内读写，用 @Volatile 保证跨协程可见。
+    @Volatile internal var lyricSettings = LyricsSettings()
+    @Volatile internal var trackedLyricLines: List<PlayerLyricLine> = emptyList()
+    @Volatile internal var trackedNativeLyric: String? = null
+    @Volatile internal var trackedLyricTrackId: String? = null
+    @Volatile internal var lastLyricLineIndex = -1
+    @Volatile internal var lastLyricSurfaceTrackId: String? = null
+    @Volatile internal var lastLyricPlaying = false
+    @Volatile internal var currentLyricText = ""
+    @Volatile internal var currentNextLyricText = ""
+    @Volatile internal var currentLyricOffsetMs = 0L
+    @Volatile internal var mediaNotificationStyle = MediaNotificationStyle.Default
     private lateinit var listeningTracker: ListeningTracker
     private val listeningWrites = Channel<ListeningWrite>(64)
     // 命令锁内只投递状态；Binder/全库索引等发布动作交给锁外单消费者，合并成最新一次。
     private val queuePublishRequests = Channel<PlaybackQueueSnapshot>(Channel.CONFLATED)
-    private val notificationRequests = Channel<Unit>(Channel.CONFLATED)
+    internal val notificationRequests = Channel<Unit>(Channel.CONFLATED)
     // 连点的上一首/下一首合并处理：锁内只推进队列下标，只对最终曲目启动播放。
     private val pendingSkips = java.util.concurrent.ConcurrentLinkedQueue<Boolean>()
     private val skipRequests = Channel<Unit>(Channel.CONFLATED)
@@ -112,23 +120,24 @@ class PlaybackService : Service() {
     private var skipStartJob: Job? = null
     @Volatile private var pendingStartPaused = false
     private var lastSessionPositionAtMs = 0L
-    private var moodRefillJob: Job? = null
+    internal var moodRefillJob: Job? = null
     private var listeningFadeOutgoing: String? = null
     private var listeningFadeStartedAt = 0L
     private var listeningFadeStartedElapsed = 0L
     private var listeningFadeMaxMs = 0L
-    private var normalizationSettings = NormalizationSettings()
+    internal var normalizationSettings = NormalizationSettings()
     private var equalizerSettings = EqualizerSettings()
     private var preferencesJob: Job? = null
     private var moodRadioJob: Job? = null
-    private var moodRadioSeedId: String? = null
-    private var moodRadioLastRefillAttempt: Pair<String?, Int>? = null
+    internal var moodRadioSeedId: String? = null
+    internal var moodRadioLastRefillAttempt: Pair<String?, Int>? = null
     private var resumeOnFocusGain = false
+    @Volatile internal var isForegroundStarted = false
     private var isDucked = false
     private lateinit var audioManager: AudioManager
-    private lateinit var mediaSession: MediaSession
+    internal lateinit var mediaSession: MediaSession
     private lateinit var focusRequest: AudioFocusRequest
-    private val noisyAudioReceiver = object : BroadcastReceiver() {
+    internal val noisyAudioReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (audioBecomingNoisyRequiresPause(intent.action)) dispatch(ActionPause)
         }
@@ -136,11 +145,18 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
+        activeInstance = this
         AndroidPlaybackRuntime.initialize(applicationContext, AndroidSyncRuntime.syncStore)
+        LyricOffsetStore.initialize(applicationContext)
+        com.exodidio.tune.netease.NeteaseWifiAutoCacheManager.initialize(applicationContext)
         listeningTracker = ListeningTracker("local") { UUID.randomUUID().toString() }
         // 写盘协程挂在进程级 scope：Service 销毁时不能把它一起取消，否则最后一条听歌记录会丢。
         AndroidSyncRuntime.backgroundScope.launch {
-            for (write in listeningWrites) AndroidSyncRuntime.syncStore.recordListening(write)
+            for (write in listeningWrites) {
+                AndroidSyncRuntime.syncStore.recordListening(write)
+                com.exodidio.tune.netease.NeteaseRepository.reportListeningWrite(write)
+            }
         }
         sessionStore = PlaybackSessionStore(applicationContext)
         playbackPreferences = PlaybackPreferences(applicationContext)
@@ -151,15 +167,101 @@ class PlaybackService : Service() {
                 if (!enabled) commandMutex.withLock { stopMoodRadio() }
             }
         }
+        lyricsPreferences = LyricsPreferences(applicationContext)
+        lyriconPublisher = LyriconPublisher(applicationContext).also { publisher ->
+            scope.launch { publisher.start() }
+        }
+        scope.launch {
+            lyricsPreferences.settings.collectLatest { settings ->
+                val previous = lyricSettings
+                lyricSettings = settings
+                if (settings.systemLyricMode == SystemLyricMode.Off && previous.systemLyricMode != SystemLyricMode.Off) {
+                    currentLyricText = ""
+                    currentNextLyricText = ""
+                    notificationRequests.trySend(Unit)
+                }
+                if (!settings.standaloneLyricNotification) cancelStandaloneLyricNotification()
+                if (!settings.hyperosSuperIsland) SuperIslandLyrics.stop(applicationContext)
+                lastLyricLineIndex = -1
+                updateLyricSurfaces()
+            }
+        }
+        // 当前曲目有歌词就解析成时间轴；歌词在 UI 线程抓取后写回进程内曲库，这里持续跟随。
+        scope.launch {
+            state
+                .map { snapshot ->
+                    when (snapshot) {
+                        is PlaybackState.Playing -> snapshot.item.trackId
+                        is PlaybackState.Paused -> snapshot.item.trackId
+                        is PlaybackState.Preparing -> snapshot.item.trackId
+                        else -> null
+                    }
+                }
+                .distinctUntilChanged()
+                .collectLatest { trackId ->
+                    trackedLyricTrackId = trackId
+                    trackedLyricLines = emptyList()
+                    trackedNativeLyric = null
+                    lastLyricLineIndex = -1
+                    currentLyricOffsetMs = LyricOffsetStore.offsetFor(trackId)
+                    if (trackId == null) {
+                        clearLyricSurfaces()
+                        return@collectLatest
+                    }
+                    AndroidSyncRuntime.syncStore.providerLyrics(trackId).collect { content ->
+                        val lines = content
+                            ?.let { parsePlayerLyricsDocument(it).lines }
+                            .orEmpty()
+                            .filter { it.timestampSeconds != null }
+                        trackedLyricLines = lines
+                        trackedNativeLyric = buildNativeLyric(lines, currentLyricOffsetMs)
+                        lastLyricLineIndex = -1
+                        lastLyricSurfaceTrackId = null
+                        republishCurrentMetadata()
+                    }
+                }
+        }
+        scope.launch {
+            LyricOffsetStore.offsets.collect { map ->
+                val tid = trackedLyricTrackId
+                val nextOffset = if (tid != null) map[tid] ?: 0L else 0L
+                if (nextOffset != currentLyricOffsetMs) {
+                    currentLyricOffsetMs = nextOffset
+                    trackedNativeLyric = buildNativeLyric(trackedLyricLines, nextOffset)
+                    lastLyricLineIndex = -1
+                    lastLyricSurfaceTrackId = null
+                    republishCurrentMetadata()
+                    updateLyricSurfaces()
+                }
+            }
+        }
         preferencesJob = scope.launch {
             playbackPreferences.settings.collectLatest { settings ->
                 commandMutex.withLock {
                     crossfadeSeconds.value = settings.seconds
                     blendArtworkDuringCrossfade.value = settings.blendArtworkDuringCrossfade
+                    gaplessPlayback.value = settings.gaplessPlayback
                     if (!settings.blendArtworkDuringCrossfade) clearArtworkCrossfade()
                     // A preference update must never change a fade already
                     // running, but it does refresh the idle source afterward.
                     if (decoder?.isCrossfading() != true) preloadNext()
+                }
+            }
+        }
+        scope.launch {
+            playbackPreferences.funFeatures.collectLatest { settings ->
+                funFeaturesSettings = settings
+                commandMutex.withLock {
+                    decoder?.setCassetteEnabled(settings.cassetteMode)
+                }
+            }
+        }
+        scope.launch {
+            playbackPreferences.mediaNotificationStyle.collectLatest { style ->
+                if (mediaNotificationStyle != style) {
+                    mediaNotificationStyle = style
+                    republishCurrentMetadata()
+                    notificationRequests.trySend(Unit)
                 }
             }
         }
@@ -180,15 +282,20 @@ class PlaybackService : Service() {
             }
         }
         // 在线曲目封面异步补齐后，正在播放的曲目也补上封面（只改状态，不重启播放）。
-        scope.launch {            AndroidSyncRuntime.syncStore.playbackOnlyTracksFlow.collect { tracks ->
+        scope.launch {
+            combine(
+                AndroidSyncRuntime.syncStore.playbackOnlyTracksFlow,
+                AndroidSyncRuntime.syncStore.tracks,
+            ) { _, _ -> Unit }.collectLatest {
                 val current = when (val snapshot = state.value) {
                     is PlaybackState.Playing -> snapshot.item
                     is PlaybackState.Paused -> snapshot.item
                     is PlaybackState.Preparing -> snapshot.item
                     else -> null
-                } ?: return@collect
-                val artwork = tracks.firstOrNull { it.id == current.trackId }?.artworkPath ?: return@collect
-                if (artwork == current.artworkPath) return@collect
+                } ?: return@collectLatest
+                val artwork = AndroidSyncRuntime.syncStore.trackForPlayback(current.trackId)?.artworkPath
+                    ?: return@collectLatest
+                if (artwork == current.artworkPath) return@collectLatest
                 commandMutex.withLock {
                     val now = state.value
                     val item = when (now) {
@@ -227,8 +334,14 @@ class PlaybackService : Service() {
                 } ?: return@collect
                 if (item.trackId == requestedTrackId) return@collect
                 requestedTrackId = item.trackId
-                if (item.artworkPath.isNullOrBlank() && item.trackId.startsWith("netease:")) {
-                    NeteaseRepository.ensurePlaybackCover(item.trackId)
+                if (item.trackId.startsWith("netease:")) {
+                    val hasValidFile = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        val path = item.artworkPath
+                        !path.isNullOrBlank() && java.io.File(path).isFile
+                    }
+                    if (!hasValidFile) {
+                        NeteaseRepository.ensurePlaybackCover(item.trackId)
+                    }
                 }
             }
         }
@@ -257,6 +370,12 @@ class PlaybackService : Service() {
                 }
                 override fun onSeekTo(pos: Long) { dispatch(ActionSeek, positionMs = pos) }
                 override fun onStop() { dispatch(ActionStop) }
+                override fun onCustomAction(action: String, extras: android.os.Bundle?) {
+                    when (action) {
+                        ActionToggleFavorite -> toggleCurrentFavoriteAsync()
+                        ActionCycleRepeat -> dispatch(ActionCycleRepeat)
+                    }
+                }
             })
             setPlaybackToLocal(
                 AudioAttributes.Builder()
@@ -278,9 +397,38 @@ class PlaybackService : Service() {
             for (ignored in skipRequests) runCatching { advanceSkipsAndScheduleStart() }
         }
         scope.launch {
+            val store = AndroidSyncRuntime.syncStore
+            combine(
+                state.map { snapshot ->
+                    when (snapshot) {
+                        is PlaybackState.Playing -> listOf("P", snapshot.item.trackId, snapshot.item.title, snapshot.item.artist, snapshot.item.artworkPath)
+                        is PlaybackState.Paused -> listOf("S", snapshot.item.trackId, snapshot.item.title, snapshot.item.artist, snapshot.item.artworkPath)
+                        is PlaybackState.Preparing -> listOf("B", snapshot.item.trackId, snapshot.item.title, snapshot.item.artist, snapshot.item.artworkPath)
+                        else -> listOf("I")
+                    }
+                }.distinctUntilChanged(),
+                store.favoriteIds,
+                store.favoriteOverrides,
+                NeteaseRepository.likedSongIds,
+            ) { _, _, _, _ -> Unit }
+                .collectLatest {
+                    updateNowPlayingTransportState()
+                    notificationRequests.trySend(Unit)
+                    runCatching { TuneAppWidgetProvider.pushUpdate(applicationContext) }
+                    runCatching {
+                        android.service.quicksettings.TileService.requestListeningState(
+                            applicationContext,
+                            android.content.ComponentName(applicationContext, PlaybackQuickTileService::class.java),
+                        )
+                    }
+                }
+        }
+        scope.launch {
             while (true) {
                 delay(200)
                 tickPlaybackPosition()
+                updateLyricSurfaces()
+                syncLyricon()
             }
         }
         restoreJob = scope.launch {
@@ -326,9 +474,15 @@ class PlaybackService : Service() {
                 val clampSample = sampleStreamClampIfFinished()
                 commandMutex.withLock {
                     val playing = state.value as? PlaybackState.Playing
-                    if (playing != null) enqueueListening(listeningTracker.tick(
+                    if (playing != null && !playing.isBuffering) enqueueListening(listeningTracker.tick(
                         playing.positionMs, playing.durationMs, System.currentTimeMillis(), SystemClock.elapsedRealtime(),
                     ))
+                    // 参考 MeiloX：持续播够 2 秒才算恢复，清零临时重试计数。
+                    if (playing != null && !playing.isBuffering && playing.positionMs >= HealthyPlaybackMs &&
+                        playing.item.trackId == recoveryTrackId
+                    ) {
+                        temporaryRecoveryAttempts = 0
+                    }
                     consumeNativeTransition()
                     if (listeningFadeOutgoing != null && decoder?.isCrossfading() != true) finishListeningCrossfade()
                     if (decoder?.isCrossfading() != true) clearArtworkCrossfade()
@@ -338,43 +492,141 @@ class PlaybackService : Service() {
                         consumeNativeTransition()
                     } else if (decoder?.isFinished() == true && state.value is PlaybackState.Playing) {
                         val current = state.value as PlaybackState.Playing
+                        val ab = abLoopState.value
+                        if (ab.isActive && ab.trackId == current.item.trackId) {
+                            seekCurrent(ab.pointA!!)
+                            decoder?.play()
+                        } else if (sleepTimerState.value.afterCurrentTrack) {
+                            currentStreamSongId = null
+                            sleepTimerState.value = SleepTimerState()
+                            stopAtCurrentTrack(PlaybackEndReason.COMPLETED)
+                            publishQueue()
+                        } else {
                         val streamId = currentStreamSongId
                         val proxy = com.exodidio.tune.netease.NeteaseStreamProxy
-                        val duration = decoder?.durationMs() ?: current.durationMs
-                        val endedImmediately = SystemClock.elapsedRealtime() - currentStreamStartedAt < 3_000L
-                        val clampMs = streamId?.let { songId ->
-                            clampSample?.takeIf { it.songId == songId }?.positionMs ?: run {
-                                val prefixMs = proxy.cachedPrefixMs(songId, duration)
-                                if (prefixMs > 0L) prefixMs
-                                else if (lastStreamSongId == songId) lastStreamPositionMs
-                                else current.positionMs
-                            }
+                        // 优先用状态里的时长（在线歌来自接口），避免解码器流式估算跳变影响判断。
+                        val duration = current.durationMs.takeIf { it > 0L } ?: decoder?.durationMs() ?: 0L
+                        val elapsedMs = SystemClock.elapsedRealtime() - maxOf(
+                            currentStreamStartedAt,
+                            if (lastSeekTrackId == current.item.trackId) lastSeekAtMs else 0L,
+                        )
+                        val actualPosMs = streamId?.let { songId ->
+                            val raw = clampSample?.takeIf { it.songId == songId }?.positionMs
+                                ?: maxOf(
+                                    current.positionMs,
+                                    decoder?.positionMs() ?: 0L,
+                                    if (lastStreamSongId == songId) lastStreamPositionMs else 0L,
+                                )
+                            clampSeekPosition(raw, duration)
+                        } ?: current.positionMs
+                        val hasUpstreamError = streamId != null && proxy.hasRecentUpstreamError(streamId)
+                        val wasIncomplete = streamId != null && proxy.wasStreamIncomplete(streamId)
+                        val isPreview = streamId != null && NeteaseRepository.isPreviewStream(streamId)
+                        val alreadyRetriedCleanEof = cleanEofRetriedTrackId == current.item.trackId &&
+                            cleanEofRetriedPositionMs >= 0L &&
+                            kotlin.math.abs(actualPosMs - cleanEofRetriedPositionMs) < 3_000L
+                        val completionAction = if (streamId != null) {
+                            classifyStreamCompletion(
+                                isPreview = isPreview,
+                                positionMs = actualPosMs,
+                                durationMs = duration,
+                                elapsedSinceStartMs = elapsedMs,
+                                hasUpstreamError = hasUpstreamError,
+                                wasStreamIncomplete = wasIncomplete,
+                                alreadyRetriedCleanEofAtSamePos = alreadyRetriedCleanEof,
+                            )
+                        } else {
+                            StreamCompletionAction.NormalCompletion
                         }
-                        val failedRecently = streamId != null && proxy.hasRecentUpstreamError(streamId)
-                        val incomplete = duration <= 0L || (clampMs ?: 0L) < duration - 500L
-                        if (streamId != null && clampMs != null && (endedImmediately || (failedRecently && incomplete))) {
-                            // 断网/读失败：卡在已缓存末尾并暂停，不退出播放入口，也不自动跳下一首。
-                            System.err.println("NETSTREAM clamp song=$streamId cachedMs=$clampMs duration=$duration failed=$failedRecently")
-                            lastStreamPositionMs = clampMs
+                        if (streamId != null && completionAction != StreamCompletionAction.NormalCompletion) {
+                            Log.w(
+                                PlaybackLogTag,
+                                "NETSTREAM premature stop song=$streamId action=$completionAction " +
+                                    "posMs=$actualPosMs duration=$duration err=$hasUpstreamError incomplete=$wasIncomplete",
+                            )
+                            if (completionAction == StreamCompletionAction.RecoverFromCleanPrematureEof) {
+                                cleanEofRetriedTrackId = current.item.trackId
+                                cleanEofRetriedPositionMs = actualPosMs
+                                proxy.removeSong(streamId)
+                                NeteaseRepository.invalidateStreamUrl(streamId)
+                            } else if (
+                                temporaryRecoveryAttempts >= 1 ||
+                                (recoveryTrackId == current.item.trackId &&
+                                    lastRecoveryPositionMs >= 0L &&
+                                    kotlin.math.abs(actualPosMs - lastRecoveryPositionMs) < 3_000L)
+                            ) {
+                                // 同一位置反复失败：淘汰可能受损的本地缓存，强迫下一次全量重拉。
+                                proxy.removeSong(streamId)
+                                NeteaseRepository.invalidateStreamUrl(streamId)
+                            }
+                            lastRecoveryPositionMs = actualPosMs
+                            lastStreamPositionMs = actualPosMs
                             lastStreamSongId = streamId
-                            decoder?.seekTo(clampMs)
+                            decoder?.seekTo(actualPosMs)
                             decoder?.pause()
-                            state.value = PlaybackState.Paused(current.item, clampMs, duration)
-                            publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, clampMs, duration)
+                            state.value = PlaybackState.Paused(current.item, actualPosMs, duration)
+                            publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, actualPosMs, duration)
                             notificationRequests.trySend(Unit)
                             currentStreamSongId = null
+                            val atEnd = duration > 0L && actualPosMs >= duration - 1_000L
+                            if (!atEnd) scheduleTemporaryStreamRecovery(current.item, actualPosMs, duration)
                         } else {
-                            if (streamId != null && endedImmediately) {
-                                System.err.println("NETSTREAM ended immediately song=$streamId")
+                            if (streamId != null && elapsedMs < 3_000L) {
+                                Log.w(PlaybackLogTag, "NETSTREAM ended immediately song=$streamId")
                             }
                             currentStreamSongId = null
+                            enqueueBackgroundLoudnessAnalysis(current.item)
                             handleTransition(queue.next(), PlaybackEndReason.COMPLETED)
                             publishQueue()
                         }
+                        }
+                    } else if (playing != null && playing.isBuffering && currentStreamSongId != null) {
+                        val streamId = currentStreamSongId!!
+                        val now = SystemClock.elapsedRealtime()
+                        val aheadMs = decoder?.bufferedAheadMs() ?: 0L
+                        val anchor = nextBufferingStallAnchor(
+                            previous = bufferingStallAnchor,
+                            trackId = playing.item.trackId,
+                            positionMs = playing.positionMs,
+                            bufferedAheadMs = aheadMs,
+                            nowElapsedMs = now,
+                        )
+                        bufferingStallAnchor = anchor
+                        val proxy = com.exodidio.tune.netease.NeteaseStreamProxy
+                        val hasUpstreamError = proxy.hasRecentUpstreamError(streamId)
+                        val wasIncomplete = proxy.wasStreamIncomplete(streamId)
+                        if (shouldRecoverStalledBuffering(anchor, now, hasUpstreamError, wasIncomplete)) {
+                            Log.w(
+                                PlaybackLogTag,
+                                "NETSTREAM buffering stall song=$streamId posMs=${playing.positionMs} " +
+                                    "aheadMs=$aheadMs err=$hasUpstreamError incomplete=$wasIncomplete",
+                            )
+                            bufferingStallAnchor = null
+                            if (hasUpstreamError || wasIncomplete || temporaryRecoveryAttempts >= 1) {
+                                proxy.removeSong(streamId)
+                                NeteaseRepository.invalidateStreamUrl(streamId)
+                            }
+                            val actualPosMs = clampSeekPosition(playing.positionMs, playing.durationMs)
+                            lastRecoveryPositionMs = actualPosMs
+                            lastStreamPositionMs = actualPosMs
+                            lastStreamSongId = streamId
+                            decoder?.seekTo(actualPosMs)
+                            decoder?.pause()
+                            state.value = PlaybackState.Paused(playing.item, actualPosMs, playing.durationMs)
+                            publishNowPlaying(playing.item, AndroidMediaPlaybackState.STATE_PAUSED, actualPosMs, playing.durationMs)
+                            notificationRequests.trySend(Unit)
+                            currentStreamSongId = null
+                            val atEnd = playing.durationMs > 0L && actualPosMs >= playing.durationMs - 1_000L
+                            if (!atEnd) scheduleTemporaryStreamRecovery(playing.item, actualPosMs, playing.durationMs)
+                        }
+                    } else {
+                        bufferingStallAnchor = null
                     }
+                    tickSleepTimerLocked()
                     maybeRefillMoodRadio()
                     maybeAppendHeartbeat()
                     maybeAppendRoam()
+                    maybeAppendSimilar()
                     // A crossfade occupies both native source slots. Once its
                     // callback retires the outgoing item, populate that slot
                     // with the queue's new immediate successor.
@@ -384,8 +636,44 @@ class PlaybackService : Service() {
         }
     }
 
+    private fun resolveImmediatePlaybackItem(intent: Intent?): PlaybackItem? {
+        when (val current = state.value) {
+            is PlaybackState.Playing -> return current.item
+            is PlaybackState.Paused -> return current.item
+            is PlaybackState.Preparing -> return current.item
+            else -> Unit
+        }
+        val action = intent?.action ?: return null
+        val targetId = when (action) {
+            ActionPlay, ActionShuffle -> {
+                val trackIds = intent.getStringArrayExtra(TrackIdsExtra).orEmpty()
+                val startIndex = intent.getIntExtra(StartIndexExtra, 0)
+                trackIds.getOrNull(startIndex) ?: trackIds.firstOrNull()
+            }
+            ActionSelect, ActionStartMoodRadio -> intent.getStringExtra(TrackIdExtra)
+            else -> queue.snapshot().currentTrackId
+        } ?: return null
+        val track = AndroidSyncRuntime.syncStore.trackForPlayback(targetId) ?: return null
+        return PlaybackItem(
+            trackId = track.id,
+            title = track.title,
+            artist = track.artists,
+            audioPath = track.audioPath.orEmpty(),
+            artworkPath = track.artworkPath,
+            albumId = track.albumId,
+            album = track.album,
+            trackNumber = track.trackNumber,
+        )
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (playbackActionReplacesRestoredQueue(intent?.action)) {
+        val action = intent?.action
+        if (action in PlaybackForegroundPromotionActions && !isForegroundStarted) {
+            resolveImmediatePlaybackItem(intent)?.let { item ->
+                showForeground(item, fromCacheOnly = true)
+            }
+        }
+        if (playbackActionReplacesRestoredQueue(action)) {
             // A tap is more important than reconstructing the prior session. In
             // particular, do not delay its Preparing state (and mini-player)
             // behind DataStore I/O and validation of every saved queue entry.
@@ -399,6 +687,7 @@ class PlaybackService : Service() {
                 startIndex = intent.getIntExtra(StartIndexExtra, 0),
                 heartbeatStart = intent.getBooleanExtra(HeartbeatStartExtra, false),
                 roamStart = intent.getBooleanExtra(RoamStartExtra, false),
+                similarStart = intent.getBooleanExtra(SimilarStartExtra, false),
             )
             ActionSeek -> dispatch(ActionSeek, positionMs = intent.getLongExtra(PositionMsExtra, 0L))
             ActionSetShuffle -> dispatch(ActionSetShuffle, enabled = intent.getBooleanExtra(EnabledExtra, false))
@@ -418,6 +707,37 @@ class PlaybackService : Service() {
             ActionStartMoodRadio -> dispatch(ActionStartMoodRadio, trackIds = listOfNotNull(intent.getStringExtra(TrackIdExtra)))
             ActionSelect -> dispatch(ActionSelect, trackIds = listOfNotNull(intent.getStringExtra(TrackIdExtra)))
             ActionRemove -> dispatch(ActionRemove, trackIds = listOfNotNull(intent.getStringExtra(TrackIdExtra)))
+            ActionSetSpeed -> {
+                val speed = clampPlaybackSpeed(intent.getFloatExtra(SpeedExtra, 1f))
+                playbackSpeed.value = speed
+                if (commandMutex.tryLock()) {
+                    try {
+                        decoder?.setSpeed(speed)
+                        updateNowPlayingTransportState()
+                    } finally {
+                        commandMutex.unlock()
+                    }
+                } else {
+                    dispatch(action = ActionSetSpeed, speed = speed)
+                }
+            }
+            ActionSetSleepTimer -> dispatch(
+                action = ActionSetSleepTimer,
+                sleepMinutes = intent.getIntExtra(SleepTimerMinutesExtra, 0),
+                sleepAfterTrack = intent.getBooleanExtra(SleepTimerAfterTrackExtra, false),
+            )
+            ActionCancelSleepTimer,
+            ActionSetAbLoopPointA,
+            ActionSetAbLoopPointB,
+            ActionClearAbLoop,
+            ActionDeduplicateQueue,
+            ActionCycleRepeat -> dispatch(intent.action!!)
+            ActionFineTuneAbLoop -> dispatch(
+                action = ActionFineTuneAbLoop,
+                abIsA = intent.getBooleanExtra(AbLoopPointIsAExtra, true),
+                abDeltaMs = intent.getLongExtra(AbLoopDeltaMsExtra, 0L),
+            )
+            ActionToggleFavorite -> toggleCurrentFavoriteAsync()
             null -> Unit
             else -> dispatch(intent.action!!)
         }
@@ -427,6 +747,11 @@ class PlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        isRunning = false
+        activeInstance = null
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
+        preparingStartedAt = null
         // 会话快照必须在解码器关闭前取；之后所有落盘/释放都交给进程级 IO，不再阻塞主线程。
         val finalSession = currentSession()
         finishListeningCrossfade()
@@ -437,11 +762,13 @@ class PlaybackService : Service() {
         AndroidSyncRuntime.backgroundScope.launch {
             runCatching { sessionStore.save(finalSession) }
             // FfmpegDecoder 无内部同步：位置 ticker 用 tryLock 访问它，
-            // 所以关闭必须同样在命令锁内，否则可能与最后几拍读取并发。
-            runCatching { commandMutex.withLock { closingDecoder?.close() } }
+            // 所以关闭必须同样在命令锁 + writeLock 内，否则可能与最后几拍/UI线程读取并发。
+            runCatching { commandMutex.withLock { closeDecoderSafely(closingDecoder) } }
         }
         preferencesJob?.cancel()
         moodRadioJob?.cancel()
+        lyriconPublisher?.destroy()
+        lyriconPublisher = null
         unregisterReceiver(noisyAudioReceiver)
         AndroidPlaybackSession.clear()
         mediaSession.release()
@@ -484,6 +811,9 @@ class PlaybackService : Service() {
         if (targetId == queue.snapshot().currentTrackId && state.value is PlaybackState.Playing) return
         val item = AndroidPlaybackRuntime.controller().resolve(targetId) ?: return
         if (superseded()) return
+        if (preparingStartedAt?.first != targetId) {
+            preparingStartedAt = targetId to SystemClock.elapsedRealtime()
+        }
         // 只写状态、不碰解码器，也不拿命令锁：点下去界面立刻变，旧声晚一点停。
         state.value = PlaybackState.Preparing(item)
         publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, 0L, 0L)
@@ -508,11 +838,18 @@ class PlaybackService : Service() {
         repeat: RepeatMode? = null,
         heartbeatStart: Boolean = false,
         roamStart: Boolean = false,
+        similarStart: Boolean = false,
+        speed: Float = 1f,
+        sleepMinutes: Int = 0,
+        sleepAfterTrack: Boolean = false,
+        abIsA: Boolean = true,
+        abDeltaMs: Long = 0L,
     ): Job? {
-        // 心动模式/漫游绑定当前队列：任何换成另一个队列的操作都退出，模式自身的入队除外。
+        // 心动模式/漫游/相似电台绑定当前队列：任何换成另一个队列的操作都退出，模式自身的入队除外。
         if (action in HeartbeatExitActions) {
             if (!heartbeatStart) com.exodidio.tune.netease.NeteaseRepository.setHeartbeatEnabled(false)
             if (!roamStart) com.exodidio.tune.netease.NeteaseRepository.setRoamEnabled(false)
+            if (!similarStart) com.exodidio.tune.netease.NeteaseRepository.setSimilarEnabled(false)
         }
         if (action in LoadCancellingActions || action == ActionPause) {
             loadToken.incrementAndGet()
@@ -533,8 +870,10 @@ class PlaybackService : Service() {
         // 点选类指令取一个代际号；轮到自己时若已有点得更晚的指令，整条丢弃。
         val dispatchToken = loadToken.get()
         val selectionTicket = if (action in SelectionActions) selectionGeneration.incrementAndGet() else 0
+        val seekTicket = if (action == ActionSeek) seekGeneration.incrementAndGet() else 0
         val superseded = {
-            selectionTicket != 0 && (selectionGeneration.get() != selectionTicket || loadToken.get() != dispatchToken)
+            (selectionTicket != 0 && (selectionGeneration.get() != selectionTicket || loadToken.get() != dispatchToken)) ||
+                (seekTicket != 0 && seekGeneration.get() != seekTicket)
         }
         return scope.launch {
         restored.await()
@@ -543,7 +882,7 @@ class PlaybackService : Service() {
         val lockWaitStartedAt = android.os.SystemClock.elapsedRealtime()
         commandMutex.withLock {
             val lockWaitMs = android.os.SystemClock.elapsedRealtime() - lockWaitStartedAt
-            if (lockWaitMs >= 50L) System.err.println("LOCKWAIT action=$action ms=$lockWaitMs")
+            if (lockWaitMs >= 50L) Log.w(PlaybackLogTag, "LOCKWAIT action=$action ms=$lockWaitMs")
             if (superseded()) return@withLock
             consumeNativeTransition()
             Log.d(PlaybackLogTag, "Handling action=$action queueSize=${queue.snapshot().activeTrackIds.size}")
@@ -551,16 +890,17 @@ class PlaybackService : Service() {
             when (action) {
                 ActionPlay -> if (isAlreadyLoadingOrPlaying(trackIds.getOrNull(startIndex))) {
                     // 连点同一首：已经在准备/播放就不要重新下载、从头再播一遍。
-                    System.err.println("PLAYACTION play skip-already head=${trackIds.firstOrNull()} state=${state.value::class.simpleName}")
+                    Log.d(PlaybackLogTag, "PLAYACTION play skip-already head=${trackIds.firstOrNull()} state=${state.value::class.simpleName}")
                     QueueTransition.Unchanged
                 } else {
-                    System.err.println(
+                    Log.d(
+                        PlaybackLogTag,
                         "PLAYACTION play head=${trackIds.firstOrNull()} size=${trackIds.size} " +
                             "prev=${state.value::class.simpleName} hb=$heartbeatStart roam=$roamStart",
                     )
                     handleTransition(runCatching { queue.play(PlaybackRequest(trackIds, startIndex)) }
                         .getOrElse { QueueTransition.Stop }, PlaybackEndReason.SKIPPED)
-                    System.err.println("PLAYACTION play done state=${state.value::class.simpleName}")
+                    Log.d(PlaybackLogTag, "PLAYACTION play done state=${state.value::class.simpleName}")
                 }
                 ActionShuffle -> handleTransition(runCatching { queue.playShuffled(PlaybackRequest(trackIds, startIndex)) }
                     .getOrElse { QueueTransition.Stop }, PlaybackEndReason.SKIPPED)
@@ -600,7 +940,19 @@ class PlaybackService : Service() {
                 ActionClearQueue -> handleTransition(queue.clear())
                 ActionSeek -> seekCurrent(positionMs)
                 ActionSetShuffle -> handleTransition(queue.setShuffle(enabled))
-                ActionSetRepeat -> repeat?.let(queue::setRepeatMode)
+                ActionSetRepeat -> {
+                    repeat?.let(queue::setRepeatMode)
+                    notificationRequests.trySend(Unit)
+                }
+                ActionCycleRepeat -> {
+                    val nextRepeat = when (queue.snapshot().repeatMode) {
+                        RepeatMode.Off -> RepeatMode.All
+                        RepeatMode.All -> RepeatMode.One
+                        RepeatMode.One -> RepeatMode.Off
+                    }
+                    queue.setRepeatMode(nextRepeat)
+                    notificationRequests.trySend(Unit)
+                }
                 ActionPlayNext -> queue.playNext(trackIds)
                 ActionAppend -> queue.append(trackIds)
                 ActionStartMoodRadio -> trackIds.firstOrNull()?.let { startMoodRadio(it) }
@@ -610,6 +962,19 @@ class PlaybackService : Service() {
                 }
                 ActionRemove -> trackIds.firstOrNull()?.let { handleTransition(queue.removeFromQueue(it), PlaybackEndReason.SKIPPED) }
                 ActionReorder -> queue.reorderQueue(trackIds)
+                ActionSetSpeed -> {
+                    val clamped = clampPlaybackSpeed(speed)
+                    playbackSpeed.value = clamped
+                    decoder?.setSpeed(clamped)
+                    updateNowPlayingTransportState()
+                }
+                ActionSetAbLoopPointA -> setAbLoopPointLocked(isA = true)
+                ActionSetAbLoopPointB -> setAbLoopPointLocked(isA = false)
+                ActionFineTuneAbLoop -> fineTuneAbLoopPointLocked(isA = abIsA, deltaMs = abDeltaMs)
+                ActionClearAbLoop -> abLoopState.value = AbLoopState()
+                ActionDeduplicateQueue -> deduplicateQueueLocked()
+                ActionSetSleepTimer -> setSleepTimerLocked(sleepMinutes, sleepAfterTrack)
+                ActionCancelSleepTimer -> cancelSleepTimerLocked()
             }
             if (action in PreloadResyncActions) {
                 // The old source must not remain part of a fade whose queued
@@ -625,55 +990,7 @@ class PlaybackService : Service() {
         }
     }
 
-    private suspend fun startMoodRadio(seedId: String) {
-        val store = AndroidSyncRuntime.syncStore
-        if (!store.libraryAnalysisEnabled.first()) {
-            Log.d(PlaybackLogTag, "Mood Radio ignored: library analysis is disabled")
-            return
-        }
-        val tracks = store.moodRadioTracks()
-        val selected = selectMoodRadio(seedId, tracks, emptySet(), MoodRadioBatchSize)
-        if (selected.isEmpty()) {
-            Log.d(PlaybackLogTag, "Mood Radio has no candidates seed=$seedId analyzed=${tracks.count { it.energy != null && it.danceability != null && it.brightness != null && it.tempo != null }}")
-            return
-        }
-        moodRadioSeedId = seedId
-        moodRadioLastRefillAttempt = null
-        moodRadioActive.value = true
-        if (queue.snapshot().currentTrackId == seedId) queue.replaceKeepingCurrent(listOf(seedId) + selected.map { it.id })
-        else handleTransition(queue.play(PlaybackRequest(listOf(seedId) + selected.map { it.id })), PlaybackEndReason.SKIPPED)
-        Log.d(PlaybackLogTag, "Mood Radio started seed=$seedId added=${selected.size} queueSize=${queue.snapshot().activeTrackIds.size}")
-    }
-
-    /**
-     * 锁内只做便宜判断；全库候选与 selectMoodRadio 的计算放到锁外任务里，
-     * 完成后再回锁确认 seed 没变、追加队列。
-     */
-    private fun maybeRefillMoodRadio() {
-        val seedId = moodRadioSeedId ?: return
-        if (moodRefillJob?.isActive == true) return
-        val snapshot = queue.snapshot()
-        if (snapshot.activeTrackIds.size - snapshot.currentIndex - 1 >= MoodRadioRefillThreshold) return
-        val attempt = snapshot.currentTrackId to snapshot.activeTrackIds.size
-        if (attempt == moodRadioLastRefillAttempt) return
-        moodRadioLastRefillAttempt = attempt
-        moodRefillJob = scope.launch {
-            val store = AndroidSyncRuntime.syncStore
-            if (!store.libraryAnalysisEnabled.first()) return@launch
-            val selected = selectMoodRadio(seedId, store.moodRadioTracks(), snapshot.activeTrackIds.toSet(), MoodRadioBatchSize)
-            if (selected.isEmpty()) return@launch
-            commandMutex.withLock {
-                if (moodRadioSeedId != seedId) return@withLock
-                queue.append(selected.map { it.id })
-                publishQueue()
-                Log.d(PlaybackLogTag, "Mood Radio refilled seed=$seedId added=${selected.size} queueSize=${queue.snapshot().activeTrackIds.size}")
-            }
-        }
-    }
-
-    private fun stopMoodRadio() { moodRadioSeedId = null; moodRadioLastRefillAttempt = null; moodRadioActive.value = false }
-
-    private suspend fun handleTransition(
+    internal suspend fun handleTransition(
         transition: QueueTransition,
         previousReason: PlaybackEndReason = PlaybackEndReason.STOPPED,
         preservePlaybackState: Boolean = false,
@@ -710,16 +1027,33 @@ class PlaybackService : Service() {
         startPaused: Boolean,
         dspConfig: GlobalDspConfig,
         focusGain: Float,
-        normalizedGain: Float,
+        normalizedGain: ResolvedNormalizationGain,
     ): PreparedPlayback {
         val prepared = FfmpegDecoder()
         try {
             prepared.setGlobalDspConfig(dspConfig)
             prepared.setFocusGain(focusGain)
-            prepared.preparePath(item.audioPath, normalizedGain)
-            if (startPositionMs > 0L) prepared.seekTo(clampSeekPosition(startPositionMs, prepared.durationMs()))
+            prepared.setSpeed(playbackSpeed.value)
+            prepared.setNormalizationConfig(normalizationSettings)
+            prepared.setCassetteEnabled(funFeaturesSettings.cassetteMode)
+            prepareDecoderPath(prepared, item.audioPath, normalizedGain.gainDb, normalizedGain.hasStaticAnalysis)
+            val effectiveDurationMs = streamAwareDuration(item, prepared.durationMs())
+            if (startPositionMs > 0L) prepared.seekTo(clampSeekPosition(startPositionMs, effectiveDurationMs))
+            if (!startPaused) {
+                val startedAt = preparingStartedAt?.takeIf { it.first == item.trackId }?.second
+                val elapsedMs = if (startedAt != null) (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L) else 0L
+                if (shouldTriggerRadioCrosstalk(
+                        enabled = funFeaturesSettings.radioCrosstalk,
+                        isStreamingTrack = streamSongIdOf(item) != null,
+                        elapsedPrepareMs = elapsedMs,
+                        roll = kotlin.random.Random.nextFloat(),
+                    )
+                ) {
+                    prepared.triggerRadioCrosstalk(500)
+                }
+            }
             if (startPaused) prepared.pause() else prepared.play()
-            return PreparedPlayback(item, prepared, prepared.positionMs(), prepared.durationMs(), startPaused)
+            return PreparedPlayback(item, prepared, prepared.positionMs(), effectiveDurationMs, startPaused)
         } catch (error: Throwable) {
             runCatching { prepared.close() }
             throw error
@@ -729,19 +1063,44 @@ class PlaybackService : Service() {
     /** 锁内接管已打开的插槽：状态、通知、听歌统计与前台。 */
     private fun commitPrepared(prepared: PreparedPlayback, startTracking: Boolean) {
         val item = prepared.item
+        preparingStartedAt = null
+        clearAbLoopIfTrackChanged(item.trackId)
+        pendingRecoverySeek = null
+        lastSeekAtMs = 0L
+        lastSeekTrackId = null
+        seekBufferingGraceUntilMs = 0L
+        bufferingStallAnchor = null
+        // 在线流优先用接口给出的整首时长：流式 MP3 的解码器时长会按码率估算，
+        // 开头偶尔会算出 11 分钟再自我修正，不能让这个值进 UI 和 seek 判定。
+        val durationMs = streamAwareDuration(item, prepared.durationMs)
         if (prepared.startPaused) {
-            state.value = PlaybackState.Paused(item, prepared.positionMs, prepared.durationMs)
-            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, prepared.positionMs, prepared.durationMs)
+            state.value = PlaybackState.Paused(item, prepared.positionMs, durationMs)
+            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, prepared.positionMs, durationMs)
         } else {
+            val isBuffering = prepared.decoder.isBuffering()
             currentStreamSongId = streamSongIdOf(item)
             currentStreamStartedAt = SystemClock.elapsedRealtime()
             lastStreamSongId = currentStreamSongId
             lastStreamPositionMs = prepared.positionMs
-            state.value = PlaybackState.Playing(item, prepared.positionMs, prepared.durationMs)
-            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PLAYING, prepared.positionMs, prepared.durationMs)
+            state.value = PlaybackState.Playing(item, prepared.positionMs, durationMs, isBuffering = isBuffering)
+            publishNowPlaying(
+                item,
+                if (isBuffering) AndroidMediaPlaybackState.STATE_BUFFERING else AndroidMediaPlaybackState.STATE_PLAYING,
+                prepared.positionMs,
+                durationMs,
+            )
         }
         decoder = prepared.decoder
+        updateNowPlayingTransportState()
+        enqueueBackgroundLoudnessAnalysis(item)
         if (!prepared.startPaused && startTracking) {
+            if (recoveryTrackId != item.trackId) {
+                recoveryTrackId = item.trackId
+                temporaryRecoveryAttempts = 0
+            }
+            lastRecoveryPositionMs = -1L
+            cleanEofRetriedTrackId = null
+            cleanEofRetriedPositionMs = -1L
             enqueueListening(
                 listeningTracker.start(item.trackId, prepared.positionMs, System.currentTimeMillis(), SystemClock.elapsedRealtime()),
             )
@@ -751,8 +1110,19 @@ class PlaybackService : Service() {
         }
     }
 
+    private fun enqueueBackgroundLoudnessAnalysis(item: PlaybackItem) {
+        TrackLoudnessAnalyzer.enqueue(applicationContext, item) {
+            scope.launch {
+                commandMutex.withLock {
+                    if (decoder != null) refreshNormalizationGains()
+                }
+            }
+        }
+    }
+
     /** 播放启动失败的统一收尾；调用方持有命令锁。 */
     private fun handleStartFailure(item: PlaybackItem, error: Throwable, startPositionMs: Long, prepareIntent: Boolean) {
+        val fallbackDurationMs = streamAwareDuration(item, 0L)
         if (error is RemoteAudioNotReady) {
             // 界面已经切到这首歌并显示“准备中”，下载在锁外完成后自动接管播放。
             scheduleDeferredRemotePlay(error.url)
@@ -760,43 +1130,60 @@ class PlaybackService : Service() {
         }
         if (error is StreamUrlNotReady) {
             // 直链在锁外获取，拿到后重新接管播放。
-            System.err.println("NETSTREAM not ready song=${error.songId}; deferring")
-            scheduleDeferredStreamPlay(error.songId, startPositionMs, prepareIntent)
+            Log.d(PlaybackLogTag, "NETSTREAM not ready song=${error.songId}; deferring")
+            scheduleDeferredStreamPlay(error.songId, startPositionMs, prepareIntent, fallbackDurationMs)
             return
         }
         val songId = streamSongIdOf(item)
         if (songId != null) {
+            // 参考 MeiloX：临时失败原地有界重试；明确不可播放/登录失效则不重试。
+            val terminal = com.exodidio.tune.netease.NeteaseRepository.streamFailureReason(songId)
+            if (terminal == null && scheduleTemporaryStreamRecovery(item, startPositionMs, fallbackDurationMs)) {
+                Log.w(PlaybackLogTag, "NETSTREAM retry scheduled song=$songId reason=${error.message}")
+                return
+            }
             // 在线歌曲连不上：退回暂停态而不是把播放入口整个收走，按播放可再次重连。
-            settlePausedAfterStreamFailure(item, startPositionMs, 0L, error.message ?: "stream failed")
+            settlePausedAfterStreamFailure(
+                item,
+                startPositionMs,
+                fallbackDurationMs,
+                terminal ?: error.message ?: "stream failed",
+            )
             return
         }
         fail(item.trackId, error.message ?: "Unable to decode audio")
     }
 
-    private suspend fun playCurrent(
+    internal suspend fun playCurrent(
         startPositionMs: Long = 0L,
         startPaused: Boolean = false,
         startTracking: Boolean = true,
         prepareIntent: Boolean = false,
     ) {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
         finishListeningCrossfade()
         clearArtworkCrossfade()
         val trackId = queue.snapshot().currentTrackId ?: return stopPlayback()
         Log.d(PlaybackLogTag, "Preparing current queue track id=$trackId")
         val item = AndroidPlaybackRuntime.controller().resolve(trackId) ?: return fail(trackId, "Audio asset is not available")
-        System.err.println(
+        Log.d(
+            PlaybackLogTag,
             "PLAYPREP id=$trackId path=${item.audioPath} " +
                 "target=${runCatching { resolveAudioTarget(filesDir, item.audioPath)?.let { it::class.simpleName } }.getOrNull()}",
         )
+        if (preparingStartedAt?.first != trackId) {
+            preparingStartedAt = trackId to SystemClock.elapsedRealtime()
+        }
         state.value = PlaybackState.Preparing(item, resumeIntent = prepareIntent)
+        showForeground(item)
         publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, positionMs = startPositionMs, durationMs = 0L)
         if (audioManager.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return fail(trackId, "Audio focus was not granted")
         restoreFocusGain()
         try {
-            decoder?.close()
             // A normalization lookup can suspend. Do not leave a closed decoder
             // reachable while a queued session write may read playback state.
-            decoder = null
+            closeCurrentDecoderSafely()
             val prepared = prepareDecoder(
                 item,
                 startPositionMs,
@@ -822,7 +1209,7 @@ class PlaybackService : Service() {
         val token: Int,
         val dspConfig: GlobalDspConfig,
         val focusGain: Float,
-        val normalizedGain: Float,
+        val normalizedGain: ResolvedNormalizationGain,
     )
 
     private suspend fun <T> timedLock(phase: String, block: suspend () -> T): T = commandMutex.withLock {
@@ -832,7 +1219,7 @@ class PlaybackService : Service() {
         } finally {
             // 锁内停留时间（探针）：验证批量切歌/提交没有长期占锁。
             val heldMs = android.os.SystemClock.elapsedRealtime() - startedAt
-            if (heldMs >= 50L) System.err.println("DRAINHOLD phase=$phase ms=$heldMs")
+            if (heldMs >= 50L) Log.w(PlaybackLogTag, "DRAINHOLD phase=$phase ms=$heldMs")
         }
     }
 
@@ -890,6 +1277,9 @@ class PlaybackService : Service() {
         val item = AndroidPlaybackRuntime.controller().resolve(trackId) ?: return SkipAdvance.None
         publishQueue()
         pendingStartPaused = wasPaused
+        if (preparingStartedAt?.first != trackId) {
+            preparingStartedAt = trackId to SystemClock.elapsedRealtime()
+        }
         // 只切界面：不关旧解码器、不取流，连点期间旧歌继续放，启动交给静默窗。
         state.value = PlaybackState.Preparing(item)
         return SkipAdvance.Play
@@ -899,8 +1289,14 @@ class PlaybackService : Service() {
     private fun scheduleSkipStart() {
         skipStartJob?.cancel()
         val quietMs = if (skipBurstActive) SkipStartQuietMs else 0L
+        val shouldSpinDown = !skipBurstActive && funFeaturesSettings.cassetteMode && !pendingStartPaused && decoder != null
         skipStartJob = scope.launch {
-            if (quietMs > 0L) delay(quietMs)
+            if (quietMs > 0L) {
+                delay(quietMs)
+            } else if (shouldSpinDown) {
+                triggerActiveSpinDown(120)
+                delay(105L)
+            }
             if (pendingSkips.isNotEmpty()) return@launch
             startPendingSkip()
         }
@@ -934,6 +1330,8 @@ class PlaybackService : Service() {
 
     /** 锁内：切到“准备中”并关掉旧声；返回 null 表示本批放弃。 */
     private suspend fun prepareSkipSwitchLocked(wasPaused: Boolean): SkipSwitch? {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
         finishListeningCrossfade()
         enqueueListening(
             listeningTracker.finish(PlaybackEndReason.SKIPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()),
@@ -946,7 +1344,8 @@ class PlaybackService : Service() {
             fail(trackId, "Audio asset is not available")
             return null
         }
-        System.err.println(
+        Log.d(
+            PlaybackLogTag,
             "PLAYPREP id=$trackId path=${item.audioPath} " +
                 "target=${runCatching { resolveAudioTarget(filesDir, item.audioPath)?.let { it::class.simpleName } }.getOrNull()}",
         )
@@ -961,46 +1360,8 @@ class PlaybackService : Service() {
         val dspConfig = equalizerDspConfig(equalizerSettings)
         val focusGain = if (isDucked) DuckedFocusGain else 1f
         val normalizedGain = normalizationGain(item, queue.peekNext())
-        decoder?.close()
-        decoder = null
+        closeCurrentDecoderSafely()
         return SkipSwitch(item, wasPaused, token, dspConfig, focusGain, normalizedGain)
-    }
-
-    /** 锁外下载远程文件；下载完成且这一首仍是当前曲目时，回到锁内继续准备。 */
-    private fun scheduleDeferredRemotePlay(url: String) {
-        val token = loadToken.get()
-        scope.launch {
-            val file = com.exodidio.tune.sync.ensureRemoteAudioFile(applicationContext, url) {
-                loadToken.get() != token
-            }
-            if (loadToken.get() != token) return@launch
-            if (file == null) {
-                // 资源库不可达或下载失败：不能停在 Preparing，落到暂停态让用户重试。
-                val currentId = queue.snapshot().currentTrackId ?: return@launch
-                val item = AndroidPlaybackRuntime.controller().resolve(currentId) ?: return@launch
-                if (resolveAudioTarget(filesDir, item.audioPath) !is AudioTarget.RemoteTarget) return@launch
-                settlePausedAfterRemoteFailure(item, "remote library unavailable")
-                return@launch
-            }
-            commandMutex.withLock {
-                if (loadToken.get() != token) return@withLock
-                val currentId = queue.snapshot().currentTrackId ?: return@withLock
-                val item = AndroidPlaybackRuntime.controller().resolve(currentId) ?: return@withLock
-                if (resolveAudioTarget(filesDir, item.audioPath) !is AudioTarget.RemoteTarget) return@withLock
-                playCurrent()
-            }
-        }
-    }
-
-    /** 资源库曲目准备失败/被取消：回暂停态，播放键可再次重试。 */
-    private fun settlePausedAfterRemoteFailure(item: PlaybackItem, reason: String) {
-        if (queue.snapshot().currentTrackId != item.trackId) return
-        System.err.println("PLAYREMOTEFAIL id=${item.trackId} path=${item.audioPath} reason=$reason")
-        decoder?.close()
-        decoder = null
-        state.value = PlaybackState.Paused(item, 0L, 0L)
-        publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, 0L, 0L)
-        updateNotification()
     }
 
     /** Restores the selected item paused, so reopening the app never starts audio by itself. */
@@ -1038,17 +1399,22 @@ class PlaybackService : Service() {
             return
         }
         try {
-            decoder?.close()
+            closeCurrentDecoderSafely()
             decoder = FfmpegDecoder().also {
                 it.setGlobalDspConfig(equalizerDspConfig(equalizerSettings))
                 it.setFocusGain(if (isDucked) DuckedFocusGain else 1f)
-                it.preparePath(item.audioPath, normalizationGain(item, queue.peekNext()))
+                it.setSpeed(playbackSpeed.value)
+                it.setNormalizationConfig(normalizationSettings)
+                it.setCassetteEnabled(funFeaturesSettings.cassetteMode)
+                val norm = normalizationGain(item, queue.peekNext())
+                prepareDecoderPath(it, item.audioPath, norm.gainDb, norm.hasStaticAnalysis)
                 val positionMs = clampSeekPosition(savedPositionMs, it.durationMs())
                 if (positionMs > 0L) it.seekTo(positionMs)
                 it.pause()
                 state.value = PlaybackState.Paused(item, positionMs, it.durationMs())
                 publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, positionMs, it.durationMs())
             }
+            enqueueBackgroundLoudnessAnalysis(item)
             preloadNext()
             showForeground(item)
             publishQueue()
@@ -1060,20 +1426,46 @@ class PlaybackService : Service() {
     }
 
     private fun pauseCurrent() {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
         finishListeningCrossfade()
         clearArtworkCrossfade()
         pendingStreamResume = null
-        decoder?.pause()
+        pendingRecoverySeek = null
         enqueueListening(listeningTracker.pause(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
-        (state.value as? PlaybackState.Playing)?.let { current ->
-            val positionMs = decoder?.positionMs() ?: current.positionMs
-            state.value = PlaybackState.Paused(current.item, positionMs, current.durationMs)
-            publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, positionMs, current.durationMs)
-        }
-        // 远程歌曲仍在下载（Preparing）时暂停：下载已被取消，先把界面落到暂停态，按播放会续传。
-        (state.value as? PlaybackState.Preparing)?.let { current ->
-            state.value = PlaybackState.Paused(current.item, 0L, 0L)
-            publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, 0L, 0L)
+        val playing = state.value as? PlaybackState.Playing
+        val activeDecoder = decoder
+        seekBufferingGraceUntilMs = 0L
+        bufferingStallAnchor = null
+        if (playing != null && activeDecoder != null && funFeaturesSettings.cassetteMode &&
+            !playing.isBuffering && !activeDecoder.isFinished()
+        ) {
+            val positionMs = activeDecoder.positionMs()
+            state.value = PlaybackState.Paused(playing.item, positionMs, playing.durationMs)
+            publishNowPlaying(playing.item, AndroidMediaPlaybackState.STATE_PAUSED, positionMs, playing.durationMs)
+            activeDecoder.triggerCassetteSpinDown(220)
+            val token = loadToken.get()
+            pauseSpinDownJob = scope.launch {
+                delay(210L)
+                commandMutex.withLock {
+                    if (loadToken.get() == token && state.value is PlaybackState.Paused && decoder === activeDecoder) {
+                        activeDecoder.pause()
+                    }
+                }
+            }
+        } else {
+            activeDecoder?.pause()
+            playing?.let { current ->
+                val positionMs = activeDecoder?.positionMs() ?: current.positionMs
+                state.value = PlaybackState.Paused(current.item, positionMs, current.durationMs)
+                publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, positionMs, current.durationMs)
+            }
+            // 远程歌曲仍在下载（Preparing）时暂停：下载已被取消，先把界面落到暂停态，按播放会续传。
+            (state.value as? PlaybackState.Preparing)?.let { current ->
+                preparingStartedAt = null
+                state.value = PlaybackState.Paused(current.item, 0L, 0L)
+                publishNowPlaying(current.item, AndroidMediaPlaybackState.STATE_PAUSED, 0L, 0L)
+            }
         }
         updateNotification()
     }
@@ -1102,6 +1494,8 @@ class PlaybackService : Service() {
     }
 
     private suspend fun resumeCurrent() {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
         val paused = state.value as? PlaybackState.Paused
         val currentDecoder = decoder
         if (paused != null && shouldRestartQueueOnResume(paused.positionMs, paused.durationMs, currentDecoder != null)) {
@@ -1119,8 +1513,7 @@ class PlaybackService : Service() {
         ) {
             // 断网暂停在缓存末尾时解码器已到 EOF：按当前位置重新准备，而不是 resume 一个结束的流。
             if (currentDecoder?.isOutputDisconnected() == true || currentDecoder?.isFinished() == true) {
-                currentDecoder.close()
-                decoder = null
+                closeCurrentDecoderSafely()
             }
             currentStreamSongId = null
             playCurrent(paused?.positionMs ?: 0L)
@@ -1131,6 +1524,7 @@ class PlaybackService : Service() {
             return
         }
         restoreFocusGain()
+        currentDecoder.cancelCassetteSpinDown()
         currentDecoder.play()
         val positionMs = currentDecoder.positionMs()
         if (listeningTracker.activeTrackId == paused.item.trackId) {
@@ -1145,70 +1539,6 @@ class PlaybackService : Service() {
     }
 
     /**
-     * 在线歌曲的“按播放”：先立刻把按钮切成正在播放，再在锁外重新取直链（过期或被断网
-     * 打回过的直链会刷新）。取不到就退回暂停态，用户随时可以再点一次重连。
-     */
-    private fun beginStreamResume(songId: Long, paused: PlaybackState.Paused) {
-        val token = loadToken.get()
-        val item = paused.item
-        // 停在结尾（缓存刚好完整或上次自然结束）时从 0 重播，否则会一开就 EOF。
-        val positionMs = if (paused.durationMs > 0L && paused.positionMs >= paused.durationMs - 500L) 0L
-        else paused.positionMs
-        decoder?.close()
-        decoder = null
-        currentStreamSongId = null
-        pendingStreamResume = PendingStreamResume(songId, item, positionMs, paused.durationMs, token)
-        state.value = PlaybackState.Preparing(item, resumeIntent = true)
-        publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, positionMs, paused.durationMs)
-        val cachedCover = com.exodidio.tune.netease.NeteaseStreamProxy.hasCache(songId) &&
-            com.exodidio.tune.netease.NeteaseStreamProxy.cachedPrefixMs(songId, paused.durationMs) > positionMs + 1_000L
-        scope.launch {
-            // 缓存已经覆盖当前位置时不必等网络，直接播放；只有够不着缓存才必须重取直链。
-            val ready = cachedCover || (withTimeoutOrNull(StreamUrlTimeoutMs) {
-                com.exodidio.tune.netease.NeteaseRepository.ensureResumableStreamUrl(songId)
-            } ?: false)
-            if (pendingStreamResume?.token != token || loadToken.get() != token) return@launch
-            commandMutex.withLock {
-                if (pendingStreamResume?.token != token || loadToken.get() != token) return@withLock
-                pendingStreamResume = null
-                if (!ready || queue.snapshot().currentTrackId != item.trackId) {
-                    settlePausedAfterStreamFailure(item, positionMs, paused.durationMs, "reconnect failed")
-                    return@withLock
-                }
-                playCurrent(positionMs, prepareIntent = true)
-            }
-        }
-    }
-
-    /** 重连途中再点一次：取消这次尝试，回到暂停态。 */
-    private fun cancelPendingStreamResume() {
-        val pending = pendingStreamResume ?: return
-        pendingStreamResume = null
-        state.value = PlaybackState.Paused(pending.item, pending.positionMs, pending.durationMs)
-        publishNowPlaying(pending.item, AndroidMediaPlaybackState.STATE_PAUSED, pending.positionMs, pending.durationMs)
-        updateNotification()
-    }
-
-    /** 在线歌曲连不上：保留曲目并按缓存末尾/原位置暂停，绝不把播放入口收掉。 */
-    private fun settlePausedAfterStreamFailure(item: PlaybackItem, positionMs: Long, durationMs: Long, reason: String) {
-        Log.w(PlaybackLogTag, "Stream playback unavailable id=${item.trackId} reason=$reason")
-        System.err.println("PLAYSTREAMPAUSED id=${item.trackId} path=${item.audioPath} reason=$reason")
-        val songId = streamSongIdOf(item)
-        decoder?.close()
-        decoder = null
-        currentStreamSongId = null
-        pendingStreamResume = null
-        val cachedMs = songId
-            ?.let { com.exodidio.tune.netease.NeteaseStreamProxy.cachedPrefixMs(it, durationMs) }
-            ?.takeIf { it > 0L }
-            ?: positionMs
-        val settledMs = cachedMs.coerceAtLeast(0L)
-        state.value = PlaybackState.Paused(item, settledMs, durationMs)
-        publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, settledMs, durationMs)
-        updateNotification()
-    }
-
-    /**
      * A manual route change invalidates the old AAudio stream without being a
      * user pause. Recreate it on the new route and retain its rendered position.
      * A real device removal sends ACTION_AUDIO_BECOMING_NOISY, whose queued
@@ -1218,8 +1548,7 @@ class PlaybackService : Service() {
         val current = state.value as? PlaybackState.Playing ?: return
         val positionMs = decoder?.positionMs() ?: current.positionMs
         listeningTracker.suspendForInterruption(SystemClock.elapsedRealtime())
-        decoder?.close()
-        decoder = null
+        closeCurrentDecoderSafely()
         Log.w(PlaybackLogTag, "Audio output changed; recreating stream id=${current.item.trackId} positionMs=$positionMs")
         playCurrent(positionMs, startTracking = false)
     }
@@ -1240,37 +1569,112 @@ class PlaybackService : Service() {
                 durationMs = current.durationMs
                 playing = false
             }
+            is PlaybackState.Preparing -> {
+                val resolvedDuration = streamAwareDuration(current.item, 0L)
+                val targetPositionMs = clampSeekPosition(requestedPositionMs, resolvedDuration)
+                pendingRecoverySeek = current.item.trackId to targetPositionMs
+                lastSeekTrackId = current.item.trackId
+                lastSeekAtMs = SystemClock.elapsedRealtime()
+                pendingStreamResume?.takeIf { it.item.trackId == current.item.trackId }?.let { pending ->
+                    pendingStreamResume = PendingStreamResume(
+                        pending.songId,
+                        pending.item,
+                        targetPositionMs,
+                        maxOf(pending.durationMs, resolvedDuration),
+                        pending.token,
+                    )
+                }
+                publishNowPlaying(
+                    current.item,
+                    AndroidMediaPlaybackState.STATE_BUFFERING,
+                    targetPositionMs,
+                    resolvedDuration,
+                )
+                return
+            }
             else -> return
         }
-        val targetPositionMs = clampSeekPosition(requestedPositionMs, durationMs)
+        val effectiveDurationMs = streamAwareDuration(item, durationMs)
+        val targetPositionMs = clampSeekPosition(requestedPositionMs, effectiveDurationMs)
         finishListeningCrossfade()
         clearArtworkCrossfade()
-        decoder?.seekTo(targetPositionMs) ?: return
+        lastSeekTrackId = item.trackId
+        lastSeekAtMs = SystemClock.elapsedRealtime()
+        val streamId = streamSongIdOf(item)
+        if (streamId != null) {
+            temporaryRecoveryAttempts = 0
+            lastRecoveryPositionMs = -1L
+            cleanEofRetriedTrackId = null
+            cleanEofRetriedPositionMs = -1L
+        }
+        val activeDecoder = decoder
+        if (activeDecoder == null) {
+            if (!playing) {
+                pendingRecoverySeek = item.trackId to targetPositionMs
+                state.value = PlaybackState.Paused(item, targetPositionMs, effectiveDurationMs)
+                publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, targetPositionMs, effectiveDurationMs)
+            } else if (streamId != null) {
+                pendingRecoverySeek = null
+                state.value = PlaybackState.Preparing(item, resumeIntent = true)
+                publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, targetPositionMs, effectiveDurationMs)
+                scheduleDeferredStreamPlay(streamId, targetPositionMs, prepareIntent = true, fallbackDurationMs = effectiveDurationMs)
+            }
+            return
+        }
+        if (streamId != null && activeDecoder.isFinished()) {
+            closeCurrentDecoderSafely()
+            currentStreamSongId = null
+            pendingRecoverySeek = null
+            if (playing) {
+                state.value = PlaybackState.Preparing(item, resumeIntent = true)
+                publishNowPlaying(item, AndroidMediaPlaybackState.STATE_BUFFERING, targetPositionMs, effectiveDurationMs)
+                scheduleDeferredStreamPlay(streamId, targetPositionMs, prepareIntent = true, fallbackDurationMs = effectiveDurationMs)
+            } else {
+                state.value = PlaybackState.Paused(item, targetPositionMs, effectiveDurationMs)
+                publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, targetPositionMs, effectiveDurationMs)
+            }
+            return
+        }
+        pendingRecoverySeek = null
+        bufferingStallAnchor = null
+        seekBufferingGraceUntilMs = if (playing && streamId != null) SystemClock.elapsedRealtime() + SeekBufferingGraceMs else 0L
+        activeDecoder.seekTo(targetPositionMs)
         if (playing) {
-            state.value = PlaybackState.Playing(item, targetPositionMs, durationMs)
-            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PLAYING, targetPositionMs, durationMs)
+            state.value = PlaybackState.Playing(item, targetPositionMs, effectiveDurationMs, isBuffering = false)
+            mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_PLAYING, targetPositionMs))
         } else {
-            state.value = PlaybackState.Paused(item, targetPositionMs, durationMs)
-            publishNowPlaying(item, AndroidMediaPlaybackState.STATE_PAUSED, targetPositionMs, durationMs)
+            state.value = PlaybackState.Paused(item, targetPositionMs, effectiveDurationMs)
+            mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_PAUSED, targetPositionMs))
         }
         Log.d(PlaybackLogTag, "Seek requested id=${item.trackId} targetMs=$targetPositionMs playing=$playing")
     }
 
-    private fun stopPlayback() {
+    internal fun stopPlayback() {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
+        preparingStartedAt = null
         finishListeningCrossfade()
         enqueueListening(listeningTracker.finish(PlaybackEndReason.STOPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         clearArtworkCrossfade()
+        pendingRecoverySeek = null
+        lastSeekAtMs = 0L
+        lastSeekTrackId = null
+        abLoopState.value = AbLoopState()
         decoder?.snapCrossfade()
-        decoder?.close(); decoder = null; preloadedItem = null
+        closeCurrentDecoderSafely(); preloadedItem = null
         audioManager.abandonAudioFocusRequest(focusRequest)
         state.value = PlaybackState.Idle
         mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_STOPPED, 0L))
         mediaSession.isActive = false
+        isForegroundStarted = false
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     /** Retains the final item when repeat-off playback or manual navigation exhausts the queue. */
     private fun stopAtCurrentTrack(reason: PlaybackEndReason = PlaybackEndReason.COMPLETED) {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
+        preparingStartedAt = null
         val current = state.value
         val item: PlaybackItem
         val durationMs: Long
@@ -1287,8 +1691,12 @@ class PlaybackService : Service() {
         }
         enqueueListening(listeningTracker.finish(reason, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         clearArtworkCrossfade()
+        pendingRecoverySeek = null
+        lastSeekAtMs = 0L
+        lastSeekTrackId = null
+        abLoopState.value = AbLoopState()
         decoder?.snapCrossfade()
-        decoder?.close(); decoder = null
+        closeCurrentDecoderSafely()
         audioManager.abandonAudioFocusRequest(focusRequest)
         val positionMs = stoppedCurrentPosition(reason, durationMs)
         state.value = PlaybackState.Paused(item, positionMs, durationMs)
@@ -1297,51 +1705,54 @@ class PlaybackService : Service() {
         Log.d(PlaybackLogTag, "Playback stopped at final queue track id=${item.trackId} positionMs=$positionMs")
     }
 
-    private fun fail(trackId: String?, reason: String) {
+    internal fun fail(trackId: String?, reason: String) {
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
+        preparingStartedAt = null
         Log.e(PlaybackLogTag, "Playback failed id=$trackId reason=$reason")
-        System.err.println("PLAYFAIL id=$trackId reason=$reason")
         finishListeningCrossfade()
         enqueueListening(listeningTracker.finish(PlaybackEndReason.STOPPED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         clearArtworkCrossfade()
-        decoder?.close(); decoder = null; preloadedItem = null
+        pendingRecoverySeek = null
+        lastSeekAtMs = 0L
+        lastSeekTrackId = null
+        abLoopState.value = AbLoopState()
+        closeCurrentDecoderSafely(); preloadedItem = null
         state.value = PlaybackState.Failed(trackId, reason)
         mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_ERROR, 0L))
         mediaSession.isActive = false
+        isForegroundStarted = false
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
-    private fun scheduleDeferredStreamPlay(
-        songId: Long,
-        positionMs: Long = 0L,
-        prepareIntent: Boolean = false,
-    ) {
-        val token = loadToken.get()
-        scope.launch {
-            val ready = withTimeoutOrNull(StreamUrlTimeoutMs) {
-                com.exodidio.tune.netease.NeteaseRepository.ensureResumableStreamUrl(songId)
-            } ?: false
-            if (loadToken.get() != token) return@launch
-            commandMutex.withLock {
-                if (loadToken.get() != token) return@withLock
-                if (queue.snapshot().currentTrackId != "netease:$songId") return@withLock
-                val item = AndroidPlaybackRuntime.controller().resolve("netease:$songId") ?: return@withLock
-                if (!ready || resolveAudioTarget(filesDir, item.audioPath) !is AudioTarget.StreamTarget) {
-                    // 取不到直链：停在暂停态，按播放会再次尝试联网。
-                    System.err.println("NETSTREAM deferred failed song=$songId ready=$ready")
-                    settlePausedAfterStreamFailure(item, positionMs, 0L, "stream url unavailable")
-                    return@withLock
-                }
-                playCurrent(positionMs, prepareIntent = prepareIntent)
-            }
+    internal fun closeCurrentDecoderSafely() {
+        val closing = decoder
+        decoder = null
+        closeDecoderSafely(closing)
+    }
+
+    private fun closeDecoderSafely(target: FfmpegDecoder?) {
+        if (target == null) return
+        val writeLock = decoderAccessLock.writeLock()
+        writeLock.lock()
+        try {
+            target.close()
+        } finally {
+            writeLock.unlock()
         }
     }
 
-    private fun streamSongIdOf(item: PlaybackItem): Long? = item.audioPath
-        ?.takeIf { it.startsWith("netease://") }
-        ?.removePrefix("netease://")
-        ?.toLongOrNull()
+    private fun triggerActiveSpinDown(durationMs: Int) {
+        val readLock = decoderAccessLock.readLock()
+        if (!readLock.tryLock()) return
+        try {
+            decoder?.triggerCassetteSpinDown(durationMs)
+        } finally {
+            readLock.unlock()
+        }
+    }
 
-    private suspend fun publishQueue() {
+    internal suspend fun publishQueue() {
         val snapshot = queue.snapshot()
         queueState.value = snapshot
         // 全库索引 + Binder 发布交给锁外单消费者；这里只投递最新快照。
@@ -1401,7 +1812,10 @@ class PlaybackService : Service() {
     @Volatile private var lastQueueTracksSignature: Int = Int.MIN_VALUE
 
     private suspend fun clearRestoredSession() {
-        decoder?.close(); decoder = null; preloadedItem = null
+        pauseSpinDownJob?.cancel()
+        pauseSpinDownJob = null
+        preparingStartedAt = null
+        closeCurrentDecoderSafely(); preloadedItem = null
         queue.clear()
         queueState.value = queue.snapshot()
         mediaSession.setQueue(emptyList())
@@ -1413,11 +1827,23 @@ class PlaybackService : Service() {
     }
 
     /** Keep native idle slot aligned with the queue's immediate next item. */
-    private suspend fun preloadNext() {
-        val nextId = queue.peekNext()
+    internal suspend fun preloadNext() {
         val currentDecoder = decoder ?: return
+        if (sleepTimerState.value.afterCurrentTrack) {
+            currentDecoder.clearPreloaded()
+            preloadedItem = null
+            return
+        }
+        val shouldPreload = gaplessPlayback.value || crossfadeSeconds.value > 0
+        val nextId = queue.peekNext()
+        if (!shouldPreload) {
+            currentDecoder.clearPreloaded()
+            preloadedItem = null
+            return
+        }
         if (nextId == preloadedItem?.trackId && currentDecoder.hasPreloaded()) return
         currentDecoder.clearPreloaded()
+        currentDecoder.setSpeed(playbackSpeed.value)
         val item = nextId?.let { id -> AndroidPlaybackRuntime.controller().resolve(id) }
         if (item == null) {
             preloadedItem = null
@@ -1425,22 +1851,32 @@ class PlaybackService : Service() {
         }
         val target = resolveAudioTarget(filesDir, item.audioPath)
         if (target is AudioTarget.StreamTarget) {
-            // 在线歌曲只预取直链，不做解码器预加载。
-            preloadedItem = null
-            com.exodidio.tune.netease.NeteaseRepository.prefetchStreamUrl(item.trackId)
-            return
+            val songId = target.url.removePrefix("netease://").toLongOrNull()
+            val canPreloadNow = songId != null &&
+                !NeteaseRepository.isPreviewStream(songId) &&
+                com.exodidio.tune.netease.NeteaseStreamProxy.hasWarmedPrefix(songId) &&
+                (NeteaseRepository.cachedStreamUrl(songId) != null || NeteaseRepository.hasCachedStream(songId))
+            if (!canPreloadNow) {
+                preloadedItem = null
+                if (prefetchedTrackId == item.trackId && prefetchJob?.isActive == true) return
+                prefetchedTrackId = item.trackId
+                prefetchStreamAudio(item)
+                return
+            }
         }
         if (target is AudioTarget.RemoteTarget) {
             // 预取是后台行为：不占命令锁，同一首只跑一个任务，切歌时随令牌失效。
-            preloadedItem = null
-            if (com.exodidio.tune.sync.remoteAudioCached(applicationContext, target.url)) return
-            if (prefetchedTrackId == item.trackId && prefetchJob?.isActive == true) return
-            prefetchedTrackId = item.trackId
-            prefetchRemoteAudio(item)
-            return
+            if (!com.exodidio.tune.sync.remoteAudioCached(applicationContext, target.url)) {
+                preloadedItem = null
+                if (prefetchedTrackId == item.trackId && prefetchJob?.isActive == true) return
+                prefetchedTrackId = item.trackId
+                prefetchRemoteAudio(item)
+                return
+            }
         }
         preloadedItem = item
-        runCatching { currentDecoder.preloadPath(item.audioPath, normalizationGain(item, queue.peekNext())) }
+        val norm = normalizationGain(item, queue.peekNext())
+        runCatching { preloadDecoderPath(currentDecoder, item.audioPath, norm.gainDb, norm.hasStaticAnalysis) }
             .onSuccess { loaded ->
                 if (!loaded) preloadedItem = null
             }
@@ -1450,143 +1886,69 @@ class PlaybackService : Service() {
             }
     }
 
-    private var heartbeatJob: Job? = null
-    private var heartbeatNextAttemptAtMs = 0L
-    private var heartbeatRetryDelayMs = 0L
-    private var heartbeatWasEnabled = false
+    internal var heartbeatJob: Job? = null
+    internal var heartbeatNextAttemptAtMs = 0L
+    internal var heartbeatRetryDelayMs = 0L
+    internal var heartbeatWasEnabled = false
 
-    /**
-     * 心动模式：当前歌曲在队尾（没有下一首）时取推荐。
-     * 失败不清模式，按退避重试，直到队列被换掉或用户重新开播。
-     */
-    private fun maybeAppendHeartbeat() {
-        val repository = com.exodidio.tune.netease.NeteaseRepository
-        if (!repository.heartbeatEnabled.value) {
-            heartbeatWasEnabled = false
-            heartbeatNextAttemptAtMs = 0L
-            heartbeatRetryDelayMs = 0L
-            return
-        }
-        if (!heartbeatWasEnabled) {
-            heartbeatWasEnabled = true
-            heartbeatNextAttemptAtMs = 0L
-            heartbeatRetryDelayMs = 0L
-        }
-        if (heartbeatJob?.isActive == true) return
-        if (queue.peekNext() != null) return
-        if (state.value !is PlaybackState.Playing && state.value !is PlaybackState.Paused) return
-        if (android.os.SystemClock.elapsedRealtime() < heartbeatNextAttemptAtMs) return
-        val snapshot = queue.snapshot()
-        val currentId = snapshot.currentTrackId ?: return
-        val headId = snapshot.originalTrackIds.firstOrNull()
-        heartbeatJob = scope.launch {
-            System.err.println("NETHB append trigger current=$currentId head=$headId")
-            val appendId = runCatching {
-                repository.appendHeartbeatNext(applicationContext, currentId, headId)
-            }.getOrNull()
-            if (appendId == null) {
-                heartbeatRetryDelayMs = if (heartbeatRetryDelayMs == 0L) 2_000L
-                else (heartbeatRetryDelayMs * 2).coerceAtMost(HeartbeatRetryMaxDelayMs)
-                heartbeatNextAttemptAtMs = android.os.SystemClock.elapsedRealtime() + heartbeatRetryDelayMs
-                System.err.println("NETHB append retry in ${heartbeatRetryDelayMs}ms")
-                return@launch
-            }
-            heartbeatRetryDelayMs = 0L
-            heartbeatNextAttemptAtMs = 0L
-            // 取歌期间用户可能已经切了队列（心动模式随之退出），不要再往新队列里追加。
-            if (!repository.heartbeatEnabled.value) return@launch
-            commandMutex.withLock {
-                if (!repository.heartbeatEnabled.value) return@withLock
-                queue.append(listOf(appendId))
-                publishQueue()
-            }
-        }
-    }
+    internal var roamJob: Job? = null
+    internal var roamNextAttemptAtMs = 0L
+    internal var roamRetryDelayMs = 0L
+    internal var roamWasEnabled = false
 
-    private var roamJob: Job? = null
-    private var roamNextAttemptAtMs = 0L
-    private var roamRetryDelayMs = 0L
-    private var roamWasEnabled = false
+    internal var similarJob: Job? = null
+    internal var similarNextAttemptAtMs = 0L
+    internal var similarRetryDelayMs = 0L
+    internal var similarWasEnabled = false
 
-    /** 私人漫游：当前歌曲在队尾时取下一批推荐；失败按退避重试，不关闭模式。 */
-    private fun maybeAppendRoam() {
-        val repository = com.exodidio.tune.netease.NeteaseRepository
-        if (!repository.roamEnabled.value) {
-            roamWasEnabled = false
-            roamNextAttemptAtMs = 0L
-            roamRetryDelayMs = 0L
-            return
-        }
-        if (!roamWasEnabled) {
-            roamWasEnabled = true
-            roamNextAttemptAtMs = 0L
-            roamRetryDelayMs = 0L
-        }
-        if (roamJob?.isActive == true) return
-        if (queue.peekNext() != null) return
-        if (state.value !is PlaybackState.Playing && state.value !is PlaybackState.Paused) return
-        if (android.os.SystemClock.elapsedRealtime() < roamNextAttemptAtMs) return
-        roamJob = scope.launch {
-            val appendIds = runCatching { repository.appendRoamNext(applicationContext) }.getOrNull()
-            if (appendIds.isNullOrEmpty()) {
-                roamRetryDelayMs = if (roamRetryDelayMs == 0L) 2_000L
-                else (roamRetryDelayMs * 2).coerceAtMost(HeartbeatRetryMaxDelayMs)
-                roamNextAttemptAtMs = android.os.SystemClock.elapsedRealtime() + roamRetryDelayMs
-                System.err.println("NETROAM append retry in ${roamRetryDelayMs}ms")
-                return@launch
-            }
-            roamRetryDelayMs = 0L
-            roamNextAttemptAtMs = 0L
-            if (!repository.roamEnabled.value) return@launch
-            commandMutex.withLock {
-                if (!repository.roamEnabled.value) return@withLock
-                queue.append(appendIds)
-                publishQueue()
-            }
-        }
-    }
-
-    private var prefetchJob: Job? = null
-    private var prefetchedTrackId: String? = null
-
-    /** 后台把下一首远程文件拉到本地缓存；不占命令锁，随时可被新的预取取代。 */
-    private fun prefetchRemoteAudio(item: PlaybackItem) {
-        val target = resolveAudioTarget(filesDir, item.audioPath) as? AudioTarget.RemoteTarget ?: return
-        prefetchJob?.cancel()
-        val token = loadToken.get()
-        prefetchJob = scope.launch {
-            runCatching {
-                com.exodidio.tune.sync.ensureRemoteAudioFile(applicationContext, target.url) {
-                    !isActive || loadToken.get() != token
-                }
-            }
-        }
-    }
+    internal var prefetchJob: Job? = null
+    internal var prefetchedTrackId: String? = null
 
     /** Native promotes audio first; this service transaction promotes queue/UI metadata. */
     private suspend fun consumeNativeTransition() {
         val transition = decoder?.consumeTransition() ?: return
         val incoming = preloadedItem ?: return
+        val previousItem = (state.value as? PlaybackState.Playing)?.item
         val queueTransition = queue.next()
         if (queueTransition !is QueueTransition.Play || queueTransition.trackId != incoming.trackId) {
             fail(incoming.trackId, "Native transition no longer matches the playback queue")
             return
         }
         preloadedItem = null
+        clearAbLoopIfTrackChanged(incoming.trackId)
         val currentDecoder = decoder ?: return
         val positionMs = currentDecoder.positionMs()
-        val durationMs = currentDecoder.durationMs()
+        val durationMs = streamAwareDuration(incoming, currentDecoder.durationMs())
         if (transition == NativeTransition.CrossfadeStarted) {
-            listeningFadeOutgoing = (state.value as? PlaybackState.Playing)?.item?.trackId
+            listeningFadeOutgoing = previousItem?.trackId
             listeningFadeStartedAt = System.currentTimeMillis()
             listeningFadeStartedElapsed = SystemClock.elapsedRealtime()
             listeningFadeMaxMs = artworkCrossfade.value?.durationMs ?: 0L
         }
+        currentStreamSongId = streamSongIdOf(incoming)
+        currentStreamStartedAt = SystemClock.elapsedRealtime()
+        lastStreamSongId = currentStreamSongId
+        lastStreamPositionMs = positionMs
+        pendingRecoverySeek = null
+        lastSeekAtMs = 0L
+        lastSeekTrackId = null
+        if (recoveryTrackId != incoming.trackId) {
+            recoveryTrackId = incoming.trackId
+            temporaryRecoveryAttempts = 0
+        }
+        lastRecoveryPositionMs = -1L
+        cleanEofRetriedTrackId = null
+        cleanEofRetriedPositionMs = -1L
+        currentStreamSongId?.let { notePreviewPlayback(it) }
+
         state.value = PlaybackState.Playing(incoming, positionMs, durationMs)
         enqueueListening(listeningTracker.finish(PlaybackEndReason.COMPLETED, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         enqueueListening(listeningTracker.start(incoming.trackId, positionMs, System.currentTimeMillis(), SystemClock.elapsedRealtime()))
         publishNowPlaying(incoming, AndroidMediaPlaybackState.STATE_PLAYING, positionMs, durationMs)
-        updateNotification()
+        updateNowPlayingTransportState()
+        showForeground(incoming)
+        previousItem?.let { enqueueBackgroundLoudnessAnalysis(it) }
+        enqueueBackgroundLoudnessAnalysis(incoming)
         // During a crossfade both native slots are live (incoming + outgoing).
         // Loading i+2 here would reuse the outgoing slot and cut i off instead
         // of letting it fade out. The ticker reloads after the fade completes.
@@ -1595,119 +1957,7 @@ class PlaybackService : Service() {
         Log.d(PlaybackLogTag, "Consumed native transition=$transition id=${incoming.trackId}")
     }
 
-    private suspend fun normalizationGain(item: PlaybackItem, nextId: String?): Float {
-        val analyses = AndroidSyncRuntime.syncStore.activeAnalyses
-        if (analyses.isEmpty()) {
-            if (normalizationSettings.enabled) normalizationPreferences.disable()
-            return 0f
-        }
-        val next = nextId?.let { AndroidPlaybackRuntime.controller().resolve(it) }
-        val continuousAlbum = normalizationSettings.mode == NormalizationMode.Album &&
-            item.albumId.isNotEmpty() && item.albumId == next?.albumId
-        val albumAnalyses = if (continuousAlbum) {
-            AndroidSyncRuntime.syncStore.tracks.first().filter { it.albumId == item.albumId }.mapNotNull { analyses[it.id] }
-        } else emptyList()
-        return normalizationGainDb(normalizationSettings, item.analysis, albumAnalyses, continuousAlbum)
-    }
 
-    private suspend fun refreshNormalizationGains() {
-        val current = when (val value = state.value) {
-            is PlaybackState.Playing -> value.item
-            is PlaybackState.Paused -> value.item
-            is PlaybackState.Preparing -> value.item
-            else -> null
-        } ?: return
-        val nextId = queue.peekNext()
-        decoder?.setNormalizationGains(normalizationGain(current, nextId), preloadedItem?.let { normalizationGain(it, queue.peekNext()) } ?: 0f)
-    }
-
-    private fun maybeStartCrossfade(): Boolean {
-        val current = state.value as? PlaybackState.Playing ?: return false
-        val currentDecoder = decoder ?: return false
-        val incoming = preloadedItem ?: return false
-        if (currentDecoder.isCrossfading()) return false
-        if (!shouldStartCrossfade(
-                crossfadeSeconds = crossfadeSeconds.value,
-                positionMs = currentDecoder.positionMs(),
-                durationMs = current.durationMs,
-                hasPreloadedNext = preloadedItem != null && currentDecoder.hasPreloaded(),
-            )
-        ) return false
-        val effectiveDurationMs = crossfadeDurationMs(
-            crossfadeSeconds = crossfadeSeconds.value,
-            positionMs = currentDecoder.positionMs(),
-            durationMs = current.durationMs,
-        )
-        currentDecoder.beginCrossfade(effectiveDurationMs)
-        if (currentDecoder.isCrossfading()) {
-            nextArtworkCrossfadeId += 1
-            artworkCrossfade.value = ArtworkCrossfadeTransition(
-                id = nextArtworkCrossfadeId,
-                fromArtworkPath = current.item.artworkPath,
-                toArtworkPath = incoming.artworkPath,
-                durationMs = effectiveDurationMs.coerceAtLeast(1L),
-            )
-        }
-        return true
-    }
-
-    private fun clearArtworkCrossfade() {
-        artworkCrossfade.value = null
-    }
-
-    private fun showForeground(item: PlaybackItem) {
-        createChannel()
-        startForeground(NotificationId, notification(item), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-    }
-
-    private fun updateNotification() {
-        val item = when (val current = state.value) {
-            is PlaybackState.Playing -> current.item
-            is PlaybackState.Paused -> current.item
-            else -> return
-        }
-        getSystemService(NotificationManager::class.java).notify(NotificationId, notification(item))
-    }
-
-    private fun registerNoisyAudioReceiver() {
-        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(noisyAudioReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(noisyAudioReceiver, filter)
-        }
-    }
-
-    /** Publishes metadata and transport state to Android System Now Playing surfaces. */
-    private fun publishNowPlaying(item: PlaybackItem, state: Int, positionMs: Long, durationMs: Long) {
-        mediaSession.isActive = true
-        val metadata = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_MEDIA_ID, item.trackId)
-                .putString(MediaMetadata.METADATA_KEY_TITLE, item.title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, item.artist)
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs)
-        loadNowPlayingArtwork(item.artworkPath)?.let { artwork ->
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, artwork)
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork)
-        }
-        mediaSession.setMetadata(metadata.build())
-        mediaSession.setPlaybackState(androidPlaybackState(state, positionMs))
-        Log.d(PlaybackLogTag, "Published Android Now Playing id=${item.trackId} state=$state")
-    }
-
-    private fun updateNowPlayingTransportState() {
-        when (val current = state.value) {
-            is PlaybackState.Playing -> mediaSession.setPlaybackState(
-                androidPlaybackState(AndroidMediaPlaybackState.STATE_PLAYING, decoder?.positionMs() ?: current.positionMs),
-            )
-            is PlaybackState.Paused -> mediaSession.setPlaybackState(
-                androidPlaybackState(AndroidMediaPlaybackState.STATE_PAUSED, decoder?.positionMs() ?: current.positionMs),
-            )
-            else -> Unit
-        }
-    }
 
     /**
      * 位置刷新走独立 200ms ticker。解码器仍未做线程安全封装，所以这里用 tryLock 机会式读取：
@@ -1717,49 +1967,43 @@ class PlaybackService : Service() {
         if (!commandMutex.tryLock()) return
         try {
             val current = state.value as? PlaybackState.Playing ?: return
-            val positionMs = decoder?.positionMs()?.let { clampSeekPosition(it, current.durationMs) } ?: return
+            val activeDecoder = decoder ?: return
+            val positionMs = clampSeekPosition(activeDecoder.positionMs(), current.durationMs)
+            val ab = abLoopState.value
+            if (ab.isActive && ab.trackId == current.item.trackId && positionMs >= ab.pointB!!) {
+                seekCurrent(ab.pointA!!)
+                return
+            }
+            val now = SystemClock.elapsedRealtime()
+            val nativeBuffering = activeDecoder.isBuffering()
+            if (!nativeBuffering) seekBufferingGraceUntilMs = 0L
+            val isBuffering = effectiveStreamBufferingState(nativeBuffering, now, seekBufferingGraceUntilMs)
             if (currentStreamSongId != null) lastStreamPositionMs = positionMs
-            if (positionMs != current.positionMs) {
+            if (positionMs != current.positionMs || isBuffering != current.isBuffering) {
                 // 只在状态没被 seek/暂停改过时前移，避免用旧读数覆盖新位置。
                 state.update { latest ->
                     if (latest is PlaybackState.Playing &&
                         latest.item.trackId == current.item.trackId &&
-                        latest.positionMs == current.positionMs
+                        latest.positionMs == current.positionMs &&
+                        latest.isBuffering == current.isBuffering
                     ) {
-                        latest.copy(positionMs = positionMs)
+                        latest.copy(positionMs = positionMs, isBuffering = isBuffering)
                     } else {
                         latest
                     }
                 }
             }
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastSessionPositionAtMs < 1_000L) return
+            val bufferingChanged = isBuffering != current.isBuffering
+            if (!bufferingChanged && now - lastSessionPositionAtMs < 1_000L) return
             lastSessionPositionAtMs = now
-            mediaSession.setPlaybackState(androidPlaybackState(AndroidMediaPlaybackState.STATE_PLAYING, positionMs))
+            val sessionState = if (isBuffering) AndroidMediaPlaybackState.STATE_BUFFERING else AndroidMediaPlaybackState.STATE_PLAYING
+            mediaSession.setPlaybackState(androidPlaybackState(sessionState, positionMs))
         } finally {
             commandMutex.unlock()
         }
     }
 
-    private data class StreamClampSample(val songId: Long, val positionMs: Long)
 
-    /** 歌曲刚结束时提前查一次缓存跨度（Media3 SQLite）；锁被占用就留到锁内兜底。 */
-    private fun sampleStreamClampIfFinished(): StreamClampSample? {
-        if (!commandMutex.tryLock()) return null
-        return try {
-            val current = state.value as? PlaybackState.Playing ?: return null
-            if (decoder?.isFinished() != true) return null
-            val songId = currentStreamSongId ?: return null
-            val duration = decoder?.durationMs() ?: current.durationMs
-            val prefixMs = com.exodidio.tune.netease.NeteaseStreamProxy.cachedPrefixMs(songId, duration)
-            val positionMs = if (prefixMs > 0L) prefixMs
-            else if (lastStreamSongId == songId) lastStreamPositionMs
-            else current.positionMs
-            StreamClampSample(songId, positionMs)
-        } finally {
-            commandMutex.unlock()
-        }
-    }
 
     private fun enqueueListening(writes: List<ListeningWrite>) {
         writes.forEach { write ->
@@ -1777,130 +2021,134 @@ class PlaybackService : Service() {
         listeningFadeMaxMs = 0
     }
 
-    private fun androidPlaybackState(state: Int, positionMs: Long): AndroidMediaPlaybackState =
-        AndroidMediaPlaybackState.Builder()
-            .setActions(
-                AndroidMediaPlaybackState.ACTION_PLAY or
-                    AndroidMediaPlaybackState.ACTION_PAUSE or
-                    AndroidMediaPlaybackState.ACTION_PLAY_PAUSE or
-                    AndroidMediaPlaybackState.ACTION_SKIP_TO_NEXT or
-                    AndroidMediaPlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                    AndroidMediaPlaybackState.ACTION_SEEK_TO or
-                    AndroidMediaPlaybackState.ACTION_STOP,
+    private fun clearAbLoopIfTrackChanged(trackId: String) {
+        val current = abLoopState.value
+        if (current.trackId.isNotEmpty() && current.trackId != trackId) {
+            abLoopState.value = AbLoopState()
+        }
+    }
+
+    private fun setAbLoopPointLocked(isA: Boolean) {
+        val (item, fallbackPosMs) = when (val current = state.value) {
+            is PlaybackState.Playing -> current.item to current.positionMs
+            is PlaybackState.Paused -> current.item to current.positionMs
+            else -> return
+        }
+        val posMs = decoder?.positionMs() ?: fallbackPosMs
+        val current = abLoopState.value
+        if (isA) {
+            val keepB = current.trackId == item.trackId && current.pointB != null && current.pointB > posMs + 200L
+            abLoopState.value = AbLoopState(
+                trackId = item.trackId,
+                pointA = posMs,
+                pointB = if (keepB) current.pointB else null,
             )
-            .setActiveQueueItemId(activeQueueItemId(queue.snapshot()))
-            .setState(state, positionMs, if (state == AndroidMediaPlaybackState.STATE_PLAYING) 1f else 0f)
-            .build()
-
-    private fun loadNowPlayingArtwork(path: String?): Bitmap? {
-        if (path.isNullOrBlank()) return null
-        nowPlayingArtworkCache.get(path)?.let { return it }
-        val artwork = runCatching {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(path, bounds)
-            var sampleSize = 1
-            while (bounds.outWidth / (sampleSize * 2) >= NowPlayingArtworkSizePx &&
-                bounds.outHeight / (sampleSize * 2) >= NowPlayingArtworkSizePx
-            ) sampleSize *= 2
-            BitmapFactory.decodeFile(path, BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            })
-        }.getOrNull()
-        if (artwork != null) nowPlayingArtworkCache.put(path, artwork)
-        else Log.w(PlaybackLogTag, "Unable to decode Now Playing artwork path=$path")
-        return artwork
-    }
-
-    private suspend fun FfmpegDecoder.preparePath(path: String, gain: Float) {
-        when (val target = resolveAudioTarget(filesDir, path)) {
-            is AudioTarget.FileTarget -> prepare(target.file, gain)
-            is AudioTarget.ContentTarget -> {
-                val fd = contentResolver.openFileDescriptor(Uri.parse(target.uri), "r")?.detachFd()
-                    ?: error("Unable to open audio uri")
-                prepareFd(fd, gain)
+            return
+        }
+        val existingA = if (current.trackId == item.trackId) current.pointA else null
+        if (existingA == null) {
+            abLoopState.value = AbLoopState(
+                trackId = item.trackId,
+                pointA = 0L,
+                pointB = posMs.coerceAtLeast(500L),
+            )
+        } else if (posMs > existingA + 200L) {
+            abLoopState.value = AbLoopState(trackId = item.trackId, pointA = existingA, pointB = posMs)
+            if (decoder?.isCrossfading() == true) {
+                clearArtworkCrossfade()
+                decoder?.snapCrossfade()
             }
-            is AudioTarget.RemoteTarget -> {
-                // 锁内绝不下载：未缓存就把这次准备交还给锁外的延迟任务。
-                if (!com.exodidio.tune.sync.remoteAudioCached(this@PlaybackService, target.url)) {
-                    throw RemoteAudioNotReady(path, target.url)
-                }
-                val file = com.exodidio.tune.sync.ensureRemoteAudioFile(this@PlaybackService, target.url) { false }
-                    ?: error("Unable to read cached remote audio")
-                prepare(java.io.File(file), gain)
-            }
-            is AudioTarget.StreamTarget -> {
-                val songId = target.url.removePrefix("netease://").toLongOrNull()
-                    ?: error("Bad streaming target")
-                val repository = com.exodidio.tune.netease.NeteaseRepository
-                if (repository.cachedStreamUrl(songId) == null && !repository.hasCachedStream(songId)) {
-                    throw StreamUrlNotReady(songId)
-                }
-                try {
-                    prepareUrl(repository.playbackStreamUrl(songId), gain)
-                } catch (error: Throwable) {
-                    if (error is kotlinx.coroutines.CancellationException) throw error
-                    System.err.println("NETSTREAM prepare failed song=$songId: ${error.message}")
-                    // 缓存的直链可能已过期：丢掉后重新取一次，成功就继续播放，不再直接落暂停。
-                    repository.invalidateStreamUrl(songId)
-                    val refreshed = repository.ensureResumableStreamUrl(songId)
-                    if (!refreshed) throw error
-                    System.err.println("NETSTREAM retry with fresh url song=$songId")
-                    prepareUrl(repository.playbackStreamUrl(songId), gain)
-                }
-            }
-            null -> error("Empty audio path")
+            seekCurrent(existingA)
+        } else if (existingA > posMs + 200L) {
+            abLoopState.value = AbLoopState(trackId = item.trackId, pointA = posMs, pointB = existingA)
         }
     }
 
-    private fun FfmpegDecoder.preloadPath(path: String, gain: Float): Boolean {
-        return when (val target = resolveAudioTarget(filesDir, path)) {
-            is AudioTarget.FileTarget -> preload(target.file, gain)
-            is AudioTarget.ContentTarget -> {
-                val fd = contentResolver.openFileDescriptor(Uri.parse(target.uri), "r")?.detachFd()
-                    ?: error("Unable to open audio uri")
-                preloadFd(fd, gain)
-            }
-            is AudioTarget.RemoteTarget -> {
-                val token = loadToken.get()
-                val file = com.exodidio.tune.sync.ensureRemoteAudioFile(
-                    this@PlaybackService, target.url,
-                ) { loadToken.get() != token }
-                if (file == null) {
-                    if (loadToken.get() != token) throw kotlinx.coroutines.CancellationException("Superseded preload")
-                    error("Unable to download remote audio")
-                }
-                preload(java.io.File(file), gain)
-            }
-            is AudioTarget.StreamTarget -> false
-            null -> error("Empty audio path")
+    private fun fineTuneAbLoopPointLocked(isA: Boolean, deltaMs: Long) {
+        val (item, durationMs) = when (val current = state.value) {
+            is PlaybackState.Playing -> current.item to current.durationMs
+            is PlaybackState.Paused -> current.item to current.durationMs
+            else -> return
         }
-    }
-
-    private fun notification(item: PlaybackItem): Notification = Notification.Builder(this, ChannelId)
-        .setSmallIcon(R.drawable.ic_launcher_monochrome)
-        .setContentTitle(item.title)
-        .setContentText(item.artist)
-        .setContentIntent(nowPlayingContentIntent())
-        .setVisibility(Notification.VISIBILITY_PUBLIC)
-        .setOnlyAlertOnce(true)
-        .setOngoing(true)
-        .setStyle(Notification.MediaStyle().setMediaSession(mediaSession.sessionToken))
-        .build()
-
-    private fun nowPlayingContentIntent(): PendingIntent = PendingIntent.getActivity(
-        this,
-        0,
-        Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-        },
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-    )
-
-    private fun createChannel() {
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(ChannelId, getString(R.string.playback_notification_channel), NotificationManager.IMPORTANCE_LOW),
+        val effectiveDurationMs = (decoder?.durationMs()?.takeIf { it > 0L } ?: durationMs)
+        val updated = fineTuneAbLoop(
+            state = abLoopState.value,
+            trackId = item.trackId,
+            isPointA = isA,
+            deltaMs = deltaMs,
+            durationMs = effectiveDurationMs,
         )
+        abLoopState.value = updated
+        if (updated.isActive) {
+            if (decoder?.isCrossfading() == true) {
+                clearArtworkCrossfade()
+                decoder?.snapCrossfade()
+            }
+            val currentPosMs = decoder?.positionMs() ?: 0L
+            val pointA = updated.pointA ?: return
+            val pointB = updated.pointB ?: return
+            if (currentPosMs < pointA || currentPosMs >= pointB) {
+                seekCurrent(pointA)
+            }
+        }
+    }
+
+    private fun deduplicateQueueLocked() {
+        val store = com.exodidio.tune.sync.AndroidSyncRuntime.syncStore
+        val removed = queue.deduplicateQueue { trackId ->
+            val track = store.trackForPlayback(trackId)
+            if (track != null) trackDedupKey(track).ifEmpty { trackId } else trackId
+        }
+        if (removed > 0) {
+            notificationRequests.trySend(Unit)
+        }
+    }
+
+    private suspend fun setSleepTimerLocked(minutes: Int, afterTrack: Boolean) {
+        if (afterTrack) {
+            sleepTimerState.value = SleepTimerState(SleepTimerMode.AfterCurrentTrack, 0L)
+            decoder?.setFocusGain(if (isDucked) DuckedFocusGain else 1f)
+            decoder?.clearPreloaded()
+            preloadedItem = null
+            return
+        }
+        if (minutes <= 0) {
+            cancelSleepTimerLocked()
+            return
+        }
+        val totalMs = minutes.toLong() * 60_000L
+        val endElapsed = SystemClock.elapsedRealtime() + totalMs
+        sleepTimerState.value = SleepTimerState(SleepTimerMode.Countdown(endElapsed, totalMs), totalMs)
+        decoder?.setFocusGain(if (isDucked) DuckedFocusGain else 1f)
+        if (canPreloadNext(decoder?.isCrossfading() == true)) preloadNext()
+    }
+
+    private suspend fun cancelSleepTimerLocked() {
+        val wasAfterTrack = sleepTimerState.value.afterCurrentTrack
+        sleepTimerState.value = SleepTimerState()
+        decoder?.setFocusGain(if (isDucked) DuckedFocusGain else 1f)
+        if (wasAfterTrack && canPreloadNext(decoder?.isCrossfading() == true)) preloadNext()
+    }
+
+    private suspend fun tickSleepTimerLocked() {
+        val current = sleepTimerState.value
+        val mode = current.mode as? SleepTimerMode.Countdown ?: return
+        val remaining = (mode.endElapsedMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        if (remaining <= 0L) {
+            sleepTimerState.value = SleepTimerState()
+            resumeOnFocusGain = false
+            pauseCurrent()
+            decoder?.setFocusGain(if (isDucked) DuckedFocusGain else 1f)
+            return
+        }
+        if (remaining != current.remainingMs) {
+            sleepTimerState.value = current.copy(remainingMs = remaining)
+        }
+        if (remaining <= 5_000L && state.value is PlaybackState.Playing) {
+            val fade = (remaining / 5_000f).coerceIn(0.05f, 1f)
+            val base = if (isDucked) DuckedFocusGain else 1f
+            decoder?.setFocusGain(base * fade)
+        }
     }
 
     companion object {
@@ -1925,11 +2173,14 @@ class PlaybackService : Service() {
         internal const val ActionRemove = "com.exodidio.tune.player.REMOVE"
         internal const val ActionReorder = "com.exodidio.tune.player.REORDER"
         internal const val ActionStartMoodRadio = "com.exodidio.tune.player.START_MOOD_RADIO"
+        internal const val ActionToggleFavorite = "com.exodidio.tune.player.TOGGLE_FAVORITE"
+        internal const val ActionCycleRepeat = "com.exodidio.tune.player.CYCLE_REPEAT"
         internal const val TrackIdsExtra = "track_ids"
         internal const val TrackIdExtra = "track_id"
         internal const val StartIndexExtra = "start_index"
         internal const val HeartbeatStartExtra = "heartbeat_start"
         internal const val RoamStartExtra = "roam_start"
+        internal const val SimilarStartExtra = "similar_start"
         internal const val PositionMsExtra = "position_ms"
         internal const val EnabledExtra = "enabled"
         internal const val RepeatModeExtra = "repeat_mode"
@@ -1938,13 +2189,22 @@ class PlaybackService : Service() {
         private const val SkipStartQuietMs = 250L
         private const val SkipBurstGapMs = 400L
         private const val DuckedFocusGain = 0.2f
-        private const val ChannelId = "playback"
-        private const val NotificationId = 2002
-        private const val NowPlayingArtworkSizePx = 512
-        private const val StreamUrlTimeoutMs = 12_000L
-        private const val HeartbeatRetryMaxDelayMs = 15_000L
+        internal const val ChannelId = "playback"
+        /** 小米系统媒体控件读取的“原生歌词” MediaMetadata 键（值为标准 LRC 文本）。 */
+        internal const val NativeLyricMetadataKey = "android.media.metadata.LYRIC"
+        internal const val LyricsChannelId = "lyrics"
+        internal const val NotificationId = 2002
+        internal const val LyricsNotificationId = 1702
+        internal const val NowPlayingArtworkSizePx = 512
+        internal const val LargeNowPlayingArtworkSizePx = 1024
+        internal const val StreamUrlTimeoutMs = 12_000L
+        // 参考 MeiloX：临时失败最多 3 次原地重试，线性退避；持续播放 10 秒才算恢复。
+        internal const val MaxTemporaryRecoveryAttempts = 3
+        internal const val TemporaryRecoveryDelayMs = 1_000L
+        private const val HealthyPlaybackMs = 10_000L
+        internal const val HeartbeatRetryMaxDelayMs = 15_000L
         private val PreloadResyncActions = setOf(
-            ActionSetShuffle, ActionSetRepeat, ActionPlayNext, ActionRemove, ActionReorder, ActionStartMoodRadio,
+            ActionSetShuffle, ActionSetRepeat, ActionCycleRepeat, ActionPlayNext, ActionRemove, ActionReorder, ActionDeduplicateQueue, ActionStartMoodRadio,
         )
         // 只有换曲指令才取消进行中的远程下载，暂停/跳转不该打断。
         private val LoadCancellingActions = setOf(
@@ -1955,20 +2215,66 @@ class PlaybackService : Service() {
             ActionPlay, ActionShuffle, ActionSelect, ActionStartMoodRadio,
         )
         private val MoodRadioStoppingActions = setOf(
-            ActionPlay, ActionShuffle, ActionStop, ActionClearQueue, ActionPlayNext, ActionAppend, ActionRemove, ActionReorder,
+            ActionPlay, ActionShuffle, ActionStop, ActionClearQueue, ActionPlayNext, ActionAppend, ActionRemove, ActionReorder, ActionDeduplicateQueue,
         )
         // 换队列即离开心动模式；队列内选歌/上一首/下一首不算。
         private val HeartbeatExitActions = setOf(ActionPlay, ActionShuffle, ActionClearQueue)
-        private val nowPlayingArtworkCache = LruCache<String, Bitmap>(20)
+        private val PlaybackForegroundPromotionActions = setOf(
+            ActionPlay, ActionShuffle, ActionSelect, ActionStartMoodRadio, ActionToggle, ActionResume, ActionNext, ActionPrevious,
+        )
+        internal val nowPlayingArtworkCache = LruCache<String, Bitmap>(20)
         internal val state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
         internal val queueState = MutableStateFlow(PlaybackQueueSnapshot())
         internal val crossfadeSeconds = MutableStateFlow(CrossfadeDisabledSeconds)
         internal val blendArtworkDuringCrossfade = MutableStateFlow(true)
+        internal val gaplessPlayback = MutableStateFlow(true)
         internal val artworkCrossfade = MutableStateFlow<ArtworkCrossfadeTransition?>(null)
         internal val moodRadioActive = MutableStateFlow(false)
-        private var nextArtworkCrossfadeId = 0L
+        internal val playbackSpeed = MutableStateFlow(1f)
+        internal val abLoopState = MutableStateFlow(AbLoopState())
+        internal val sleepTimerState = MutableStateFlow(SleepTimerState())
+        @Volatile internal var isRunning = false
+        @Volatile internal var activeInstance: PlaybackService? = null
+        @Volatile internal var funFeaturesSettings = FunFeaturesSettings()
+
+        internal fun updateCassetteScrub(active: Boolean, pitchFactor: Float) {
+            if (active && !funFeaturesSettings.cassetteMode) return
+            val service = activeInstance ?: return
+            val readLock = service.decoderAccessLock.readLock()
+            if (!readLock.tryLock()) return
+            try {
+                service.decoder?.setCassetteScrub(active, pitchFactor)
+            } finally {
+                readLock.unlock()
+            }
+        }
+
+        internal fun readAudioLevels(outLevels: FloatArray): Boolean {
+            val service = activeInstance ?: return false
+            val readLock = service.decoderAccessLock.readLock()
+            if (!readLock.tryLock()) return false
+            return try {
+                service.decoder?.readAudioLevels(outLevels) == true
+            } finally {
+                readLock.unlock()
+            }
+        }
+        internal var nextArtworkCrossfadeId = 0L
         internal const val ActionSetCrossfade = "com.exodidio.tune.player.SET_CROSSFADE"
         internal const val CrossfadeSecondsExtra = "crossfade_seconds"
+        internal const val ActionSetSpeed = "com.exodidio.tune.player.SET_SPEED"
+        internal const val SpeedExtra = "speed"
+        internal const val ActionSetAbLoopPointA = "com.exodidio.tune.player.SET_AB_POINT_A"
+        internal const val ActionSetAbLoopPointB = "com.exodidio.tune.player.SET_AB_POINT_B"
+        internal const val ActionFineTuneAbLoop = "com.exodidio.tune.player.FINE_TUNE_AB_LOOP"
+        internal const val AbLoopPointIsAExtra = "ab_loop_is_a"
+        internal const val AbLoopDeltaMsExtra = "ab_loop_delta_ms"
+        internal const val ActionClearAbLoop = "com.exodidio.tune.player.CLEAR_AB_LOOP"
+        internal const val ActionDeduplicateQueue = "com.exodidio.tune.player.DEDUPLICATE_QUEUE"
+        internal const val ActionSetSleepTimer = "com.exodidio.tune.player.SET_SLEEP_TIMER"
+        internal const val ActionCancelSleepTimer = "com.exodidio.tune.player.CANCEL_SLEEP_TIMER"
+        internal const val SleepTimerMinutesExtra = "sleep_timer_minutes"
+        internal const val SleepTimerAfterTrackExtra = "sleep_timer_after_track"
         internal fun intent(context: Context, action: String) = Intent(context, PlaybackService::class.java).setAction(action)
     }
 }

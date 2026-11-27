@@ -5,10 +5,16 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,7 +39,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -47,7 +55,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import com.exodidio.tune.R
 import com.exodidio.tune.ui.theme.LocalTuneColors
@@ -63,7 +75,8 @@ internal fun artworkCacheKey(absolutePath: String, targetPx: Int): String =
 
 internal object ArtworkThumbnailCache {
     @Volatile private var backing: LruCache<String, ImageBitmap>? = null
-    private val inFlight = ConcurrentHashMap<String, Unit>()
+    private val inFlight = ConcurrentHashMap<String, Deferred<ImageBitmap?>>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun init(memoryClassMb: Int) {
         if (backing == null) {
@@ -84,6 +97,8 @@ internal object ArtworkThumbnailCache {
         }
     }
 
+    fun isInitialized(): Boolean = backing != null
+
     fun cacheKey(path: String, targetPx: Int): String = artworkCacheKey(path, targetPx)
 
     fun get(key: String): ImageBitmap? = try {
@@ -98,16 +113,33 @@ internal object ArtworkThumbnailCache {
         } catch (_: Throwable) {
             Unit
         } finally {
-            inFlight.remove(key)
+            inFlight.remove(key).let { }
         }
     }
 
-    fun claimInFlight(key: String): Boolean = inFlight.putIfAbsent(key, Unit) == null
-    fun releaseInFlight(key: String) { inFlight.remove(key) }
+    fun loadOrAwait(key: String, loader: suspend () -> ImageBitmap?): Deferred<ImageBitmap?> {
+        return inFlight.computeIfAbsent(key) {
+            scope.async {
+                try {
+                    val loaded = loader()
+                    if (loaded != null) {
+                        put(key, loaded)
+                    } else {
+                        inFlight.remove(key)
+                    }
+                    loaded
+                } catch (t: Throwable) {
+                    inFlight.remove(key)
+                    throw t
+                }
+            }
+        }
+    }
 }
 
 // After: byte-budgeted cache initialised once from ActivityManager.memoryClass.
 private fun ensureArtworkCache(context: Context) {
+    if (ArtworkThumbnailCache.isInitialized()) return
     val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     ArtworkThumbnailCache.init(manager.memoryClass)
 }
@@ -127,13 +159,15 @@ internal fun rememberArtworkThumbnail(
     val cacheKey = remember(absolutePath, targetPx) { ArtworkThumbnailCache.cacheKey(absolutePath, targetPx) }
     var bitmap by remember(cacheKey) { mutableStateOf(ArtworkThumbnailCache.get(cacheKey)) }
     LaunchedEffect(cacheKey) {
-        if (bitmap != null) return@LaunchedEffect
-        if (!ArtworkThumbnailCache.claimInFlight(cacheKey)) return@LaunchedEffect
-        var loaded: ImageBitmap? = null
-        try {
-            loaded = withContext(Dispatchers.IO) {
+        val cached = ArtworkThumbnailCache.get(cacheKey)
+        if (cached != null) {
+            bitmap = cached
+            return@LaunchedEffect
+        }
+        val loaded = runCatching {
+            ArtworkThumbnailCache.loadOrAwait(cacheKey) {
                 val file = File(absolutePath)
-                if (!file.isFile) return@withContext null
+                if (!file.isFile) return@loadOrAwait null
                 runCatching {
                     val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
@@ -149,14 +183,10 @@ internal fun rememberArtworkThumbnail(
                     }
                     BitmapFactory.decodeFile(file.absolutePath, decodeOptions)?.asImageBitmap()
                 }.getOrNull()
-            }
-            if (loaded != null) {
-                // put happens on the IO result, never on the main dispatcher.
-                ArtworkThumbnailCache.put(cacheKey, loaded)
-                bitmap = loaded
-            }
-        } finally {
-            if (loaded == null) ArtworkThumbnailCache.releaseInFlight(cacheKey)
+            }.await()
+        }.getOrNull()
+        if (loaded != null) {
+            bitmap = loaded
         }
     }
     return bitmap
@@ -180,14 +210,26 @@ fun TrackRow(
     trailingContent: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
     val resolvedTitleStyle = titleStyle ?: MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
     val resolvedArtistStyle = artistStyle ?: MaterialTheme.typography.bodySmall
     val bitmap = rememberArtworkThumbnail(artworkPath)
-    val clickModifier = remember(onClick, onLongClick) {
-        if (onClick != null || onLongClick != null) {
+    val bitmapAlpha = rememberArtworkFadeAlpha(artworkPath, bitmap != null)
+    val interactive = onClick != null || onLongClick != null
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressTint by animateColorAsState(
+        targetValue = if (pressed && interactive && !reduceMotion) colors.textMain.copy(alpha = 0.05f) else Color.Transparent,
+        animationSpec = if (reduceMotion) snap() else tween(140, easing = FastOutSlowInEasing),
+        label = "track-row-press-tint",
+    )
+    val clickModifier = remember(onClick, onLongClick, interactionSource) {
+        if (interactive) {
             Modifier.combinedClickable(
                 onClick = { onClick?.invoke() },
                 onLongClick = onLongClick,
+                interactionSource = interactionSource,
+                indication = null,
             )
         } else {
             Modifier
@@ -200,6 +242,7 @@ fun TrackRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .background(pressTint)
             .then(clickModifier)
             .padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically,
@@ -218,7 +261,7 @@ fun TrackRow(
                     bitmap = bitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize(),
+                    modifier = Modifier.matchParentSize().alpha(bitmapAlpha),
                 )
                 !artworkUrl.isNullOrBlank() -> TuneRemoteImage(
                     url = artworkUrl,

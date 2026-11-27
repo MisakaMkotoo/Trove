@@ -15,6 +15,9 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.resetMain
+import com.exodidio.tune.settings.ControlStyle
+import com.exodidio.tune.settings.IconStyle
+import com.exodidio.tune.settings.ThemeAccentColor
 import com.exodidio.tune.settings.ThemeMode
 import com.exodidio.tune.settings.PlayerTheme
 import com.exodidio.tune.settings.ThemeModeStore
@@ -216,6 +219,149 @@ class MainViewModelTest {
         assertEquals(AppEffect.ResetPoppedPage(AppStackPage.LibraryTracks), effect.await())
     }
 
+    @Test
+    fun `opening similar songs from player emits RestoreFullScreenPlayer on back`() = runTest {
+        val viewModel = MainViewModel(FakeThemeModeStore())
+        activateState(viewModel)
+        val emitted = mutableListOf<AppEffect>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.effects.collect { emitted += it }
+        }
+
+        viewModel.dispatch(AppIntent.OpenSimilarSongs("song-1", returnToPlayer = true))
+        advanceUntilIdle()
+        assertEquals(AppStackPage.SimilarSongs, viewModel.uiState.value.currentPage)
+
+        viewModel.dispatch(AppIntent.NavigateBack)
+        advanceUntilIdle()
+
+        assertEquals(AppStackPage.Root, viewModel.uiState.value.currentPage)
+        assertEquals(
+            listOf(AppEffect.ResetPoppedPage(AppStackPage.SimilarSongs), AppEffect.RestoreFullScreenPlayer),
+            emitted,
+        )
+    }
+
+    @Test
+    fun `nested navigation from player waits until returning past anchor before restoring player`() = runTest {
+        val viewModel = MainViewModel(FakeThemeModeStore())
+        activateState(viewModel)
+        val emitted = mutableListOf<AppEffect>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.effects.collect { emitted += it }
+        }
+
+        viewModel.dispatch(AppIntent.OpenArtistDetails("artist-1", returnToPlayer = true))
+        viewModel.dispatch(AppIntent.OpenAlbumDetails("album-1"))
+        advanceUntilIdle()
+        assertEquals(AppStackPage.AlbumDetails, viewModel.uiState.value.currentPage)
+
+        viewModel.dispatch(AppIntent.NavigateBack)
+        advanceUntilIdle()
+        assertEquals(AppStackPage.ArtistDetails, viewModel.uiState.value.currentPage)
+        assertEquals(listOf(AppEffect.ResetPoppedPage(AppStackPage.AlbumDetails)), emitted)
+
+        viewModel.dispatch(AppIntent.NavigateBack)
+        advanceUntilIdle()
+        assertEquals(AppStackPage.Root, viewModel.uiState.value.currentPage)
+        assertEquals(
+            listOf(
+                AppEffect.ResetPoppedPage(AppStackPage.AlbumDetails),
+                AppEffect.ResetPoppedPage(AppStackPage.ArtistDetails),
+                AppEffect.RestoreFullScreenPlayer,
+            ),
+            emitted,
+        )
+    }
+
+    @Test
+    fun `switching tabs clears pending return-to-player anchor`() = runTest {
+        val viewModel = MainViewModel(FakeThemeModeStore())
+        activateState(viewModel)
+        val emitted = mutableListOf<AppEffect>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.effects.collect { emitted += it }
+        }
+
+        viewModel.dispatch(AppIntent.OpenAlbumDetails("album-1", returnToPlayer = true))
+        viewModel.dispatch(AppIntent.SelectDestination(AppDestination.Library))
+        advanceUntilIdle()
+        viewModel.dispatch(AppIntent.OpenAlbumDetails("album-2"))
+        viewModel.dispatch(AppIntent.NavigateBack)
+        advanceUntilIdle()
+
+        assertEquals(listOf(AppEffect.ResetPoppedPage(AppStackPage.AlbumDetails)), emitted)
+    }
+
+    @Test
+    fun `dispatching SetAccentColor persists and updates ui state`() = runTest {
+        val store = FakeThemeModeStore()
+        val viewModel = MainViewModel(store)
+        activateState(viewModel)
+        advanceUntilIdle()
+        assertEquals(ThemeAccentColor.Red, viewModel.uiState.value.accentColor)
+
+        viewModel.dispatch(AppIntent.SetAccentColor(ThemeAccentColor.Blue))
+        advanceUntilIdle()
+
+        assertEquals(listOf(ThemeAccentColor.Blue), store.savedAccentColors)
+        assertEquals(ThemeAccentColor.Blue, viewModel.uiState.value.accentColor)
+    }
+
+    @Test
+    fun `enabling mergeMineAndLibrary persists flag and moves Mine destination to Library`() = runTest {
+        val store = FakeThemeModeStore()
+        val viewModel = MainViewModel(store)
+        activateState(viewModel)
+
+        viewModel.dispatch(AppIntent.SelectDestination(AppDestination.Mine))
+        advanceUntilIdle()
+        assertEquals(AppDestination.Mine, viewModel.uiState.value.selectedDestination)
+
+        viewModel.dispatch(AppIntent.SetMergeMineAndLibrary(true))
+        advanceUntilIdle()
+
+        assertEquals(listOf(true), store.savedMergeMineAndLibrary)
+        assertEquals(true, viewModel.uiState.value.mergeMineAndLibrary)
+        assertEquals(AppDestination.Library, viewModel.uiState.value.selectedDestination)
+
+        viewModel.dispatch(AppIntent.SelectDestination(AppDestination.Mine))
+        advanceUntilIdle()
+        assertEquals(AppDestination.Library, viewModel.uiState.value.selectedDestination)
+    }
+
+    @Test
+    fun `enabling mergeMineAndLibrary updates settings return destination from Mine to Library`() = runTest {
+        val store = FakeThemeModeStore()
+        val viewModel = MainViewModel(store)
+        activateState(viewModel)
+
+        viewModel.dispatch(AppIntent.SelectDestination(AppDestination.Mine))
+        viewModel.dispatch(AppIntent.OpenSettings)
+        viewModel.dispatch(AppIntent.SetMergeMineAndLibrary(true))
+        advanceUntilIdle()
+
+        viewModel.dispatch(AppIntent.NavigateBack)
+        advanceUntilIdle()
+
+        assertEquals(AppDestination.Library, viewModel.uiState.value.selectedDestination)
+    }
+
+    @Test
+    fun `setting liquidGlassBlurDp updates uiState within bounds`() = runTest {
+        val store = FakeThemeModeStore()
+        val viewModel = MainViewModel(store)
+        activateState(viewModel)
+
+        viewModel.dispatch(AppIntent.SetLiquidGlassBlurDp(4f))
+        advanceUntilIdle()
+        assertEquals(4f, viewModel.uiState.value.liquidGlassBlurDp, 0.01f)
+
+        viewModel.dispatch(AppIntent.SetLiquidGlassBlurDp(99f))
+        advanceUntilIdle()
+        assertEquals(com.exodidio.tune.settings.MaxLiquidGlassBlurDp, viewModel.uiState.value.liquidGlassBlurDp, 0.01f)
+    }
+
     private fun TestScope.activateState(viewModel: MainViewModel) {
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect()
@@ -226,6 +372,8 @@ class MainViewModelTest {
 private class FakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMode.System) : ThemeModeStore {
     private val mutableThemeMode = MutableStateFlow(initialThemeMode)
     private val mutableReduceTransparency = MutableStateFlow(false)
+    private val mutableAccentColor = MutableStateFlow(ThemeAccentColor.Red)
+    private val mutableMergeMineAndLibrary = MutableStateFlow(false)
     override val themeMode: Flow<ThemeMode> = mutableThemeMode
     override val reduceTransparency: Flow<Boolean> = mutableReduceTransparency
     override val playerTheme: Flow<PlayerTheme> = kotlinx.coroutines.flow.MutableStateFlow(PlayerTheme.Standard)
@@ -239,8 +387,16 @@ private class FakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMode.System)
     override val showComposers: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
     override val rememberTabPage: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(true)
     override val mergeBottomBars: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(true)
+    override val iconStyle: Flow<IconStyle> = kotlinx.coroutines.flow.MutableStateFlow(IconStyle.Material)
+    override val controlStyle: Flow<ControlStyle> = kotlinx.coroutines.flow.MutableStateFlow(ControlStyle.Frosted)
+    private val mutableLiquidGlassBlurDp = MutableStateFlow(com.exodidio.tune.settings.DefaultLiquidGlassBlurDp)
+    override val liquidGlassBlurDp: Flow<Float> = mutableLiquidGlassBlurDp
+    override val accentColor: Flow<ThemeAccentColor> = mutableAccentColor
+    override val mergeMineAndLibrary: Flow<Boolean> = mutableMergeMineAndLibrary
     val savedModes = mutableListOf<ThemeMode>()
     val savedReduceTransparencyValues = mutableListOf<Boolean>()
+    val savedAccentColors = mutableListOf<ThemeAccentColor>()
+    val savedMergeMineAndLibrary = mutableListOf<Boolean>()
 
     override suspend fun setThemeMode(themeMode: ThemeMode) {
         savedModes += themeMode
@@ -262,4 +418,20 @@ private class FakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMode.System)
     override suspend fun setRememberTabPage(enabled: Boolean) {}
     override suspend fun setMergeBottomBars(enabled: Boolean) {}
     override suspend fun setLyricsFontLevel(level: Int) {}
+    override suspend fun setIconStyle(style: IconStyle) {}
+    override suspend fun setControlStyle(style: ControlStyle) {}
+    override suspend fun setLiquidGlassBlurDp(blurDp: Float) {
+        mutableLiquidGlassBlurDp.value = blurDp.coerceIn(
+            com.exodidio.tune.settings.MinLiquidGlassBlurDp,
+            com.exodidio.tune.settings.MaxLiquidGlassBlurDp,
+        )
+    }
+    override suspend fun setAccentColor(accentColor: ThemeAccentColor) {
+        savedAccentColors += accentColor
+        mutableAccentColor.value = accentColor
+    }
+    override suspend fun setMergeMineAndLibrary(enabled: Boolean) {
+        savedMergeMineAndLibrary += enabled
+        mutableMergeMineAndLibrary.value = enabled
+    }
 }

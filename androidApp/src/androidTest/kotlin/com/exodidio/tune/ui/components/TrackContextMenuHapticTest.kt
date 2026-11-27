@@ -40,7 +40,7 @@ class TrackContextMenuHapticTest {
             }
         }
 
-        composeTestRule.onNodeWithText("Add to favorites").performClick()
+        composeTestRule.onNodeWithText("Add to library").performClick()
         composeTestRule.runOnIdle {
             assertEquals(true, change)
             assertEquals(listOf(HapticFeedbackType.Confirm), haptics)
@@ -67,7 +67,7 @@ class TrackContextMenuHapticTest {
             }
         }
 
-        composeTestRule.onNodeWithText("Remove from favorites").performClick()
+        composeTestRule.onNodeWithText("Remove from library").performClick()
         composeTestRule.runOnIdle {
             assertEquals(false, change)
             assertEquals(emptyList<HapticFeedbackType>(), haptics)
@@ -75,12 +75,30 @@ class TrackContextMenuHapticTest {
     }
 
     @Test
-    fun findLyricsOpensTheTrackContextSheet() {
+    fun defaultMenuOmitsFindLyricsAndLyricsControl() {
         composeTestRule.setContent {
             TuneTheme(themeMode = ThemeMode.Dark) {
                 TrackContextMenu(
                     track = LibraryTrack(id = "track", title = "Track", artists = "Artist"),
                     expanded = true,
+                    onDismiss = {},
+                    anchor = { Box(Modifier) },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Find lyrics").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Lyrics source & alignment").assertDoesNotExist()
+    }
+
+    @Test
+    fun findLyricsOpensTheTrackContextSheetWhenEnabled() {
+        composeTestRule.setContent {
+            TuneTheme(themeMode = ThemeMode.Dark) {
+                TrackContextMenu(
+                    track = LibraryTrack(id = "track", title = "Track", artists = "Artist"),
+                    expanded = true,
+                    actions = TrackContextMenuActions(findLyrics = true),
                     onDismiss = {},
                     anchor = { Box(Modifier) },
                 )

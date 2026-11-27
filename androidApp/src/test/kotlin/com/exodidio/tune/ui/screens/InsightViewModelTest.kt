@@ -1,8 +1,12 @@
 package com.exodidio.tune.ui.screens
 
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneOffset
 import com.exodidio.tune.player.DailyPlaybackAttemptStat
 import com.exodidio.tune.player.DailyTrackListeningStat
+import com.exodidio.tune.player.PlaybackEndReason
+import com.exodidio.tune.sync.AndroidLibrarySyncStore
 import com.exodidio.tune.sync.LibraryAlbum
 import com.exodidio.tune.sync.LibraryArtist
 import com.exodidio.tune.sync.LibraryPlaylist
@@ -74,6 +78,98 @@ class InsightViewModelTest {
             assertTrue(state.listening.listenedSeconds > 0)
             assertTrue(state.listening.activity.any { it.value > 0 })
         }
+    }
+
+    @Test
+    fun buildsLocalHeatmapAnnualReportAndChronologicalFootprints() {
+        val ts2026Morning = LocalDateTime.of(2026, 1, 10, 9, 15).toInstant(ZoneOffset.UTC).toEpochMilli()
+        val ts2026Night = LocalDateTime.of(2026, 1, 10, 21, 30).toInstant(ZoneOffset.UTC).toEpochMilli()
+        val ts2025Evening = LocalDateTime.of(2025, 11, 20, 20, 5).toInstant(ZoneOffset.UTC).toEpochMilli()
+        val rawWithFootprints = raw.copy(
+            footprints = listOf(
+                AndroidLibrarySyncStore.ListeningFootprintRecord(
+                    id = "fp-1",
+                    trackId = "one",
+                    title = "Alpha",
+                    artists = "Artist A",
+                    startedAt = ts2026Morning,
+                    endedAt = ts2026Morning + 180_000,
+                    listenedSeconds = 180,
+                    endReason = PlaybackEndReason.COMPLETED,
+                ),
+                AndroidLibrarySyncStore.ListeningFootprintRecord(
+                    id = "fp-2",
+                    trackId = "one",
+                    title = "Alpha",
+                    artists = "Artist A",
+                    startedAt = ts2026Night,
+                    endedAt = ts2026Night + 420_000,
+                    listenedSeconds = 420,
+                    endReason = PlaybackEndReason.COMPLETED,
+                ),
+                AndroidLibrarySyncStore.ListeningFootprintRecord(
+                    id = "fp-3",
+                    trackId = "three",
+                    title = "Gamma",
+                    artists = "Artist C",
+                    startedAt = ts2025Evening,
+                    endedAt = ts2025Evening + 240_000,
+                    listenedSeconds = 240,
+                    endReason = PlaybackEndReason.SKIPPED,
+                ),
+            ),
+        )
+
+        val state2026 = buildInsightUiState(
+            data = rawWithFootprints,
+            libraryPeriod = InsightPeriod.SevenDays,
+            listeningPeriod = InsightPeriod.SevenDays,
+            today = LocalDate.parse("2026-01-10"),
+            reportYear = 2026,
+            zoneId = ZoneOffset.UTC,
+        )
+
+        assertEquals(26 * 7, state2026.heatmap.cells.size)
+        assertEquals(5, state2026.heatmap.activeDays)
+        assertEquals(600, state2026.heatmap.maxDaySeconds)
+        val peakCell = state2026.heatmap.cells.first { it.dateText == "2026-01-10" }
+        assertEquals(4, peakCell.level)
+        assertEquals(3, peakCell.plays)
+        val futureCell = state2026.heatmap.cells.firstOrNull { it.dateText == "2026-01-11" }
+        assertEquals(true, futureCell?.inFuture)
+        assertEquals(0, futureCell?.level)
+
+        assertEquals(listOf(2026, 2025), state2026.annualReport.availableYears)
+        assertEquals(2026, state2026.annualReport.year)
+        assertEquals(1260, state2026.annualReport.listenedSeconds)
+        assertEquals(4, state2026.annualReport.activeDays)
+        assertEquals(7, state2026.annualReport.totalPlays)
+        assertEquals(3, state2026.annualReport.uniqueTracks)
+        assertEquals("one", state2026.annualReport.topTrack?.track?.id)
+        assertEquals("Artist A", state2026.annualReport.topArtist?.name)
+        assertEquals(ListeningTimeSlot.Evening, state2026.annualReport.peakTimeSlot)
+        assertEquals(21, state2026.annualReport.peakHour)
+
+        assertEquals(3, state2026.totalFootprintsCount)
+        assertEquals(2, state2026.footprintGroups.size)
+        assertEquals("2026-01-10", state2026.footprintGroups.first().date)
+        assertEquals(2, state2026.footprintGroups.first().entries.size)
+        assertEquals("fp-2", state2026.footprintGroups.first().entries.first().id)
+        assertEquals("21:37", state2026.footprintGroups.first().entries.first().timeLabel)
+        assertEquals(4, state2026.footprintGroups.first().entries.first().trackPlayCount)
+
+        val state2025 = buildInsightUiState(
+            data = rawWithFootprints,
+            libraryPeriod = InsightPeriod.SevenDays,
+            listeningPeriod = InsightPeriod.SevenDays,
+            today = LocalDate.parse("2026-01-10"),
+            reportYear = 2025,
+            zoneId = ZoneOffset.UTC,
+        )
+        assertEquals(2025, state2025.annualReport.year)
+        assertEquals("three", state2025.annualReport.topTrack?.track?.id)
+        assertEquals(ListeningTimeSlot.Evening, state2025.annualReport.peakTimeSlot)
+        assertEquals(20, state2025.annualReport.peakHour)
     }
 
     private fun track(

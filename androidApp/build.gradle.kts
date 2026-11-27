@@ -59,7 +59,6 @@ val hasReleaseSigning = listOf(
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeCompiler)
-    alias(libs.plugins.ksp)
     alias(libs.plugins.kotlinSerialization)
 }
 
@@ -81,6 +80,34 @@ kotlin {
         jvmTarget = JvmTarget.JVM_21
     }
 }
+val supportedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val availableJniAbis = file("src/main/jniLibs")
+    .listFiles()
+    ?.filter { it.isDirectory && it.name in supportedAbis }
+    ?.map { it.name }
+    ?.toSet()
+    .orEmpty()
+
+val trimmedOrtDir = file("build/onnxruntime")
+val trimmedOrtJar = file("build/onnxruntime/libs/onnxruntime-android.jar")
+val trimmedOrtJniDir = file("build/onnxruntime/jniLibs")
+val targetOrtAbis = availableJniAbis.ifEmpty { setOf("arm64-v8a") }
+val hasTrimmedOrt = if (!trimmedOrtDir.exists()) {
+    false
+} else {
+    require(trimmedOrtJar.isFile) {
+        "Partial ONNX Runtime build at $trimmedOrtDir: missing $trimmedOrtJar. Run: bash scripts/build-onnxruntime-android.sh"
+    }
+    targetOrtAbis.forEach { abi ->
+        val ortSo = File(trimmedOrtJniDir, "$abi/libonnxruntime.so")
+        val jniSo = File(trimmedOrtJniDir, "$abi/libonnxruntime4j_jni.so")
+        require(ortSo.isFile && jniSo.isFile) {
+            "Missing trimmed ONNX Runtime .so for $abi under $trimmedOrtJniDir. Run: bash scripts/build-onnxruntime-android.sh $abi"
+        }
+    }
+    true
+}
+
 dependencies {
     implementation(project(":sharedLogic"))
 
@@ -97,27 +124,40 @@ dependencies {
     debugImplementation(libs.compose.uiToolingPreview)
     implementation(libs.haze.core)
     implementation(libs.haze.blur)
+    implementation(libs.kyant0.backdrop)
+    implementation(libs.kyant0.shapes)
+    implementation(libs.kyant0.capsule)
     implementation(libs.androidx.palette)
     implementation(libs.androidx.webkit)
-    implementation(libs.zxing.core)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.hyper.focus.api)
+    implementation(libs.lyricon.provider)
+    if (hasTrimmedOrt) {
+        implementation(files(trimmedOrtJar))
+    } else {
+        implementation(libs.onnxruntime.android)
+    }
+    implementation(libs.commons.compress)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
-    implementation(libs.room.runtime)
-    implementation(libs.room.ktx)
     implementation(libs.reorderable)
     implementation(libs.vico.compose)
-    ksp(libs.room.compiler)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation(libs.room.testing)
     androidTestImplementation(libs.androidx.testExt.junit)
     androidTestImplementation(libs.compose.uiTestJunit4)
     debugImplementation(libs.compose.uiTooling)
     debugImplementation(libs.compose.uiTestManifest)
 }
+
+val appVersionCode = 10
+val appVersionName = "1.2.0-beta"
+val betaVersionCode = 8
+val buildingRelease = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+val releaseAbiSplitsRequested = gradle.startParameter.projectProperties["enableReleaseAbiSplits"] != "false"
+val enableAbiSplits = buildingRelease && releaseAbiSplitsRequested
 
 android {
     namespace = "com.exodidio.tune"
@@ -128,16 +168,18 @@ android {
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 10
-        versionName = "1.2.0-beta"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++20", "-fexceptions", "-frtti")
             }
         }
-        ndk {
-            abiFilters += setOf("arm64-v8a")
+        if (!enableAbiSplits) {
+            ndk {
+                abiFilters += availableJniAbis.ifEmpty { setOf("arm64-v8a") }
+            }
         }
     }
     flavorDimensions += "environment"
@@ -153,19 +195,25 @@ android {
         create("beta") {
             dimension = "environment"
             applicationId = "com.exodidio.tune.beta"
-            versionCode = 8
-            versionName = "1.2.0-beta"
+            versionCode = betaVersionCode
+            versionName = appVersionName
         }
     }
     splits {
         abi {
             // ABI splits only for release builds: keep debug as a single fast APK.
-            val buildingRelease = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-            val releaseAbiSplitsRequested = gradle.startParameter.projectProperties["enableReleaseAbiSplits"] != "false"
-            isEnable = buildingRelease && releaseAbiSplitsRequested
+            isEnable = enableAbiSplits
             reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            val splitTargets = availableJniAbis.ifEmpty { supportedAbis }
+            include(*splitTargets.toTypedArray())
             isUniversalApk = true
+        }
+    }
+    sourceSets {
+        getByName("main") {
+            if (hasTrimmedOrt) {
+                jniLibs.directories.add(trimmedOrtJniDir.path)
+            }
         }
     }
     packaging {
@@ -216,12 +264,8 @@ android {
 }
 
 // Per-ABI versionCode + APK naming for ABI splits (AGP 9 androidComponents API).
-// Scheme: base versionCode (7) x 1000 + offset — universal +0 (=7000),
-// armeabi-v7a +1 (=6001), x86_64 +2 (=6002), arm64-v8a +3 (=6003, highest).
-// arm64-v8a gets the highest code so capable devices prefer it.
-// Keep the literals 7 / "1.2.0-beta" below in sync with defaultConfig versionCode/versionName.
-// Uses the current AGP VariantOutput Property API via set(...) calls, plus
-// output.filters with FilterType.ABI to detect the per-split ABI.
+// Scheme: base versionCode x 1000 + offset — universal +0,
+// armeabi-v7a +1, x86_64 +2, arm64-v8a +3 (highest so capable devices prefer it).
 androidComponents {
     onVariants(selector().withBuildType("release")) { variant ->
         variant.outputs.forEach { output ->
@@ -234,8 +278,8 @@ androidComponents {
                 else -> error("unknown ABI \"$abi\"")
             }
             val baseVersionCode = when (variant.flavorName) {
-                "beta" -> 8
-                else -> 7
+                "beta" -> betaVersionCode
+                else -> appVersionCode
             }
             output.versionCode.set(baseVersionCode * 1000 + offset)
             val suffix = if (abi != null) "_$abi" else ""
@@ -243,7 +287,7 @@ androidComponents {
                 "beta" -> "-beta"
                 else -> ""
             }
-            output.outputFileName.set("FavFoldMusic-v1.2.0-beta$flavorSuffix$suffix.apk")
+            output.outputFileName.set("FavFoldMusic-v$appVersionName$flavorSuffix$suffix.apk")
         }
     }
 }

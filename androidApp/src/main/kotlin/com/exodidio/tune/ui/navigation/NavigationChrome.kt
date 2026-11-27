@@ -20,11 +20,26 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import com.exodidio.tune.AppDestination
 import com.exodidio.tune.player.PlaybackState
 import com.exodidio.tune.player.PlaybackQueueSnapshot
+
+private val FloatingNavigationRetreatClearance = 16.dp
+
+internal fun navigationBarRetreatOffsetPx(
+    expansionProgress: Float,
+    navigationHeightPx: Float,
+    bottomPaddingPx: Float,
+    clearancePx: Float,
+): Float {
+    val progress = if (expansionProgress.isFinite()) expansionProgress.coerceIn(0f, 1f) else 0f
+    val totalTravel = (navigationHeightPx + bottomPaddingPx + clearancePx).coerceAtLeast(0f)
+    return totalTravel * progress
+}
 
 internal fun PlaybackState.showsMiniPlayer(): Boolean = when (this) {
     PlaybackState.Idle, is PlaybackState.Failed -> false
@@ -50,6 +65,9 @@ internal fun NavigationChrome(
     onOpenFullScreenPlayer: () -> Unit = {},
     onFullScreenPlayerDrag: (Float) -> Unit = {},
     onFullScreenPlayerDragEnd: (Boolean) -> Unit = {},
+    fullScreenExpansionProgress: Float = 0f,
+    bottomPadding: Dp = FloatingNavigationMinBottomClearance,
+    onMiniPlayerBoundsChanged: (MiniPlayerTransitionBounds) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val isCompact = compact && playbackState.showsMiniPlayer()
@@ -122,6 +140,8 @@ internal fun NavigationChrome(
                     onFullScreenPlayerDrag = onFullScreenPlayerDrag,
                     onFullScreenPlayerDragEnd = onFullScreenPlayerDragEnd,
                     stableGlassWidth = maxWidth,
+                    fullScreenExpansionProgress = fullScreenExpansionProgress,
+                    onBoundsChanged = onMiniPlayerBoundsChanged,
                     modifier = Modifier,
                 )
             }
@@ -138,7 +158,15 @@ internal fun NavigationChrome(
                 stableGlassWidth = maxWidth,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .width(navigationWidth),
+                    .width(navigationWidth)
+                    .graphicsLayer {
+                        translationY = navigationBarRetreatOffsetPx(
+                            expansionProgress = fullScreenExpansionProgress,
+                            navigationHeightPx = navigationHeight.toPx(),
+                            bottomPaddingPx = bottomPadding.toPx(),
+                            clearancePx = FloatingNavigationRetreatClearance.toPx(),
+                        )
+                    },
             )
         }
     }

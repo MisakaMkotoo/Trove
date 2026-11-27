@@ -25,9 +25,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.exodidio.tune.R
-import com.exodidio.tune.netease.NeteaseImageCache
 import com.exodidio.tune.netease.NeteaseRepository
-import com.exodidio.tune.netease.NeteaseStreamProxy
 import com.exodidio.tune.ui.components.Card
 import com.exodidio.tune.ui.components.HeroCard
 import com.exodidio.tune.ui.components.MaterialSymbol
@@ -51,18 +49,6 @@ internal fun NeteasePlaylistsContent(
     var link by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
-    var cacheSizeMb by remember { mutableStateOf(NeteaseStreamProxy.sizeLimitMb(context)) }
-    // 用量要遍历缓存目录/读 Media3 索引：一律放到 IO，组合期先显示占位。
-    var cacheUsage by remember { mutableStateOf<Long?>(null) }
-    var coverCacheSizeMb by remember { mutableStateOf(NeteaseImageCache.sizeLimitMb(context)) }
-    var coverCacheUsage by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(Unit) {
-        val usage = withContext(Dispatchers.IO) {
-            NeteaseStreamProxy.usageBytes() to NeteaseImageCache.usageBytes(context)
-        }
-        cacheUsage = usage.first
-        coverCacheUsage = usage.second
-    }
 
     fun importPlaylist() {
         if (busy || link.isBlank()) return
@@ -119,164 +105,6 @@ internal fun NeteasePlaylistsContent(
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.textMuted,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                )
-            }
-        }
-        Card {
-            Text(
-                text = stringResource(R.string.netease_cache_title),
-                style = MaterialTheme.typography.titleSmall,
-                color = colors.textMain,
-                modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp),
-            )
-            Text(
-                text = stringResource(
-                    R.string.netease_cache_usage,
-                    cacheUsage?.let(::formatCacheSize) ?: "…",
-                    formatCacheSize(cacheSizeMb.toLong() * 1024 * 1024),
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.textMuted,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            )
-            listOf(200, 500, 800, 1536, 3072).forEach { preset ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            cacheSizeMb = preset
-                            scope.launch {
-                                cacheUsage = withContext(Dispatchers.IO) {
-                                    // 改上限会释放并重建 SimpleCache，必须在 IO 上做。
-                                    NeteaseStreamProxy.setSizeLimitMb(context, preset)
-                                    NeteaseStreamProxy.usageBytes()
-                                }
-                            }
-                        }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = formatCacheSize(preset.toLong() * 1024 * 1024),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.textMain,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (preset == cacheSizeMb) {
-                        MaterialSymbol(
-                            symbol = MaterialSymbols.Check,
-                            contentDescription = stringResource(R.string.netease_cache_current),
-                            size = 18.dp,
-                            tint = colors.primary,
-                        )
-                    }
-                }
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        scope.launch {
-                            cacheUsage = withContext(Dispatchers.IO) {
-                                NeteaseStreamProxy.clearCache()
-                                NeteaseStreamProxy.usageBytes()
-                            }
-                        }
-                    }
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.netease_cache_clear),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.textMain,
-                    modifier = Modifier.weight(1f),
-                )
-                MaterialSymbol(
-                    symbol = MaterialSymbols.Delete,
-                    contentDescription = null,
-                    size = 18.dp,
-                    tint = colors.textMuted,
-                )
-            }
-        }
-        Card {
-            Text(
-                text = stringResource(R.string.netease_cover_cache_title),
-                style = MaterialTheme.typography.titleSmall,
-                color = colors.textMain,
-                modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp),
-            )
-            Text(
-                text = stringResource(
-                    R.string.netease_cache_usage,
-                    coverCacheUsage?.let(::formatCacheSize) ?: "…",
-                    formatCacheSize(coverCacheSizeMb.toLong() * 1024 * 1024),
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.textMuted,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            )
-            listOf(200, 500, 800, 1536, 3072).forEach { preset ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            coverCacheSizeMb = preset
-                            scope.launch {
-                                coverCacheUsage = withContext(Dispatchers.IO) {
-                                    // 改上限要重建 Coil 磁盘缓存并裁剪目录，全部在 IO 上做。
-                                    NeteaseImageCache.setSizeLimitMb(context, preset)
-                                    com.exodidio.tune.ui.components.TuneImages.applyDiskLimit(context)
-                                    NeteaseImageCache.usageBytes(context)
-                                }
-                            }
-                        }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = formatCacheSize(preset.toLong() * 1024 * 1024),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.textMain,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (preset == coverCacheSizeMb) {
-                        MaterialSymbol(
-                            symbol = MaterialSymbols.Check,
-                            contentDescription = stringResource(R.string.netease_cache_current),
-                            size = 18.dp,
-                            tint = colors.primary,
-                        )
-                    }
-                }
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        scope.launch {
-                            coverCacheUsage = withContext(Dispatchers.IO) {
-                                NeteaseImageCache.clear(context)
-                                com.exodidio.tune.ui.components.TuneImages.clearDisk()
-                                NeteaseImageCache.usageBytes(context)
-                            }
-                        }
-                    }
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.netease_cache_clear),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.textMain,
-                    modifier = Modifier.weight(1f),
-                )
-                MaterialSymbol(
-                    symbol = MaterialSymbols.Delete,
-                    contentDescription = null,
-                    size = 18.dp,
-                    tint = colors.textMuted,
                 )
             }
         }
@@ -350,8 +178,3 @@ internal fun NeteasePlaylistsContent(
     }
 }
 
-private fun formatCacheSize(bytes: Long): String = when {
-    bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes.toDouble() / (1024L * 1024 * 1024))
-    bytes >= 1024L * 1024 -> "%.0f MB".format(bytes.toDouble() / (1024L * 1024))
-    else -> "%.0f KB".format(bytes.toDouble() / 1024)
-}

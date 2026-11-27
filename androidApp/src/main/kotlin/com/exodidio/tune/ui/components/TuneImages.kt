@@ -13,16 +13,15 @@ import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
+import com.exodidio.tune.net.TuneHttp
 import com.exodidio.tune.netease.NeteaseImageCache
 import java.io.File
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import okhttp3.Interceptor
-import okhttp3.OkHttpClient
 import okhttp3.Response
 import okio.Path.Companion.toOkioPath
 
@@ -54,10 +53,8 @@ object TuneImages {
         val limit = NeteaseImageCache.sizeLimitMb(app) * 1024L * 1024L
         if (!force && loader != null && limit == diskLimitBytes) return
         loader?.shutdown()
-        val client = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
+        val client = TuneHttp.client(connectTimeoutMs = 10_000L, readTimeoutMs = 15_000L)
+            .newBuilder()
             .addInterceptor(RetryOnceInterceptor())
             .build()
         val newLoader = ImageLoader.Builder(app)
@@ -93,21 +90,27 @@ private class RetryOnceInterceptor : Interceptor {
         val request = chain.request()
         return try {
             val response = chain.proceed(request)
-            if (response.code >= 500) {
+            if (response.code >= 500 && !chain.call().isCanceled()) {
                 response.close()
                 chain.proceed(request)
             } else {
                 response
             }
         } catch (error: IOException) {
+            if (chain.call().isCanceled()) throw error
             chain.proceed(request)
         }
     }
 }
 
+private val ParamSizeRegex = Regex("param=\\d+y\\d+")
+
 /** 网易云 CDN 支持按尺寸取图；非 http 源（本地文件）原样返回。 */
 fun tuneSizedUrl(url: String, sizePx: Int): String {
     if (!url.startsWith("http", ignoreCase = true)) return url
+    if (ParamSizeRegex.containsMatchIn(url)) {
+        return ParamSizeRegex.replace(url, "param=${sizePx}y$sizePx")
+    }
     if (url.contains("param=")) return url
     val separator = if (url.contains('?')) '&' else '?'
     return "$url${separator}param=${sizePx}y$sizePx"

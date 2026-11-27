@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="netease.xml" />
+    <exclude domain="sharedpref" path="netease_cookie.xml" />
+    <exclude domain="sharedpref" path="remote_music_library.xml" />
+    <exclude domain="sharedpref" path="netease_wire.xml" />
+</full-backup-content>

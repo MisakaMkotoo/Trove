@@ -119,7 +119,7 @@ class AppNavigationTest {
 
         composeTestRule.onNodeWithContentDescription(string(R.string.library_search)).performClick()
 
-        composeTestRule.onNodeWithContentDescription(string(R.string.library_search_placeholder)).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription(string(R.string.search_netease_placeholder)).assertIsDisplayed()
         assertEquals(AppIntent.OpenPage(AppStackPage.LibrarySearch), harness.intents.last())
     }
 
@@ -564,7 +564,7 @@ class AppNavigationTest {
         composeTestRule.onNodeWithText(playingItem.artist).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(string(R.string.player_seek)).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(string(R.string.player_volume)).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription(string(R.string.player_heart)).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription(string(R.string.player_library)).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(string(R.string.player_lyrics)).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(string(R.string.player_cast)).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(string(R.string.player_queue)).assertIsDisplayed()

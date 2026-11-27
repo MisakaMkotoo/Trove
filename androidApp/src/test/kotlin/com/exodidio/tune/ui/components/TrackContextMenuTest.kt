@@ -57,4 +57,11 @@ class TrackContextMenuTest {
         assertEquals(false, playlistIsEditable(LibraryPlaylist(id = "smart", name = "Smart", metadataJson = """{"playlist":{"is_smart":true}}""")))
         assertEquals(true, playlistIsEditable(LibraryPlaylist(id = "normal", name = "Normal", metadataJson = """{"playlist":{"is_smart":false}}""")))
     }
+
+    @Test
+    fun defaultLongPressMenuExcludesLyricsActions() {
+        val actions = TrackContextMenuActions()
+        assertEquals(false, actions.findLyrics)
+        assertEquals(false, actions.lyricsControl)
+    }
 }

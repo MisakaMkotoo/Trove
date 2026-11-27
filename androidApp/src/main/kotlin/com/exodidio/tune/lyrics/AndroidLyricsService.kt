@@ -6,16 +6,27 @@ import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
+import com.exodidio.tune.net.TuneHttp
+import com.exodidio.tune.net.executeCancellable
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Request
+import com.exodidio.tune.lyrics.autosync.AutoSyncCoordinator
+import com.exodidio.tune.lyrics.autosync.AutoSyncModelStore
+import com.exodidio.tune.lyrics.autosync.AutoSyncTrace
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -62,6 +73,8 @@ internal data class LyricsSearchResult(
 )
 
 internal abstract class LyricsProvider {
+    /** AMLL 逐字源标记：供网易云歌词的“无逐字升级”流程识别。 */
+    open val isAmll: Boolean get() = false
     abstract fun enabled(settings: LyricsSettings): Boolean
     abstract suspend fun fetch(track: LyricsTrack): FetchedLyric?
     abstract suspend fun search(title: String, artist: String, duration: Int): List<LyricsSearchResult>
@@ -71,6 +84,7 @@ internal class AndroidLyricsService(
     private val library: AndroidLibrarySyncStore,
     private val providers: List<LyricsProvider> = listOf(
         NeteaseLyricsProvider(),
+        AmlldbLyricsProvider(),
         LrclibLyricsProvider(),
         KugouLyricsProvider(),
     ),
@@ -78,7 +92,228 @@ internal class AndroidLyricsService(
     private val localFileReader: ((String) -> String?)? = null,
     private val localPathOverride: ((LyricsTrack) -> String?)? = null,
 ) {
+    private val alignScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var alignJob: Job? = null
+
+    @Volatile
+    private var alignJobTrackId: String? = null
+
+    @Volatile
+    private var alignJobSourceContent: String? = null
+
+    @Volatile
+    private var autoAlignEnabled: Boolean = true
+
+    fun cancelAutoAlign(trackId: String? = null) {
+        if (trackId == null) {
+            alignJob?.cancel()
+            alignJob = null
+            alignJobTrackId = null
+            alignJobSourceContent = null
+        } else if (alignJobTrackId == trackId) {
+            alignJob?.cancel()
+            alignJob = null
+            alignJobTrackId = null
+            alignJobSourceContent = null
+        }
+    }
+
+    fun invalidateSearchCache() {
+        providers.filterIsInstance<NeteaseLyricsProvider>().forEach { it.clearCache() }
+    }
+
+    /**
+     * 缺逐字且开关打开时，后台用本地 ONNX 模型做音频强制对齐。
+     * 参照 MeloX：切歌/换歌词立即取消上一单，不为已切走的歌继续推理。
+     */
+    private fun maybeAutoAlign(
+        trackId: String,
+        content: String,
+        audioPath: String?,
+        settings: LyricsSettings,
+    ) {
+        autoAlignEnabled = settings.autoAlignWordTiming
+        if (!settings.autoAlignWordTiming) return
+        val context = appContext ?: return
+        if (AutoSyncCoordinator.hasWordTiming(content)) {
+            if (alignJob?.isActive == true && alignJobTrackId == trackId) {
+                cancelAutoAlign(trackId)
+            }
+            return
+        }
+        if (alignJob?.isActive == true) {
+            // 同一首歌且同一份行级歌词的重复触发只保留一单；若歌词内容已变则取消旧单。
+            if (alignJobTrackId == trackId && alignJobSourceContent == content) return
+            alignJob?.cancel()
+        }
+        alignJobTrackId = trackId
+        alignJobSourceContent = content
+        val stored = audioPath?.trim()?.takeIf { it.isNotBlank() }
+        alignJob = alignScope.launch {
+            var source: String? = null
+            try {
+                if (AutoSyncCoordinator.hasWordTiming(content)) return@launch
+                if (AutoSyncModelStore.installedLanguages(context).isEmpty()) {
+                    AutoSyncTrace.log(context, "auto-align skipped: no models installed track=$trackId")
+                    return@launch
+                }
+                source = runCatching { resolveAlignmentSource(context, trackId, stored) }
+                    .onFailure { error ->
+                        if (error is CancellationException) throw error
+                        AutoSyncTrace.log(context, "auto-align audio resolve failed track=$trackId", error)
+                    }
+                    .getOrNull()
+                    ?: run {
+                        AutoSyncTrace.log(context, "auto-align skipped: audio unavailable track=$trackId stored=$stored")
+                        return@launch
+                    }
+                currentCoroutineContext().ensureActive()
+                AutoSyncTrace.log(context, "auto-align start track=$trackId source=$source")
+                val result = try {
+                    AutoSyncCoordinator.align(context, trackId, content, source)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    AutoSyncTrace.log(context, "auto-align failed track=$trackId", error)
+                    null
+                }
+                currentCoroutineContext().ensureActive()
+                if (result != null) {
+                    if (!autoAlignEnabled || alignJobTrackId != trackId || alignJobSourceContent != content) {
+                        AutoSyncTrace.log(context, "auto-align discarded stale result track=$trackId")
+                        return@launch
+                    }
+                    val latest = library.currentProviderLyrics(trackId)
+                    if (latest != null && (AutoSyncCoordinator.hasWordTiming(latest) || latest != content)) {
+                        AutoSyncTrace.log(context, "auto-align skipped overwrite newer lyrics track=$trackId")
+                        return@launch
+                    }
+                    library.saveProviderLyrics(trackId, result.content, "autosync")
+                    AutoSyncTrace.log(context, "auto-aligned lines=${result.timeline.lines.size} track=$trackId")
+                } else {
+                    AutoSyncTrace.log(context, "auto-align produced no timing track=$trackId")
+                }
+            } finally {
+                source?.let { cleanupAlignmentCache(context, it) }
+            }
+        }
+    }
+
+    fun effectiveSettingsFor(trackId: String, settings: LyricsSettings): LyricsSettings {
+        if (!settings.perSongLyricsConfigEnabled) return settings
+        return applyPerSongLyricsConfig(settings, PerSongLyricsConfigStore.configFor(trackId))
+    }
+
+    /** 已缓存的歌词不会再 fetch：切歌时补一次对齐检查。 */
+    suspend fun alignCachedLyrics(trackId: String, content: String, settings: LyricsSettings) {
+        val effective = effectiveSettingsFor(trackId, settings)
+        autoAlignEnabled = effective.autoAlignWordTiming
+        if (effective.autoAlignWordTiming.not()) return
+        if (AutoSyncCoordinator.hasWordTiming(content)) return
+        val track = library.trackForPlayback(trackId) ?: return
+        maybeAutoAlign(trackId, content, track.audioPath, effective)
+    }
+
+    /**
+     * 显式切换单曲或全局歌词源：
+     * - source == null：清掉当前缓存并按默认优先级重抓
+     * - source != null：优先从指定源抓取并立即更新展示（不走回退覆盖）
+     */
+    suspend fun fetchFromSource(
+        trackId: String,
+        source: LyricsSourceId?,
+        settings: LyricsSettings,
+    ): Boolean {
+        cancelAutoAlign(trackId)
+        val effective = effectiveSettingsFor(trackId, settings)
+        if (source == null) {
+            library.clearProviderLyrics(trackId)
+            fetch(trackId, effective)
+            return !library.currentProviderLyrics(trackId).isNullOrBlank()
+        }
+        val track = library.trackForPlayback(trackId) ?: return false
+        val isNeteaseTrack = trackId.startsWith("netease:")
+        if (!sourceApplicable(source, isNeteaseTrack)) return false
+        val provider = providers.firstOrNull { sourceIdOf(it) == source } ?: return false
+        val durationSeconds = (track.metadataObject()?.get("duration") as? JsonPrimitive)
+            ?.contentOrNull?.toDoubleOrNull()?.toInt() ?: 0
+        val lyricsTrack = LyricsTrack(
+            title = track.title,
+            artist = track.artists,
+            album = track.album,
+            duration = durationSeconds,
+            audioPath = track.audioPath,
+            trackId = trackId,
+        )
+        val timeout = when (source) {
+            LyricsSourceId.Netease -> NeteasePriorityTimeoutMs
+            LyricsSourceId.Amll -> AmllUpgradeTimeoutMs
+            else -> ProviderTimeoutMs
+        }
+        val attempts = if (source == LyricsSourceId.Netease) NeteaseLyricAttempts else 1
+        var hit: FetchedLyric? = null
+        for (attempt in 1..attempts) {
+            hit = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(timeout) { provider.fetch(lyricsTrack) }
+            }.getOrNull()
+            if (hit != null) break
+            if (attempt < attempts) kotlinx.coroutines.delay(NeteaseLyricRetryDelayMs * attempt)
+        }
+        if (hit == null) return false
+        currentCoroutineContext().ensureActive()
+        library.saveProviderLyrics(trackId, hit.content, hit.source)
+        maybeAutoAlign(trackId, hit.content, lyricsTrack.audioPath, effective)
+        return true
+    }
+
+    /** 对齐需要 FFmpeg 能直接打开的源：本地文件、http(s) 直链或临时拷出的 content://。 */
+    private suspend fun resolveAlignmentSource(
+        context: Context,
+        trackId: String,
+        storedPath: String?,
+    ): String? {
+        val target = com.exodidio.tune.library.resolveAudioTarget(context.filesDir, storedPath)
+            ?: return null
+        return when (target) {
+            is com.exodidio.tune.library.AudioTarget.FileTarget ->
+                target.file.takeIf { it.isFile }?.absolutePath
+            is com.exodidio.tune.library.AudioTarget.ContentTarget ->
+                copyContentToCache(context, trackId, target.uri)
+            is com.exodidio.tune.library.AudioTarget.RemoteTarget -> target.url
+            is com.exodidio.tune.library.AudioTarget.StreamTarget -> {
+                val songId = target.url.removePrefix("netease://").toLongOrNull() ?: return null
+                val url = com.exodidio.tune.netease.NeteaseRepository.streamUrl(context, songId)
+                    ?: return null
+                // 试听只有 30 秒，拿它对齐整首歌词只会产出错误时间轴。
+                if (com.exodidio.tune.netease.NeteaseRepository.isPreviewStream(songId)) return null
+                url
+            }
+        }
+    }
+
+    private suspend fun copyContentToCache(context: Context, trackId: String, uri: String): String? =
+        withContext(Dispatchers.IO) {
+            val dir = File(context.cacheDir, "autosync-audio").apply { mkdirs() }
+            val name = trackId.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".bin"
+            val file = File(dir, name)
+            runCatching {
+                context.contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { input ->
+                    file.outputStream().buffered().use { output -> input.copyTo(output) }
+                } ?: return@runCatching null
+                file.absolutePath
+            }.onFailure {
+                AutoSyncTrace.log(context, "copy audio failed track=$trackId uri=$uri", it)
+                file.delete()
+            }.getOrNull()
+        }
+
+    private fun cleanupAlignmentCache(context: Context, source: String) {
+        val cacheDir = File(context.cacheDir, "autosync-audio")
+        if (source.startsWith(cacheDir.absolutePath)) File(source).delete()
+    }
+
     suspend fun fetch(trackId: String, settings: LyricsSettings) {
+        val effectiveSettings = effectiveSettingsFor(trackId, settings)
         val track = library.trackForPlayback(trackId) ?: run {
             Log.w("TuneLyrics", "Cannot fetch lyrics: track $trackId is unavailable")
             return
@@ -93,94 +328,105 @@ internal class AndroidLyricsService(
             audioPath = track.audioPath,
             trackId = trackId,
         )
-        readLocalLrc(trackId, lyricsTrack)?.let { local ->
-            library.saveProviderLyrics(trackId, local, "local-lrc")
-            Log.d("TuneLyrics", "Using local .lrc lyrics for ${lyricsTrack.title}")
-            return
-        }
-        val active = providers.filter { it.enabled(settings) }
-        if (active.isEmpty()) return
-        // 网易云优先：任何歌曲都先试网易云（ID 直取或搜索匹配），失败再并发回退其他来源。
-        val netease = active.filterIsInstance<NeteaseLyricsProvider>().firstOrNull()
-            ?: active.firstOrNull { it::class.simpleName == "NeteaseLyricsProvider" }
-        // 网易云曲目只允许使用网易云歌词：禁止回退到其它来源；抓取失败会重试，不一次放弃。
-        if (trackId.startsWith("netease:")) {
-            if (netease == null) {
-                System.err.println("LYR none(netease-only-disabled) track=$trackId")
+        val hasPerSongPreferred = effectiveSettings.perSongLyricsConfigEnabled &&
+            PerSongLyricsConfigStore.configFor(trackId)?.preferredSourceId != null
+        if (!hasPerSongPreferred) {
+            readLocalLrc(trackId, lyricsTrack)?.let { local ->
+                library.saveProviderLyrics(trackId, local, "local-lrc")
+                maybeAutoAlign(trackId, local, lyricsTrack.audioPath, effectiveSettings)
+                Log.d("TuneLyrics", "Using local .lrc lyrics for ${lyricsTrack.title}")
                 return
             }
-            var result: FetchedLyric? = null
-            for (attempt in 1..NeteaseLyricAttempts) {
+        }
+        val active = providers.filter { it.enabled(effectiveSettings) }
+        if (active.isEmpty()) return
+        val isNeteaseTrack = trackId.startsWith("netease:")
+        val providersById = active.mapNotNull { provider -> sourceIdOf(provider)?.let { it to provider } }.toMap()
+        val ordered = effectiveSettings.sourceOrder
+            .filter { it in effectiveSettings.enabledSources }
+            .filter { sourceApplicable(it, isNeteaseTrack) }
+        if (ordered.isEmpty()) {
+            Log.d("TuneLyrics", "LYR none(no-source) track=$trackId")
+            return
+        }
+
+        // 按用户排序依次抓取；网易云保留 3 次重试。
+        var lyric: FetchedLyric? = null
+        var lyricSource: LyricsSourceId? = null
+        for (sourceId in ordered) {
+            val provider = providersById[sourceId] ?: continue
+            val timeout = when (sourceId) {
+                LyricsSourceId.Netease -> NeteasePriorityTimeoutMs
+                LyricsSourceId.Amll -> AmllUpgradeTimeoutMs
+                else -> ProviderTimeoutMs
+            }
+            val attempts = if (sourceId == LyricsSourceId.Netease) NeteaseLyricAttempts else 1
+            var hit: FetchedLyric? = null
+            for (attempt in 1..attempts) {
                 val started = android.os.SystemClock.elapsedRealtime()
-                result = runCatching {
-                    kotlinx.coroutines.withTimeoutOrNull(NeteasePriorityTimeoutMs) { netease.fetch(lyricsTrack) }
+                hit = runCatching {
+                    kotlinx.coroutines.withTimeoutOrNull(timeout) { provider.fetch(lyricsTrack) }
                 }.getOrNull()
                 Log.d(
                     "TuneLyrics",
-                    "Provider Netease(only) attempt=$attempt took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${result != null}",
+                    "Provider ${sourceId.storageValue} attempt=$attempt " +
+                        "took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${hit != null}",
                 )
-                if (result != null) break
-                if (attempt < NeteaseLyricAttempts) kotlinx.coroutines.delay(NeteaseLyricRetryDelayMs * attempt)
+                if (hit != null) break
+                if (attempt < attempts) kotlinx.coroutines.delay(NeteaseLyricRetryDelayMs * attempt)
             }
-            result?.let {
-                library.saveProviderLyrics(trackId, it.content, it.source)
-                System.err.println(
-                    "LYR source=${it.source} track=$trackId chars=${it.content.length} lines=${countTimedLyricLines(it.content)} " +
-                        "first=${firstLyricTimestamp(it.content)} last=${lastLyricTimestamp(it.content)} duration=${lyricsTrack.duration}",
-                )
-            } ?: System.err.println(
-                "LYR none(netease-only) track=$trackId title=${lyricsTrack.title} duration=${lyricsTrack.duration}",
-            )
-            return
+            if (hit != null) {
+                lyric = hit
+                lyricSource = sourceId
+                break
+            }
         }
-        var lyric: FetchedLyric? = null
-        if (netease != null) {
-            val started = android.os.SystemClock.elapsedRealtime()
-            lyric = runCatching {
-                kotlinx.coroutines.withTimeoutOrNull(NeteasePriorityTimeoutMs) { netease.fetch(lyricsTrack) }
-            }.getOrNull()
+
+        // 只有行级歌词（或完全没有）时，按设置去替补源优先找逐字（单曲指定了偏好源时不强行覆盖）。
+        val fallbackId = if (hasPerSongPreferred) null else effectiveSettings.wordFallbackSource
+        val needsWordUpgrade = lyric == null || !hasWordTimingLyrics(lyric.content)
+        if (needsWordUpgrade && fallbackId != null && fallbackId != lyricSource &&
+            fallbackId in effectiveSettings.enabledSources && sourceApplicable(fallbackId, isNeteaseTrack)
+        ) {
+            providersById[fallbackId]?.let { provider ->
+                val started = android.os.SystemClock.elapsedRealtime()
+                val upgraded = runCatching {
+                    kotlinx.coroutines.withTimeoutOrNull(AmllUpgradeTimeoutMs) { provider.fetch(lyricsTrack) }
+                }.getOrNull()
+                Log.d(
+                    "TuneLyrics",
+                    "Provider word-fallback ${fallbackId.storageValue} " +
+                        "took ${android.os.SystemClock.elapsedRealtime() - started}ms " +
+                        "hit=${upgraded != null} word=${hasWordTimingLyrics(upgraded?.content)}",
+                )
+                if (upgraded != null && (lyric == null || hasWordTimingLyrics(upgraded.content))) {
+                    lyric = upgraded
+                }
+            }
+        }
+
+        lyric?.let {
+            currentCoroutineContext().ensureActive()
+            library.saveProviderLyrics(trackId, it.content, it.source)
+            maybeAutoAlign(trackId, it.content, lyricsTrack.audioPath, effectiveSettings)
             Log.d(
                 "TuneLyrics",
-                "Provider Netease(priority) took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${lyric != null}",
-            )
-        }
-        val fallbackProviders = active.filterNot { it === netease }
-        if (lyric == null && fallbackProviders.isNotEmpty()) {
-            Log.d("TuneLyrics", "Fetching lyrics for ${lyricsTrack.title} from ${fallbackProviders.size} fallback provider(s)")
-            lyric = coroutineScope {
-                val results = Channel<Result<FetchedLyric?>>(fallbackProviders.size)
-                val jobs = fallbackProviders.map { provider ->
-                    async {
-                        val started = android.os.SystemClock.elapsedRealtime()
-                        val outcome = runCatching {
-                            kotlinx.coroutines.withTimeoutOrNull(ProviderTimeoutMs) { provider.fetch(lyricsTrack) }
-                        }
-                        Log.d(
-                            "TuneLyrics",
-                            "Provider ${provider::class.simpleName} took ${android.os.SystemClock.elapsedRealtime() - started}ms hit=${outcome.getOrNull() != null}",
-                        )
-                        results.send(outcome)
-                    }
-                }
-                repeat(fallbackProviders.size) {
-                    val result = results.receive()
-                    result.exceptionOrNull()?.let { Log.w("TuneLyrics", "Lyrics provider failed", it) }
-                    result.getOrNull()?.let { hit ->
-                        jobs.forEach { job -> job.cancel() }
-                        return@coroutineScope hit
-                    }
-                }
-                null
-            }
-        }
-        lyric?.let {
-            library.saveProviderLyrics(trackId, it.content, it.source)
-            System.err.println(
                 "LYR source=${it.source} track=$trackId chars=${it.content.length} lines=${countTimedLyricLines(it.content)} " +
                     "first=${firstLyricTimestamp(it.content)} last=${lastLyricTimestamp(it.content)} duration=${lyricsTrack.duration}",
             )
-        } ?: System.err.println("LYR none track=$trackId title=${lyricsTrack.title} duration=${lyricsTrack.duration}")
+        } ?: Log.d("TuneLyrics", "LYR none track=$trackId title=${lyricsTrack.title} duration=${lyricsTrack.duration}")
     }
+
+    private fun sourceIdOf(provider: LyricsProvider): LyricsSourceId? = when {
+        provider.isAmll -> LyricsSourceId.Amll
+        provider is NeteaseLyricsProvider -> LyricsSourceId.Netease
+        provider is LrclibLyricsProvider -> LyricsSourceId.Lrclib
+        provider is KugouLyricsProvider -> LyricsSourceId.Kugou
+        else -> null
+    }
+
+    private fun sourceApplicable(sourceId: LyricsSourceId, isNeteaseTrack: Boolean): Boolean =
+        if (sourceId == LyricsSourceId.Amll) isNeteaseTrack else true
 
     private fun readLocalLrc(trackId: String, track: LyricsTrack): String? {
         val reader: (String) -> String? = localFileReader ?: { path ->
@@ -228,7 +474,7 @@ internal class AndroidLyricsService(
 }
 
 internal class LrclibLyricsProvider : LyricsProvider() {
-    override fun enabled(settings: LyricsSettings) = settings.lrclib
+    override fun enabled(settings: LyricsSettings) = LyricsSourceId.Lrclib in settings.enabledSources
     override suspend fun fetch(track: LyricsTrack): FetchedLyric? {
         val title = normalizeLyricsText(removeFeaturedLyricsTitle(track.title));
         val artist = normalizeLyricsText(track.artist)
@@ -299,7 +545,7 @@ internal class LrclibLyricsProvider : LyricsProvider() {
 }
 
 internal class KugouLyricsProvider : LyricsProvider() {
-    override fun enabled(settings: LyricsSettings) = settings.kugou
+    override fun enabled(settings: LyricsSettings) = LyricsSourceId.Kugou in settings.enabledSources
     override suspend fun fetch(track: LyricsTrack): FetchedLyric? {
         var title = normalizeLyricsText(removeFeaturedLyricsTitle(track.title));
         var artist = normalizeLyricsText(track.artist)
@@ -382,30 +628,23 @@ internal class KugouLyricsProvider : LyricsProvider() {
 
 }
 
-private suspend fun request(base: String, params: Map<String, String>): String? =
-    withContext(Dispatchers.IO) {
-        val query = params.entries.joinToString("&") {
-            "${
-                URLEncoder.encode(
-                    it.key,
-                    "UTF-8"
-                )
-            }=${URLEncoder.encode(it.value, "UTF-8")}"
+private suspend fun request(base: String, params: Map<String, String>): String? {
+    val url = base.toHttpUrl().newBuilder().apply {
+        params.forEach { (key, value) -> addQueryParameter(key, value) }
+    }.build()
+    val request = Request.Builder()
+        .url(url)
+        .header("User-Agent", "Tune-Android/${BuildConfig.VERSION_NAME}")
+        .get()
+        .build()
+    return TuneHttp.client(connectTimeoutMs = 4_000L, readTimeoutMs = 6_000L)
+        .executeCancellable(request) { response ->
+            if (!response.isSuccessful) null else response.body?.string()
         }
-        (URL("$base?$query").openConnection() as HttpURLConnection).run {
-            try {
-                connectTimeout = 4_000; readTimeout = 6_000; setRequestProperty(
-                    "User-Agent",
-                    "Tune-Android/${BuildConfig.VERSION_NAME}"
-                ); if (responseCode !in 200..299) null else inputStream.bufferedReader()
-                    .use { it.readText() }
-            } finally {
-                disconnect()
-            }
-        }
-    }
+}
 
 private const val ProviderTimeoutMs = 8_000L
+private const val AmllUpgradeTimeoutMs = 12_000L
 private const val NeteasePriorityTimeoutMs = 10_000L
 private const val NeteaseLyricAttempts = 3
 private const val NeteaseLyricRetryDelayMs = 600L

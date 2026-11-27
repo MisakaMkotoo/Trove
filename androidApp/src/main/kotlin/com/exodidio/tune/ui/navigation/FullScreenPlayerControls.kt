@@ -12,7 +12,9 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -50,10 +53,20 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import kotlin.math.roundToInt
+import com.exodidio.tune.settings.IconStyle
+import com.exodidio.tune.ui.components.LocalIconStyle
+import com.exodidio.tune.ui.components.TuneSfSubsetOnlyCodePoints
+import com.exodidio.tune.ui.components.TuneSfTypefaceCache
+import com.exodidio.tune.ui.components.appleSfCodePointFor
+import com.exodidio.tune.ui.components.prepareAppleSfGlyph
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -67,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import com.exodidio.tune.R
+import com.exodidio.tune.player.AbLoopState
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.player.RepeatMode
 import com.exodidio.tune.sync.LibraryTrack
@@ -95,7 +109,8 @@ internal const val FullScreenQueueStatusBadgeTestTag = "full_screen_queue_status
 internal const val FullScreenPlayerQualityBadgeTestTag = "full_screen_player_quality_badge"
 internal const val FullScreenPlayerElapsedTimeTestTag = "full_screen_player_elapsed_time"
 internal const val FullScreenPlayerDurationTestTag = "full_screen_player_duration"
-private const val SeekConfirmationToleranceMs = 250L
+private const val SeekConfirmationToleranceMs = 450L
+private const val SeekConfirmationTimeoutMs = 900L
 
 internal enum class FullScreenPlayerPanel { Lyrics, Queue }
 
@@ -121,6 +136,7 @@ internal fun FullScreenPlayerControls(
     displayedDurationMs: Long?,
     isPreparing: Boolean,
     isPlaying: Boolean,
+    isBuffering: Boolean = false,
     canNavigatePrevious: Boolean,
     canNavigateNext: Boolean,
     volume: Float,
@@ -139,6 +155,11 @@ internal fun FullScreenPlayerControls(
     onOpenMediaOutputSwitcher: () -> Unit,
     showVolumeSlider: Boolean = true,
     showLyricsButton: Boolean = true,
+    abLoopState: AbLoopState = AbLoopState(),
+    onFineTuneAbLoop: (isPointA: Boolean, deltaMs: Long) -> Unit = { _, _ -> },
+    onClearAbLoop: () -> Unit = {},
+    knobDetentAndInertia: Boolean = false,
+    onScrubVelocityChange: ((Boolean, Float) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalTuneColors.current
@@ -155,6 +176,14 @@ internal fun FullScreenPlayerControls(
     LaunchedEffect(currentPositionMs, durationMs, awaitingSeekConfirmation) {
         val fraction = pendingSeekFraction
         if (awaitingSeekConfirmation && fraction != null && hasConfirmedSeekPosition(fraction, currentPositionMs, durationMs)) {
+            pendingSeekFraction = null
+            awaitingSeekConfirmation = false
+            onSeekConfirmed()
+        }
+    }
+    LaunchedEffect(awaitingSeekConfirmation, pendingSeekFraction) {
+        if (awaitingSeekConfirmation && pendingSeekFraction != null) {
+            delay(SeekConfirmationTimeoutMs)
             pendingSeekFraction = null
             awaitingSeekConfirmation = false
             onSeekConfirmed()
@@ -210,9 +239,26 @@ internal fun FullScreenPlayerControls(
             verticalArrangement = Arrangement.spacedBy(31.dp, Alignment.Bottom),
         ) {
             Column {
+                val abForThisTrack = abLoopState.trackId == trackId && (abLoopState.hasPointA || abLoopState.hasPointB)
+                val abHighlightRange = remember(abLoopState, trackId, durationMs) {
+                    if (abLoopState.trackId == trackId && durationMs > 0L) {
+                        val a = abLoopState.pointA?.let { (it.toFloat() / durationMs).coerceIn(0f, 1f) }
+                        val b = abLoopState.pointB?.let { (it.toFloat() / durationMs).coerceIn(0f, 1f) }
+                        when {
+                            a != null && b != null && b > a -> a..b
+                            a != null -> a..a
+                            else -> null
+                        }
+                    } else {
+                        null
+                    }
+                }
                 TuneTrackSlider(
                     value = pendingSeekFraction ?: if (durationMs > 0) currentPositionMs.toFloat() / durationMs else 0f,
-                    onValueChange = { pendingSeekFraction = it },
+                    onValueChange = {
+                        awaitingSeekConfirmation = false
+                        pendingSeekFraction = it
+                    },
                     onValueChangeFinished = {
                         pendingSeekFraction?.let { onSeekRequested((durationMs * it).toLong()) }
                         awaitingSeekConfirmation = pendingSeekFraction != null
@@ -220,6 +266,16 @@ internal fun FullScreenPlayerControls(
                     enabled = durationMs > 0 && !isPreparing,
                     onInteractionChange = { seekInteracting = it },
                     trackHeight = 7.dp,
+                    highlightRange = abHighlightRange,
+                    highlightColor = colors.primary,
+                    scrubTooltipText = if (durationMs > 0L) {
+                        { fraction -> formatPlaybackTime((durationMs * fraction).toLong()) }
+                    } else {
+                        null
+                    },
+                    knobDetentAndInertia = knobDetentAndInertia,
+                    onScrubVelocityChange = onScrubVelocityChange,
+                    isBuffering = isBuffering,
                     modifier = Modifier.semantics { contentDescription = seekLabel },
                 )
                 Box(Modifier.fillMaxWidth()) {
@@ -250,6 +306,41 @@ internal fun FullScreenPlayerControls(
                         modifier = Modifier.align(Alignment.CenterEnd).offset(x = seekOffset, y = (-12).dp + seekOffset)
                             .semantics { testTag = FullScreenPlayerDurationTestTag },
                     )
+                }
+                AnimatedVisibility(visible = abForThisTrack) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val statusText = when {
+                            abLoopState.isActive ->
+                                "A ${formatPlaybackTime(abLoopState.pointA!!)} → B ${formatPlaybackTime(abLoopState.pointB!!)}"
+                            abLoopState.pointA != null ->
+                                "A ${formatPlaybackTime(abLoopState.pointA)} → --:--"
+                            else -> ""
+                        }
+                        if (statusText.isNotEmpty()) {
+                            Text(
+                                text = statusText,
+                                color = colors.onPrimary,
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                            )
+                        }
+                        if (abLoopState.hasPointA) {
+                            AbInlineFineChip(stringResource(R.string.player_ab_fine_a_minus)) { onFineTuneAbLoop(true, -500L) }
+                            AbInlineFineChip(stringResource(R.string.player_ab_fine_a_plus)) { onFineTuneAbLoop(true, 500L) }
+                        }
+                        if (abLoopState.hasPointB) {
+                            AbInlineFineChip(stringResource(R.string.player_ab_fine_b_minus)) { onFineTuneAbLoop(false, -500L) }
+                            AbInlineFineChip(stringResource(R.string.player_ab_fine_b_plus)) { onFineTuneAbLoop(false, 500L) }
+                        }
+                        AbInlineFineChip(stringResource(R.string.player_ab_clear), onClick = onClearAbLoop)
+                    }
                 }
                 if (qualityDialogVisible && qualityBadge != null) FullScreenQualityDialog(qualityBadge.first, qualityBadge.second, qualityDetails) { qualityDialogVisible = false }
             }
@@ -369,6 +460,20 @@ internal fun FullScreenToggleIcon(
             ),
         )
     }
+    val iconStyle = LocalIconStyle.current
+    val context = LocalContext.current
+    val sfCodePoint = appleSfCodePointFor(symbol)
+    val sfTypeface = if (iconStyle == IconStyle.Apple && sfCodePoint != null) {
+        remember(context, sfCodePoint) {
+            TuneSfTypefaceCache.obtain(
+                context = context,
+                weight = 500,
+                subsetOnly = sfCodePoint in TuneSfSubsetOnlyCodePoints,
+            )
+        }
+    } else {
+        null
+    }
     Box(
         modifier = modifier
             .size(60.dp)
@@ -394,16 +499,37 @@ internal fun FullScreenToggleIcon(
                 .drawWithContent {
                     drawContent()
                     if (selectionProgress > 0.01f) {
-                        drawText(
-                            textLayoutResult = glyph,
-                            color = Color.Black,
-                            topLeft = Offset(
-                                (size.width - glyph.size.width) / 2f,
-                                (size.height - glyph.size.height) / 2f,
-                            ),
-                            alpha = selectionProgress,
-                            blendMode = BlendMode.DstOut,
-                        )
+                        if (sfTypeface != null && sfCodePoint != null) {
+                            drawIntoCanvas { canvas ->
+                                val paint = android.graphics.Paint(
+                                    android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.SUBPIXEL_TEXT_FLAG,
+                                ).apply {
+                                    this.typeface = sfTypeface
+                                    this.color = android.graphics.Color.BLACK
+                                    this.alpha = (selectionProgress * 255f).roundToInt().coerceIn(0, 255)
+                                    this.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_OUT)
+                                }
+                                val positioned = prepareAppleSfGlyph(
+                                    paint = paint,
+                                    codePoint = sfCodePoint,
+                                    iconSizePx = iconSize.toPx(),
+                                    canvasWidth = size.width,
+                                    canvasHeight = size.height,
+                                )
+                                canvas.nativeCanvas.drawText(positioned.glyph, positioned.x, positioned.baseline, paint)
+                            }
+                        } else {
+                            drawText(
+                                textLayoutResult = glyph,
+                                color = Color.Black,
+                                topLeft = Offset(
+                                    (size.width - glyph.size.width) / 2f,
+                                    (size.height - glyph.size.height) / 2f,
+                                ),
+                                alpha = selectionProgress,
+                                blendMode = BlendMode.DstOut,
+                            )
+                        }
                     }
                 },
         )
@@ -458,6 +584,32 @@ internal fun FullScreenTransportButton(
             skipForward != null -> AnimatedSkipSymbol(skipForward, isPressed, iconTint, iconSize, 64.dp)
             else -> MaterialSymbol(requireNotNull(symbol), null, tint = iconTint, size = iconSize, filled = filled)
         }
+    }
+}
+
+@Composable
+private fun AbInlineFineChip(
+    label: String,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTuneColors.current
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        modifier = Modifier
+            .height(24.dp)
+            .clip(shape)
+            .background(fullScreenSecondaryControlBackground(colors))
+            .border(0.5.dp, colors.borderGlass, shape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = colors.onPrimary,
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+            maxLines = 1,
+        )
     }
 }
 

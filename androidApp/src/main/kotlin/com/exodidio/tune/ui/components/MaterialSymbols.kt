@@ -4,8 +4,10 @@ package com.exodidio.tune.ui.components
 
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import com.exodidio.tune.settings.IconStyle
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.ExperimentalTextApi
@@ -66,6 +68,7 @@ object MaterialSymbols {
     const val Check = "check"
     const val Close = "close"
     const val MusicNote = "music_note"
+    const val Folder = "folder"
     const val Bolt = "bolt"
     const val Crown = "crown"
     const val Menu = "menu"
@@ -120,6 +123,8 @@ object MaterialSymbols {
     const val FileExport = "content_copy"
 }
 
+val LocalIconStyle = staticCompositionLocalOf { IconStyle.Material }
+
 @Composable
 fun MaterialSymbol(
     symbol: String,
@@ -129,6 +134,17 @@ fun MaterialSymbol(
     tint: Color = LocalTuneColors.current.textMain,
     filled: Boolean = false,
 ) {
+    if (LocalIconStyle.current == IconStyle.Apple) {
+        AppleSymbol(
+            symbol = symbol,
+            contentDescription = contentDescription,
+            modifier = modifier,
+            size = size,
+            tint = tint,
+            filled = filled,
+        )
+        return
+    }
     Text(
         text = symbol,
         fontFamily = if (filled) MaterialSymbolsFilledFontFamily else MaterialSymbolsOutlinedFontFamily,

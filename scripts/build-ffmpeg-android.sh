@@ -51,10 +51,14 @@ INCLUDE_OUT="${ANDROID_DIR}/build/ffmpeg/include"
 
 [[ -x "${TOOLCHAIN}/bin/clang" ]] || { echo "Android NDK ${NDK_VERSION} is required at ${NDK}" >&2; exit 1; }
 
-# FFmpeg is the sole decoder. Enable its complete decoder, demuxer and parser
-# registry so every music format supported by the pinned upstream source stays
-# supported without maintaining a fragile allow-list. Programs, encoders,
-# muxers, filters, devices and network protocols remain excluded.
+# FFmpeg is used strictly as an audio decoder (playback + 16kHz mono PCM
+# extraction for lyric alignment). Enable all built-in audio/PCM/DPCM/ADPCM
+# decoders, audio parsers, and audio/multimedia-container demuxers while
+# excluding video/image/subtitle decoders, parsers, and video-only demuxers.
+# Programs, encoders, muxers, filters, devices and hardware accels remain off.
+
+AUDIO_PARSERS="aac,aac_latm,ac3,adx,ahx,amr,cook,dca,dolby_e,dvaudio,flac,ftr,g723_1,g729,gsm,misc4,mlp,mpegaudio,opus,sbc,sipr,tak,vorbis,xma"
+AUDIO_DEMUXERS="aa,aac,aax,ac3,ac4,ace,acm,act,adf,adp,ads,adx,aea,afc,aiff,aix,alp,amr,amrnb,amrwb,apac,apc,ape,apm,aptx,aptx_hd,argo_asf,argo_cvg,ast,au,avr,binka,bit,bfstm,brstm,boa,bonk,caf,codec2,codec2raw,daud,dcstr,derf,dfpwm,dsf,dss,dts,dtshd,ea_cdata,eac3,epaf,ffmetadata,flac,fsb,fwse,g722,g723_1,g726,g726le,g728,g729,genh,gsm,hca,hcom,iamf,iff,ilbc,ircam,iss,kvag,laf,lc3,loas,lrc,mca,mlp,mmf,mp3,mpc,mpc8,msf,msp,mtaf,musx,nistsphere,nsp,ogg,oma,osq,pcm_alaw,pcm_mulaw,pcm_vidc,pcm_f64be,pcm_f64le,pcm_f32be,pcm_f32le,pcm_s32be,pcm_s32le,pcm_s24be,pcm_s24le,pcm_s16be,pcm_s16le,pcm_s8,pcm_u32be,pcm_u32le,pcm_u24be,pcm_u24le,pcm_u16be,pcm_u16le,pcm_u8,pp_bnk,pvf,qcp,qoa,redspark,rka,rsd,rso,s337m,sbc,sbg,scd,sdns,sds,sdx,shorten,sln,sox,spdif,svag,tak,truehd,tta,vag,vpk,vqf,w64,wady,wavarc,wav,wsaud,wsd,wve,wv,xa,xmd,xvag,xwma,asf,asf_o,avi,concat,flv,hls,live_flv,matroska,mov,mpegps,mpegts,mpegtsraw,mxf,nut,rm,rtp,rtsp,sdp,webm_dash_manifest"
 
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.0.15}"
@@ -88,7 +92,15 @@ build_arch() {
     rm -rf "${SRC}" "${INSTALL}"
     mkdir -p "${SRC}" "${INSTALL}"
     tar -xzf "${BUILD_DIR}/ffmpeg.tar.gz" -C "${SRC}" --strip-components=1
-    echo "==> Building FFmpeg ${FFMPEG_VERSION} for ${ABI}..."
+    local AUDIO_DECODERS
+    AUDIO_DECODERS="$(
+        awk '/\/\* audio codecs \*\//{flag=1;next}/\/\* subtitles \*\//{flag=0}flag' "${SRC}/libavcodec/allcodecs.c" \
+            | sed -n 's/.*ff_\([a-zA-Z0-9_]*\)_decoder;.*/\1/p' \
+            | grep -vx 'hdr' \
+            | tr '\n' ',' | sed 's/,$//'
+    )"
+    [[ -n "${AUDIO_DECODERS}" ]] || { echo "Failed to resolve FFmpeg audio decoders." >&2; exit 1; }
+    echo "==> Building audio-only FFmpeg ${FFMPEG_VERSION} for ${ABI}..."
     pushd "${SRC}" >/dev/null
     # --disable-x86asm: x86_64 assembly needs nasm, which stock GitHub runners
     # lack; x86_64 output is emulator-only so generic C code is fine.
@@ -104,8 +116,11 @@ build_arch() {
         --enable-avutil --enable-avcodec --enable-avformat --enable-swresample \
         --enable-network --enable-protocol=file,http,https,tcp,tls \
         --enable-openssl \
-        --enable-decoders --enable-demuxers --enable-parsers \
+        --enable-decoder="${AUDIO_DECODERS}" \
+        --enable-demuxer="${AUDIO_DEMUXERS}" \
+        --enable-parser="${AUDIO_PARSERS}" \
         --disable-avdevice --disable-avfilter --disable-swscale \
+        --disable-bsfs --disable-hwaccels \
         --disable-x86asm \
         --extra-cflags="-Oz -ffunction-sections -fdata-sections${EXTRA_ABI_CFLAGS} -I${OPENSSL_PREFIX}/include" \
         --extra-ldflags="-Wl,--gc-sections -Wl,-z,max-page-size=16384 -L${OPENSSL_PREFIX}/lib" \

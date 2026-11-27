@@ -29,4 +29,27 @@ class LibraryTextFilterSlotTest {
             ),
         )
     }
+
+    @Test
+    fun appleSfGlyphTextSizeScalesByIconSizeNotContainerSize() {
+        val iconSizePx = 75f // 25.dp at 3x
+        val baseTextSizePx = iconSizePx * 0.75f
+        // Wide glyph exceeds 0.78 * iconSizePx -> scaled proportionally to iconSizePx
+        val scaledWide = computeAppleSfGlyphTextSizePx(
+            baseTextSizePx = baseTextSizePx,
+            boundsWidth = 78f,
+            boundsHeight = 50f,
+            iconSizePx = iconSizePx,
+        )
+        assertEquals(baseTextSizePx * ((iconSizePx * 0.78f) / 78f), scaledWide, 0.001f)
+
+        // Small glyph fits inside 0.78 * iconSizePx -> keeps 0.75 * iconSizePx
+        val unscaledSmall = computeAppleSfGlyphTextSizePx(
+            baseTextSizePx = baseTextSizePx,
+            boundsWidth = 48f,
+            boundsHeight = 48f,
+            iconSizePx = iconSizePx,
+        )
+        assertEquals(baseTextSizePx, unscaledSmall, 0.001f)
+    }
 }

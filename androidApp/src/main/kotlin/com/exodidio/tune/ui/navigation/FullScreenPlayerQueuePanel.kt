@@ -41,6 +41,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
@@ -53,6 +54,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import com.exodidio.tune.R
@@ -88,6 +90,7 @@ internal fun FullScreenQueuePanel(
     onReorderDragStateChange: (Boolean) -> Unit = {},
     onShuffleChange: (Boolean) -> Unit,
     onRepeatModeChange: (RepeatMode) -> Unit,
+    onDeduplicateQueue: () -> Int = { 0 },
     onFavoriteChange: (String, Boolean) -> Unit = { _, _ -> },
     onTrackGoToAlbum: (String) -> Unit = {},
     onTrackGoToArtist: (String) -> Unit = {},
@@ -152,6 +155,26 @@ internal fun FullScreenQueuePanel(
                 )
             }
             Spacer(Modifier.weight(1f))
+            if (orderedIds.size > 1) {
+                val context = LocalContext.current
+                val dedupDoneTemplate = stringResource(R.string.queue_deduplicate_done, 987654)
+                val dedupNoneMsg = stringResource(R.string.queue_deduplicate_none)
+                PlayerModeButton(
+                    symbol = MaterialSymbols.FilterList,
+                    label = stringResource(R.string.queue_deduplicate),
+                    active = false,
+                    width = 44.dp,
+                ) {
+                    val removed = onDeduplicateQueue()
+                    val msg = if (removed > 0) {
+                        dedupDoneTemplate.replace("987654", removed.toString())
+                    } else {
+                        dedupNoneMsg
+                    }
+                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                }
+                Spacer(Modifier.width(8.dp))
+            }
             PlayerModeButton(
                 MaterialSymbols.Shuffle,
                 stringResource(if (queue.shuffle) R.string.player_shuffle_on else R.string.player_shuffle),
@@ -270,7 +293,13 @@ private fun ReorderableCollectionItemScope.queueDragHandleModifier(
 )
 
 @Composable
-internal fun PlayerModeButton(symbol: String, label: String, active: Boolean, onClick: () -> Unit) {
+internal fun PlayerModeButton(
+    symbol: String,
+    label: String,
+    active: Boolean,
+    width: Dp = 72.dp,
+    onClick: () -> Unit,
+) {
     val colors = LocalTuneColors.current
     val backgroundColor by animateColorAsState(
         targetValue = if (active) {
@@ -288,7 +317,7 @@ internal fun PlayerModeButton(symbol: String, label: String, active: Boolean, on
     )
     Box(
         Modifier
-            .width(72.dp)
+            .width(width)
             .height(48.dp)
             .semantics { contentDescription = label; selected = active }
             .clickable(
@@ -300,7 +329,7 @@ internal fun PlayerModeButton(symbol: String, label: String, active: Boolean, on
     ) {
         Box(
             Modifier
-                .width(72.dp)
+                .width(width)
                 .height(36.dp)
                 .clip(CircleShape)
                 .background(backgroundColor)
@@ -476,6 +505,8 @@ private const val QueuePanelRowContentTestTag = "full_screen_queue_row_content"
 internal fun queueTrackContextMenuActions(isCurrent: Boolean) = TrackContextMenuActions(
     removeFromQueue = !isCurrent,
     addToQueue = false,
+    neteaseLike = true,
+    allowNeteasePlaylists = true,
 )
 
 internal fun shouldOpenQueueTrackContextMenu(

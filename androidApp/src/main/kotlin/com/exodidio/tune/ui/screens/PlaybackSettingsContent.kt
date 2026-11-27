@@ -10,15 +10,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.chrisbanes.haze.HazeState
 import kotlin.math.roundToInt
 import com.exodidio.tune.R
 import com.exodidio.tune.ui.components.ActionList
@@ -27,9 +27,9 @@ import com.exodidio.tune.ui.components.ActionListDivider
 import com.exodidio.tune.ui.components.ActionListDividerStyle
 import com.exodidio.tune.ui.components.ActionListItem
 import com.exodidio.tune.ui.components.LabeledCard
-import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.Selection
 import com.exodidio.tune.ui.components.SelectionOption
+import com.exodidio.tune.ui.components.TuneSwitch
 import com.exodidio.tune.ui.components.TuneTrackSlider
 import com.exodidio.tune.ui.theme.LocalTuneColors
 import com.exodidio.tune.player.EqualizerFrequenciesHz
@@ -40,105 +40,88 @@ import com.exodidio.tune.player.normalizeEqGain
 internal fun PlaybackSettingsContent(
     showFullscreenQualityBadge: Boolean,
     onShowFullscreenQualityBadgeChanged: (Boolean) -> Unit,
-    hideShortAudio: Boolean = false,
-    onHideShortAudioChanged: (Boolean) -> Unit = {},
-    showGenres: Boolean = false,
-    onShowGenresChanged: (Boolean) -> Unit = {},
-    showComposers: Boolean = false,
-    onShowComposersChanged: (Boolean) -> Unit = {},
-    onDuplicatesSelected: () -> Unit = {},
-    onDataAnalysisSelected: () -> Unit = {},
     onSongTransitionSelected: () -> Unit,
-    onPlaybackLyricsSelected: () -> Unit = {},
     onVolumeNormalizationSelected: () -> Unit,
     onEqualizerSelected: () -> Unit,
-    onHiddenTracksSelected: () -> Unit = {},
     modifier: Modifier = Modifier,
+    audioQuality: com.exodidio.tune.player.AudioQualityMode =
+        com.exodidio.tune.player.AudioQualityMode.Auto,
+    onAudioQualityChanged: (com.exodidio.tune.player.AudioQualityMode) -> Unit = {},
+    onPlaybackLyricsSelected: () -> Unit = {},
+    onFunFeaturesSelected: () -> Unit = {},
+    hazeState: HazeState? = null,
 ) {
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        ActionList(
-            items = listOf(
-                ActionListItem(
-                    labelRes = R.string.song_transition_title,
-                    onClick = onSongTransitionSelected,
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        LabeledCard(label = stringResource(R.string.playback_section_audio)) {
+            Selection(
+                labelRes = R.string.settings_audio_quality,
+                options = listOf(
+                    SelectionOption(
+                        com.exodidio.tune.player.AudioQualityMode.Auto,
+                        R.string.audio_quality_auto,
+                        shortLabelRes = R.string.audio_quality_auto_short,
+                    ),
+                    SelectionOption(
+                        com.exodidio.tune.player.AudioQualityMode.Mp3Only,
+                        R.string.audio_quality_mp3,
+                        shortLabelRes = R.string.audio_quality_mp3_short,
+                    ),
+                    SelectionOption(
+                        com.exodidio.tune.player.AudioQualityMode.LosslessOnly,
+                        R.string.audio_quality_lossless,
+                        shortLabelRes = R.string.audio_quality_lossless_short,
+                    ),
                 ),
-                ActionListItem(
-                    labelRes = R.string.lyrics_title,
-                    onClick = onPlaybackLyricsSelected,
+                selectedValue = audioQuality,
+                onValueSelected = onAudioQualityChanged,
+                hazeState = hazeState,
+            )
+            ActionListDivider(style = ActionListDividerStyle.FullWidth)
+            ActionList(
+                items = listOf(
+                    ActionListItem(
+                        labelRes = R.string.playback_volume_normalization,
+                        onClick = onVolumeNormalizationSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.equalizer_title,
+                        onClick = onEqualizerSelected,
+                    ),
                 ),
-                ActionListItem(
-                    labelRes = R.string.playback_volume_normalization,
-                    onClick = onVolumeNormalizationSelected,
+                containerStyle = ActionListContainerStyle.Plain,
+                dividerStyle = ActionListDividerStyle.FullWidth,
+            )
+        }
+        LabeledCard(label = stringResource(R.string.playback_section_experience)) {
+            ActionList(
+                items = listOf(
+                    ActionListItem(
+                        labelRes = R.string.song_transition_title,
+                        onClick = onSongTransitionSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.playback_lyrics_title,
+                        onClick = onPlaybackLyricsSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.playback_show_quality_badge,
+                        trailingContent = {
+                            TuneSwitch(
+                                checked = showFullscreenQualityBadge,
+                                onCheckedChange = onShowFullscreenQualityBadgeChanged,
+                            )
+                        },
+                        onClick = { onShowFullscreenQualityBadgeChanged(!showFullscreenQualityBadge) },
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.playback_fun_features_title,
+                        onClick = onFunFeaturesSelected,
+                    ),
                 ),
-                ActionListItem(
-                    labelRes = R.string.equalizer_title,
-                    onClick = onEqualizerSelected,
-                ),
-                ActionListItem(
-                    labelRes = R.string.playback_show_quality_badge,
-                    trailingContent = {
-                        Switch(
-                            checked = showFullscreenQualityBadge,
-                            onCheckedChange = onShowFullscreenQualityBadgeChanged,
-                        )
-                    },
-                    onClick = { onShowFullscreenQualityBadgeChanged(!showFullscreenQualityBadge) },
-                ),
-                ActionListItem(
-                    labelRes = R.string.hide_short_audio,
-                    trailingContent = {
-                        Switch(
-                            checked = hideShortAudio,
-                            onCheckedChange = onHideShortAudioChanged,
-                        )
-                    },
-                    onClick = { onHideShortAudioChanged(!hideShortAudio) },
-                ),
-                ActionListItem(
-                    labelRes = R.string.settings_show_genres,
-                    trailingContent = {
-                        Switch(
-                            checked = showGenres,
-                            onCheckedChange = onShowGenresChanged,
-                        )
-                    },
-                    onClick = { onShowGenresChanged(!showGenres) },
-                ),
-                ActionListItem(
-                    labelRes = R.string.settings_show_composers,
-                    trailingContent = {
-                        Switch(
-                            checked = showComposers,
-                            onCheckedChange = onShowComposersChanged,
-                        )
-                    },
-                    onClick = { onShowComposersChanged(!showComposers) },
-                ),
-            ),
-            containerStyle = ActionListContainerStyle.Card,
-            dividerStyle = ActionListDividerStyle.FullWidth,
-        )
-        ActionList(
-            items = listOf(
-                ActionListItem(
-                    labelRes = R.string.library_duplicates,
-                    leadingSymbol = MaterialSymbols.Duplicates,
-                    onClick = onDuplicatesSelected,
-                ),
-                ActionListItem(
-                    labelRes = R.string.settings_data_analysis,
-                    leadingSymbol = MaterialSymbols.BarChart,
-                    onClick = onDataAnalysisSelected,
-                ),
-                ActionListItem(
-                    labelRes = R.string.settings_hidden_tracks,
-                    leadingSymbol = MaterialSymbols.FilterList,
-                    onClick = onHiddenTracksSelected,
-                ),
-            ),
-            containerStyle = ActionListContainerStyle.Card,
-            dividerStyle = ActionListDividerStyle.FullWidth,
-        )
+                containerStyle = ActionListContainerStyle.Plain,
+                dividerStyle = ActionListDividerStyle.FullWidth,
+            )
+        }
     }
 }
 
@@ -148,6 +131,7 @@ internal fun EqualizerContent(
     onEnabledChanged: (Boolean) -> Unit,
     onPresetSelected: (String) -> Unit,
     onBandChanged: (Int, Float) -> Unit,
+    hazeState: HazeState? = null,
     modifier: Modifier = Modifier,
 ) {
     val enabledLabel = stringResource(R.string.equalizer_enable)
@@ -158,7 +142,7 @@ internal fun EqualizerContent(
                 items = listOf(
                     ActionListItem(
                         labelRes = R.string.equalizer_enable,
-                        trailingContent = { Switch(checked = settings.enabled, onCheckedChange = onEnabledChanged) },
+                        trailingContent = { TuneSwitch(checked = settings.enabled, onCheckedChange = onEnabledChanged) },
                         onClick = { onEnabledChanged(!settings.enabled) },
                     ),
                 ),
@@ -170,6 +154,7 @@ internal fun EqualizerContent(
                 options = settings.profiles.map { SelectionOption(it.key, label = it.name) },
                 selectedValue = settings.presetKey,
                 onValueSelected = onPresetSelected,
+                hazeState = hazeState,
             )
         }
         LabeledCard(label = stringResource(R.string.equalizer_bands)) {
@@ -220,6 +205,7 @@ internal fun VolumeNormalizationContent(
     normalizationAvailable: Boolean,
     normalization: com.exodidio.tune.player.NormalizationSettings,
     onNormalizationChanged: (com.exodidio.tune.player.NormalizationSettings) -> Unit,
+    hazeState: HazeState? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -228,12 +214,12 @@ internal fun VolumeNormalizationContent(
                 items = listOf(
                     ActionListItem(
                         labelRes = R.string.playback_volume_normalization,
-                        trailingContent = { Switch(checked = normalization.enabled && normalizationAvailable, enabled = normalizationAvailable, onCheckedChange = { onNormalizationChanged(normalization.copy(enabled = it)) }) },
+                        trailingContent = { TuneSwitch(checked = normalization.enabled && normalizationAvailable, enabled = normalizationAvailable, onCheckedChange = { onNormalizationChanged(normalization.copy(enabled = it)) }) },
                         onClick = { if (normalizationAvailable) onNormalizationChanged(normalization.copy(enabled = !normalization.enabled)) },
                     ),
                     ActionListItem(
                         labelRes = R.string.playback_normalization_prevent_clip,
-                        trailingContent = { Switch(checked = normalization.preventClip, enabled = normalizationAvailable && normalization.enabled, onCheckedChange = { onNormalizationChanged(normalization.copy(preventClip = it)) }) },
+                        trailingContent = { TuneSwitch(checked = normalization.preventClip, enabled = normalizationAvailable && normalization.enabled, onCheckedChange = { onNormalizationChanged(normalization.copy(preventClip = it)) }) },
                         onClick = { if (normalizationAvailable && normalization.enabled) onNormalizationChanged(normalization.copy(preventClip = !normalization.preventClip)) },
                     ),
                 ),
@@ -250,6 +236,7 @@ internal fun VolumeNormalizationContent(
                     ),
                     selectedValue = normalization.mode,
                     onValueSelected = { onNormalizationChanged(normalization.copy(mode = it)) },
+                    hazeState = hazeState,
                 )
             }
         }
@@ -279,6 +266,8 @@ internal fun SongTransitionContent(
     onCrossfadeSecondsChanged: (Int) -> Unit,
     blendArtworkDuringCrossfade: Boolean,
     onBlendArtworkDuringCrossfadeChanged: (Boolean) -> Unit,
+    gaplessPlayback: Boolean = true,
+    onGaplessPlaybackChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val enabled = crossfadeSeconds > 0
@@ -292,9 +281,20 @@ internal fun SongTransitionContent(
             ActionList(
                 items = listOf(
                     ActionListItem(
+                        labelRes = R.string.playback_gapless,
+                        subtitle = stringResource(R.string.playback_gapless_desc),
+                        trailingContent = {
+                            TuneSwitch(
+                                checked = gaplessPlayback,
+                                onCheckedChange = onGaplessPlaybackChanged,
+                            )
+                        },
+                        onClick = { onGaplessPlaybackChanged(!gaplessPlayback) },
+                    ),
+                    ActionListItem(
                         labelRes = R.string.playback_crossfade,
                         trailingContent = {
-                            Switch(
+                            TuneSwitch(
                                 checked = enabled,
                                 onCheckedChange = { checked ->
                                     onCrossfadeSecondsChanged(if (checked) lastEnabledCrossfadeSeconds else 0)
@@ -307,6 +307,7 @@ internal fun SongTransitionContent(
                     ),
                 ),
                 containerStyle = ActionListContainerStyle.Plain,
+                dividerStyle = ActionListDividerStyle.FullWidth,
             )
         }
         AnimatedVisibility(
@@ -339,7 +340,7 @@ internal fun SongTransitionContent(
                             ActionListItem(
                                 labelRes = R.string.playback_blend_artwork_during_crossfade,
                                 trailingContent = {
-                                    Switch(
+                                    TuneSwitch(
                                         checked = blendArtworkDuringCrossfade,
                                         onCheckedChange = onBlendArtworkDuringCrossfadeChanged,
                                     )
@@ -357,16 +358,28 @@ internal fun SongTransitionContent(
     }
 }
 
-/** 设置-播放-歌词：弹簧强度与自动进入全屏。 */
+/** 设置-播放-歌词：弹簧强度、回到焦点延迟、自动进入全屏及档位延迟。 */
 @Composable
 internal fun LyricsPlaybackSettingsContent(
     springStrength: Float,
     onSpringStrengthChanged: (Float) -> Unit,
     autoFullscreen: Boolean,
     onAutoFullscreenChanged: (Boolean) -> Unit,
+    focusReturnDelayMs: Long = com.exodidio.tune.lyrics.DefaultLyricFocusReturnDelayMs,
+    onFocusReturnDelayChanged: (Long) -> Unit = {},
+    autoFullscreenDelayMs: Long = com.exodidio.tune.lyrics.DefaultLyricAutoFullscreenDelayMs,
+    onAutoFullscreenDelayChanged: (Long) -> Unit = {},
+    hazeState: HazeState? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalTuneColors.current
+    val delayOptions = com.exodidio.tune.lyrics.LyricTimingDelayPresetsMs.map { delayMs ->
+        val seconds = (delayMs / 1_000L).toInt()
+        SelectionOption(
+            value = delayMs,
+            label = stringResource(R.string.playback_lyrics_delay_seconds, seconds),
+        )
+    }
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         LabeledCard(label = stringResource(R.string.playback_lyrics_spring_strength)) {
             Column(
@@ -394,12 +407,20 @@ internal fun LyricsPlaybackSettingsContent(
             }
         }
         com.exodidio.tune.ui.components.Card {
+            Selection(
+                labelRes = R.string.playback_lyrics_focus_return_delay,
+                options = delayOptions,
+                selectedValue = com.exodidio.tune.lyrics.normalizeLyricDelayPresetMs(focusReturnDelayMs),
+                onValueSelected = onFocusReturnDelayChanged,
+                hazeState = hazeState,
+            )
+            ActionListDivider(style = ActionListDividerStyle.FullWidth)
             ActionList(
                 items = listOf(
                     ActionListItem(
                         labelRes = R.string.playback_lyrics_auto_fullscreen,
                         trailingContent = {
-                            Switch(
+                            TuneSwitch(
                                 checked = autoFullscreen,
                                 onCheckedChange = onAutoFullscreenChanged,
                             )
@@ -409,6 +430,22 @@ internal fun LyricsPlaybackSettingsContent(
                 ),
                 containerStyle = ActionListContainerStyle.Plain,
             )
+            AnimatedVisibility(
+                visible = autoFullscreen,
+                enter = fadeIn(animationSpec = tween(durationMillis = 200)),
+                exit = fadeOut(animationSpec = tween(durationMillis = 150)),
+            ) {
+                Column {
+                    ActionListDivider(style = ActionListDividerStyle.FullWidth)
+                    Selection(
+                        labelRes = R.string.playback_lyrics_auto_fullscreen_delay,
+                        options = delayOptions,
+                        selectedValue = com.exodidio.tune.lyrics.normalizeLyricDelayPresetMs(autoFullscreenDelayMs),
+                        onValueSelected = onAutoFullscreenDelayChanged,
+                        hazeState = hazeState,
+                    )
+                }
+            }
         }
     }
 }

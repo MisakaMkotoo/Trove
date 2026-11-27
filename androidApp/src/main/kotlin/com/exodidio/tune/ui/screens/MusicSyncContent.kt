@@ -8,21 +8,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -40,9 +36,10 @@ import com.exodidio.tune.ui.components.ActionListContainerStyle
 import com.exodidio.tune.ui.components.ActionListDivider
 import com.exodidio.tune.ui.components.ActionListDividerStyle
 import com.exodidio.tune.ui.components.ActionListItem
-import com.exodidio.tune.ui.components.Card
 import com.exodidio.tune.ui.components.HeroCard
+import com.exodidio.tune.ui.components.LabeledCard
 import com.exodidio.tune.ui.components.MaterialSymbols
+import com.exodidio.tune.ui.components.TuneSwitch
 import com.exodidio.tune.ui.theme.LocalTuneColors
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -50,6 +47,16 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun MusicSyncContent(
     modifier: Modifier = Modifier,
+    hideShortAudio: Boolean = false,
+    onHideShortAudioChanged: (Boolean) -> Unit = {},
+    showGenres: Boolean = false,
+    onShowGenresChanged: (Boolean) -> Unit = {},
+    showComposers: Boolean = false,
+    onShowComposersChanged: (Boolean) -> Unit = {},
+    onDuplicatesSelected: () -> Unit = {},
+    onHiddenTracksSelected: () -> Unit = {},
+    onDataAnalysisSelected: () -> Unit = {},
+    onNcmImportSelected: () -> Unit = {},
 ) {
     val colors = LocalTuneColors.current
     val context = LocalContext.current
@@ -90,7 +97,11 @@ internal fun MusicSyncContent(
     }
     fun startScan() {
         if (context.checkSelfPermission(audioPermission()) == PackageManager.PERMISSION_GRANTED) {
-            scope.launch { scanner.refreshPermission(true, false); val single = scanFolders.folder.first(); scanner.scan(if (single.isNullOrBlank()) emptySet() else setOf(single)) }
+            scope.launch {
+                scanner.refreshPermission(true, false)
+                val single = scanFolders.folder.first()
+                scanner.scan(if (single.isNullOrBlank()) emptySet() else setOf(single))
+            }
         } else {
             permissionLauncher.launch(audioPermission())
         }
@@ -109,14 +120,14 @@ internal fun MusicSyncContent(
     }
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         HeroCard(
             symbol = MaterialSymbols.Refresh,
             title = stringResource(R.string.music_sync_title),
             description = stringResource(R.string.music_sync_desc),
         )
-        Card {
+        LabeledCard(label = stringResource(R.string.music_sync_section_scan)) {
             ActionList(
                 items = listOf(
                     ActionListItem(
@@ -164,8 +175,7 @@ internal fun MusicSyncContent(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
-        }
-        Card {
+            ActionListDivider(style = ActionListDividerStyle.FullWidth)
             Text(
                 text = stringResource(R.string.music_sync_folder_single_title),
                 style = MaterialTheme.typography.titleSmall,
@@ -212,6 +222,73 @@ internal fun MusicSyncContent(
                     }
                 },
                 containerStyle = ActionListContainerStyle.Plain,
+                dividerStyle = ActionListDividerStyle.InsetForLeadingIcon,
+            )
+        }
+        LabeledCard(label = stringResource(R.string.music_sync_section_display)) {
+            ActionList(
+                items = listOf(
+                    ActionListItem(
+                        labelRes = R.string.hide_short_audio,
+                        trailingContent = {
+                            TuneSwitch(
+                                checked = hideShortAudio,
+                                onCheckedChange = onHideShortAudioChanged,
+                            )
+                        },
+                        onClick = { onHideShortAudioChanged(!hideShortAudio) },
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_show_genres,
+                        trailingContent = {
+                            TuneSwitch(
+                                checked = showGenres,
+                                onCheckedChange = onShowGenresChanged,
+                            )
+                        },
+                        onClick = { onShowGenresChanged(!showGenres) },
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_show_composers,
+                        trailingContent = {
+                            TuneSwitch(
+                                checked = showComposers,
+                                onCheckedChange = onShowComposersChanged,
+                            )
+                        },
+                        onClick = { onShowComposersChanged(!showComposers) },
+                    ),
+                ),
+                containerStyle = ActionListContainerStyle.Plain,
+                dividerStyle = ActionListDividerStyle.FullWidth,
+            )
+        }
+        LabeledCard(label = stringResource(R.string.music_sync_section_tools)) {
+            ActionList(
+                items = listOf(
+                    ActionListItem(
+                        labelRes = R.string.library_duplicates,
+                        leadingSymbol = MaterialSymbols.Duplicates,
+                        onClick = onDuplicatesSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_hidden_tracks,
+                        leadingSymbol = MaterialSymbols.FilterList,
+                        onClick = onHiddenTracksSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_data_analysis,
+                        leadingSymbol = MaterialSymbols.BarChart,
+                        onClick = onDataAnalysisSelected,
+                    ),
+                    ActionListItem(
+                        labelRes = R.string.settings_ncm_import,
+                        leadingSymbol = MaterialSymbols.Album,
+                        onClick = onNcmImportSelected,
+                    ),
+                ),
+                containerStyle = ActionListContainerStyle.Plain,
+                dividerStyle = ActionListDividerStyle.InsetForLeadingIcon,
             )
         }
     }

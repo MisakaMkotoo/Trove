@@ -10,12 +10,14 @@ import android.graphics.RectF
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
+import android.util.LruCache
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -24,6 +26,9 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import kotlin.math.max
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 /**
  * 苹果式正在播放背景：仿 kawarp 的管线——
@@ -31,6 +36,17 @@ import kotlin.math.max
  * 着色器需要 RuntimeShader（API 33+），低版本回退为纯色。
  */
 internal val AppleBackdropMinSdk: Int = Build.VERSION_CODES.TIRAMISU
+
+private data class AppleTextureKey(
+    val identityHash: Int,
+    val generationId: Int,
+    val width: Int,
+    val height: Int,
+    val blurred: Boolean,
+    val blurPasses: Int,
+)
+
+private val appleTextureCache = LruCache<AppleTextureKey, Bitmap>(6)
 
 @Composable
 internal fun ApplePlayerBackdrop(
@@ -41,11 +57,46 @@ internal fun ApplePlayerBackdrop(
     settings: com.exodidio.tune.player.AppleBackdropSettings = com.exodidio.tune.player.AppleBackdropSettings.Default,
     animated: Boolean = true,
 ) {
-    val bitmap = remember(artwork?.sourceBitmap, blurred, settings.blurPasses) {
-        artwork?.sourceBitmap?.takeIf { !it.isRecycled }?.let {
-            prepareAppleTexture(it, blurred, settings.blurPasses)
+    val source = artwork?.sourceBitmap?.takeIf { !it.isRecycled }
+    val clampedPasses = if (blurred) settings.blurPasses.coerceIn(0, 20) else 0
+    val cacheKey = source?.let {
+        AppleTextureKey(
+            identityHash = System.identityHashCode(it),
+            generationId = it.generationId,
+            width = it.width,
+            height = it.height,
+            blurred = blurred,
+            blurPasses = clampedPasses,
+        )
+    }
+    val cachedBitmap = remember(cacheKey) {
+        cacheKey?.let { appleTextureCache.get(it)?.takeIf { bmp -> !bmp.isRecycled } }
+    }
+    var asyncBitmap by remember(source, blurred) { mutableStateOf<Bitmap?>(cachedBitmap) }
+    if (cachedBitmap != null && asyncBitmap !== cachedBitmap) {
+        asyncBitmap = cachedBitmap
+    }
+    LaunchedEffect(cacheKey) {
+        val src = source ?: run {
+            asyncBitmap = null
+            return@LaunchedEffect
+        }
+        val key = cacheKey ?: return@LaunchedEffect
+        val existing = appleTextureCache.get(key)?.takeIf { !it.isRecycled }
+        if (existing != null) {
+            asyncBitmap = existing
+            return@LaunchedEffect
+        }
+        val prepared = withContext(Dispatchers.Default) {
+            if (src.isRecycled) null
+            else runCatching { prepareAppleTexture(src, blurred, clampedPasses) }.getOrNull()
+        }
+        if (isActive && prepared != null && !prepared.isRecycled) {
+            appleTextureCache.put(key, prepared)
+            asyncBitmap = prepared
         }
     }
+    val bitmap = (cachedBitmap ?: asyncBitmap)?.takeIf { !it.isRecycled }
     if (Build.VERSION.SDK_INT < AppleBackdropMinSdk || bitmap == null) {
         Box(modifier.background(fallback))
         return
@@ -150,15 +201,18 @@ private fun prepareAppleTexture(source: Bitmap, blurred: Boolean, blurPasses: In
 private fun prepareKawarpTexture(source: Bitmap, blurPasses: Int): Bitmap {
     val size = KawarpBlurSize
     val scaled = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-    Canvas(scaled).drawBitmap(
-        source,
-        null,
-        RectF(0f, 0f, size.toFloat(), size.toFloat()),
-        Paint(Paint.FILTER_BITMAP_FLAG),
-    )
     val pixels = IntArray(size * size)
-    scaled.getPixels(pixels, 0, size, 0, 0, size, size)
-    scaled.recycle()
+    try {
+        Canvas(scaled).drawBitmap(
+            source,
+            null,
+            RectF(0f, 0f, size.toFloat(), size.toFloat()),
+            Paint(Paint.FILTER_BITMAP_FLAG),
+        )
+        scaled.getPixels(pixels, 0, size, 0, 0, size, size)
+    } finally {
+        if (!scaled.isRecycled) scaled.recycle()
+    }
 
     tintDarkAreas(pixels)
 

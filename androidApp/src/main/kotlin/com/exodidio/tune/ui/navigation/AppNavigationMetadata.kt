@@ -14,6 +14,8 @@ internal fun AppStackPage.titleRes(destination: AppDestination): Int = when (thi
     AppStackPage.LibraryAlbums -> R.string.library_albums
     AppStackPage.AlbumDetails -> R.string.album_details_title
     AppStackPage.LibraryTracks -> R.string.library_tracks
+    AppStackPage.LibraryFolders -> R.string.library_folders
+    AppStackPage.LibraryFolderDetails -> R.string.folder_details_title
     AppStackPage.LibraryGenres -> R.string.library_genres
     AppStackPage.GenreDetails -> R.string.genre_details_title
     AppStackPage.LibraryComposers -> R.string.library_composers
@@ -22,12 +24,18 @@ internal fun AppStackPage.titleRes(destination: AppDestination): Int = when (thi
     AppStackPage.LibraryDuplicates -> R.string.library_duplicates
     AppStackPage.PlaylistDetails -> R.string.playlist_details_title
     AppStackPage.SettingsAppearance -> R.string.appearance_title
+    AppStackPage.SettingsPlayerAppearance -> R.string.appearance_player_settings
     AppStackPage.SettingsPlayback -> R.string.playback_settings_title
+    AppStackPage.SettingsFunFeatures -> R.string.playback_fun_features_title
+    AppStackPage.SettingsDownload -> R.string.settings_download
     AppStackPage.SettingsSongTransition -> R.string.song_transition_title
-    AppStackPage.SettingsPlaybackLyrics -> R.string.lyrics_title
+    AppStackPage.SettingsPlaybackLyrics -> R.string.playback_lyrics_title
     AppStackPage.SettingsVolumeNormalization -> R.string.playback_volume_normalization
     AppStackPage.SettingsEqualizer -> R.string.equalizer_title
     AppStackPage.SettingsAppleBackdrop -> R.string.appearance_apple_backdrop_settings
+    AppStackPage.SettingsStorage -> R.string.settings_storage
+    AppStackPage.SettingsDynamicBackdrop -> R.string.appearance_dynamic_backdrop_settings
+    AppStackPage.SettingsDynamicBackdropMesh -> R.string.dynamic_backdrop_mesh_title
     AppStackPage.SettingsIntegration -> R.string.integration_title
     AppStackPage.SettingsMusicSync -> R.string.music_sync_title
     AppStackPage.SettingsNcmImport -> R.string.ncm_import_title
@@ -37,11 +45,19 @@ internal fun AppStackPage.titleRes(destination: AppDestination): Int = when (thi
     AppStackPage.SettingsInsight -> R.string.settings_data_analysis
     AppStackPage.SettingsServiceStatus -> R.string.settings_service_status
     AppStackPage.NeteasePlaylistDetails -> R.string.netease_playlists_title
+    AppStackPage.NeteaseArtistDetails -> R.string.netease_artist_detail_title
+    AppStackPage.NeteaseRecommendedPlaylists -> R.string.netease_recommended_playlists_title
+    AppStackPage.DiscoverSquare -> R.string.discover_square_title
     AppStackPage.SimilarSongs -> R.string.similar_songs_title
     AppStackPage.MineCreatedPlaylists -> R.string.mine_created_title
     AppStackPage.MineSavedPlaylists -> R.string.mine_saved_title
+    AppStackPage.MineSavedAlbums -> R.string.mine_albums_title
     AppStackPage.MineArtists -> R.string.mine_artists_title
-    AppStackPage.SettingsLyrics -> R.string.lyrics_title
+    AppStackPage.MineDownloads -> R.string.mine_downloads_title
+    AppStackPage.NeteasePlayRecords -> R.string.netease_play_records_title
+    AppStackPage.NeteaseCloudDisk -> R.string.mine_cloud_disk_title
+    AppStackPage.SettingsLyrics -> R.string.lyrics_service_title
+    AppStackPage.SettingsAutoSyncModels -> R.string.lyrics_auto_align_models
     AppStackPage.SettingsAbout -> R.string.about_title
     AppStackPage.SettingsTabLayout -> R.string.tab_layout_title
     AppStackPage.Root -> destination.titleRes

@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.RectangleShape
@@ -52,6 +53,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,6 +64,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import com.exodidio.tune.R
+import com.exodidio.tune.settings.ControlStyle
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
 private val PageHorizontalPadding = 24.dp
@@ -73,11 +77,20 @@ private val HeaderControlGap = 12.dp
 internal const val StackPageTitleTag = "stack-page-title"
 
 /** The exact glass surface shared by a scrolling page header and its sticky controls. */
+@Composable
 internal fun Modifier.headerGlassSurface(
     hazeState: HazeState?,
     colors: com.exodidio.tune.ui.theme.TuneColors,
+    glassTint: Color? = null,
 ): Modifier = clip(RectangleShape)
-    .liquidGlassBackground(hazeState, colors)
+    .tuneLiquidGlassBackground(
+        hazeState = hazeState,
+        colors = colors,
+        shape = RectangleShape,
+        glassBlurRadius = LocalLiquidGlassBlurDp.current.dp,
+        glassTint = glassTint,
+        enableLens = false,
+    )
     .drawBehind {
         val strokeWidth = 0.5.dp.toPx()
         val y = size.height - strokeWidth / 2
@@ -187,10 +200,11 @@ fun StackPageHeader(
             enter = if (animateChanges) fadeIn() else EnterTransition.None,
             exit = if (animateChanges) fadeOut() else ExitTransition.None,
         ) {
+            val headerGlassTint = rememberAnimatedGlassTint(colors, animate = !LocalReduceMotion.current)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .headerGlassSurface(hazeState, colors),
+                    .headerGlassSurface(hazeState, colors, glassTint = headerGlassTint),
             )
         }
         Row(
@@ -328,28 +342,71 @@ fun TuneGlassIconButton(
     glassTint: Color? = null,
 ) {
     val colors = LocalTuneColors.current
-    // Apple Music 的顶栏按钮：48dp 触摸区，可见玻璃圆 40dp，图标 24dp。
+    val reduceMotion = LocalReduceMotion.current
+    val isLiquidGlass = LocalControlStyle.current == ControlStyle.LiquidGlass && !reduceMotion
+    val useOpticalGlass = isLiquidGlass && surfaceColor == null && borderColor == null && tuneGlassBackdrop() != null
+    val glassBlurDp = LocalLiquidGlassBlurDp.current.dp
+    val effectiveGlassTint = if (isLiquidGlass) {
+        glassTint
+    } else {
+        rememberAnimatedGlassTint(colors, glassTint = glassTint, animate = !reduceMotion)
+    }
+    val physics = rememberTuneLiquidButtonPhysics(
+        maxDisplacementDp = 5.dp,
+        pressedScale = if (isLiquidGlass) 1.15f else 1.06f,
+    )
+    // Apple Music 的顶栏按钮：48dp 触摸区，可见玻璃圆 40dp，图标 24dp；按住拖动时弹性形变与微位移。
     Box(
         modifier = modifier
             .size(HeaderHeight)
-            .semantics { contentDescription = label }
-            .clickable(
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = label
+                onClick(label = label) {
+                    onClick()
+                    true
+                }
+            }
+            .liquidButtonGesture(
+                physics = physics,
+                reduceMotion = reduceMotion,
                 onClick = onClick,
-                role = Role.Button,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
             ),
         contentAlignment = Alignment.Center,
     ) {
         Box(
             modifier = Modifier
                 .size(HeaderButtonVisualSize)
-                .clip(CircleShape)
                 .then(
-                    if (surfaceColor == null) Modifier.liquidGlassBackground(hazeState, colors, 30.dp, glassTint)
-                    else Modifier.background(surfaceColor),
+                    if (surfaceColor == null) {
+                        Modifier.tuneLiquidGlassBackground(
+                            hazeState = hazeState,
+                            colors = colors,
+                            shape = CircleShape,
+                            hazeBlurRadius = 30.dp,
+                            glassBlurRadius = glassBlurDp,
+                            glassTint = effectiveGlassTint,
+                            enableLens = true,
+                            lensRadius = 16.dp,
+                            refractionHeight = 10.dp,
+                            chromaticAberration = isLiquidGlass,
+                            pressProgress = physics.pressProgress,
+                            layerBlock = physics.layerBlock,
+                        )
+                    } else {
+                        Modifier
+                            .graphicsLayer(physics.layerBlock)
+                            .clip(CircleShape)
+                            .background(surfaceColor)
+                    },
                 )
-                .border(0.5.dp, borderColor ?: colors.borderGlass, CircleShape),
+                .then(
+                    if (!useOpticalGlass) {
+                        Modifier.border(0.5.dp, borderColor ?: colors.borderGlass, CircleShape)
+                    } else {
+                        Modifier
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) {
             MaterialSymbol(

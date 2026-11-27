@@ -53,4 +53,22 @@ class PlaylistDetailsViewModelTest {
         assertEquals("59 s", formatPlaylistTotalDuration(59L, day, hour, minute, second))
         assertEquals("52 d 3 hr", formatPlaylistTotalDuration(52L * 86_400L + 3L * 3_600L + 30L * 60L, day, hour, minute, second))
     }
+
+    @Test
+    fun deduplicatesExactIdsAndNormalizedTrackMetadataPreservingFirst() {
+        val trackA = LibraryTrack("a", "Hello", "Singer", "Record")
+        val trackADup = LibraryTrack("a_dup", "  hello ", "SINGER", "record ")
+        val trackB = LibraryTrack("b", "World", "Other", "Album B")
+        val blankA = LibraryTrack("blank1", "", "", "")
+        val blankB = LibraryTrack("blank2", "", "", "")
+        val tracksById = listOf(trackA, trackADup, trackB, blankA, blankB).associateBy { it.id }
+
+        val deduped = deduplicatePlaylistTrackIds(
+            listOf("a", "a", " ", "b", "a_dup", "blank1", "blank2"),
+            tracksById,
+        )
+
+        assertEquals(listOf("a", "b", "blank1", "blank2"), deduped)
+        assertEquals("", normalizedTrackDedupKey(blankA))
+    }
 }

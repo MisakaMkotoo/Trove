@@ -162,4 +162,40 @@ class PlaybackQueueTest {
         assertEquals(QueueTransition.Stop, queue.clear())
         assertEquals(PlaybackQueueSnapshot(), queue.snapshot())
     }
+
+    @Test
+    fun `deduplicateQueue preserves first occurrence and current track`() {
+        val queue = PlaybackQueue()
+        queue.play(PlaybackRequest(listOf("local:1", "local:2", "netease:1", "local:3"), startIndex = 2))
+        val keyFor: (String) -> String = { id ->
+            when (id) {
+                "local:1", "netease:1" -> "song-one|artist"
+                else -> id
+            }
+        }
+
+        val removed = queue.deduplicateQueue(keyFor)
+
+        assertEquals(1, removed)
+        // Current track ("netease:1") collided with earlier "local:1" -> earlier duplicate removed, current stays in place.
+        assertEquals(listOf("local:2", "netease:1", "local:3"), queue.snapshot().activeTrackIds)
+        assertEquals(listOf("local:2", "netease:1", "local:3"), queue.snapshot().originalTrackIds)
+        assertEquals("netease:1", queue.snapshot().currentTrackId)
+        assertEquals(1, queue.snapshot().currentIndex)
+        assertEquals(0, queue.deduplicateQueue(keyFor))
+    }
+
+    @Test
+    fun `deduplicateQueue removes later duplicate when current track is unique`() {
+        val queue = PlaybackQueue()
+        queue.play(PlaybackRequest(listOf("a1", "b1", "a2", "c1"), startIndex = 1))
+        val keyFor: (String) -> String = { id -> id.take(1) }
+
+        val removed = queue.deduplicateQueue(keyFor)
+
+        assertEquals(1, removed)
+        assertEquals(listOf("a1", "b1", "c1"), queue.snapshot().activeTrackIds)
+        assertEquals("b1", queue.snapshot().currentTrackId)
+        assertEquals(1, queue.snapshot().currentIndex)
+    }
 }

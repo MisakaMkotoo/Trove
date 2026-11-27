@@ -22,6 +22,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
+import com.exodidio.tune.settings.ControlStyle
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
 /** Full-width glass playback actions for a library collection. */
@@ -64,17 +65,38 @@ private fun LibraryPlaybackAction(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalTuneColors.current
+    val interactionSource = remember { MutableInteractionSource() }
     val shape = RoundedCornerShape(26.dp)
+    val useOpticalGlass = LocalControlStyle.current == ControlStyle.LiquidGlass &&
+        !LocalReduceMotion.current &&
+        tuneGlassBackdrop() != null
     Box(
         modifier = modifier
+            .pressScale(interactionSource, pressedScale = 0.965f)
             .defaultMinSize(minHeight = 48.dp)
-            .clip(shape)
-            .border(0.5.dp, colors.borderGlass, shape)
-            .liquidGlassBackground(hazeState, colors)
+            .then(
+                if (!useOpticalGlass) {
+                    Modifier
+                        .clip(shape)
+                        .border(0.5.dp, colors.borderGlass, shape)
+                } else {
+                    Modifier
+                },
+            )
+            .tuneLiquidGlassBackground(
+                hazeState = hazeState,
+                colors = colors,
+                shape = shape,
+                glassBlurRadius = LocalLiquidGlassBlurDp.current.dp,
+                enableLens = true,
+                lensRadius = 16.dp,
+                refractionHeight = 10.dp,
+                chromaticAberration = useOpticalGlass,
+            )
             .semantics { contentDescription = label }
             .clickable(
                 role = Role.Button,
-                interactionSource = remember { MutableInteractionSource() },
+                interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
             )

@@ -1,19 +1,27 @@
 package com.exodidio.tune.ui.navigation
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BlurMaskFilter
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.util.Log
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -26,17 +34,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.dropShadow
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import coil3.SingletonImageLoader
 import coil3.toBitmap
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
+import com.exodidio.tune.ui.components.LocalReduceMotion
 import com.exodidio.tune.ui.components.tuneSizedUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -50,7 +66,7 @@ import java.io.File
 internal val FullScreenArtworkCornerRadius = 9.dp
 
 internal data class FullScreenArtwork(
-    val image: androidx.compose.ui.graphics.ImageBitmap,
+    val image: ImageBitmap,
     val dominant: Color,
     val sourceBitmap: Bitmap? = null,
     /** 同一首歌的 600 和 1600 图共享同一个 identity，用于判断能否直接沿用旧图/旧配色。 */
@@ -109,6 +125,10 @@ internal fun FullScreenPlayerBackground(
     adaptiveBackground: Boolean = false,
     playerTheme: com.exodidio.tune.settings.PlayerTheme = com.exodidio.tune.settings.PlayerTheme.Standard,
     appleBackdrop: com.exodidio.tune.player.AppleBackdropSettings = com.exodidio.tune.player.AppleBackdropSettings.Default,
+    dynamicBackdrop: com.exodidio.tune.player.DynamicBackdropSettings = com.exodidio.tune.player.DynamicBackdropSettings.Default,
+    backdropActive: Boolean = true,
+    lyricsVisible: Boolean = false,
+    presetSeed: String? = null,
 ) {
     val colors = LocalTuneColors.current
     val dominantColor by animateColorAsState(
@@ -116,6 +136,21 @@ internal fun FullScreenPlayerBackground(
         animationSpec = tween(280, easing = FastOutSlowInEasing),
         label = "full-screen-background-colour",
     )
+    if (playerTheme == com.exodidio.tune.settings.PlayerTheme.Dynamic) {
+        val shown = incomingArtwork ?: artwork
+        Box(modifier.background(dominantColor)) {
+            com.exodidio.tune.backdrop.DynamicBackdrop(
+                settings = dynamicBackdrop,
+                artwork = shown?.sourceBitmap,
+                artworkIdentity = shown?.identity,
+                lyricsVisible = lyricsVisible,
+                modifier = Modifier.fillMaxSize(),
+                active = backdropActive,
+                presetSeed = presetSeed,
+            )
+        }
+        return
+    }
     if (playerTheme == com.exodidio.tune.settings.PlayerTheme.Apple ||
         playerTheme == com.exodidio.tune.settings.PlayerTheme.Distorted
     ) {
@@ -160,7 +195,7 @@ private fun AppleBackdropLayer(
     settings: com.exodidio.tune.player.AppleBackdropSettings,
 ) {
     Box(Modifier.fillMaxSize().alpha(alpha.coerceIn(0f, 1f))) {
-        ApplePlayerBackdrop(artwork, Color.Black, Modifier.fillMaxSize(), blurred = blurred, settings = settings)
+        ApplePlayerBackdrop(artwork, Color.Transparent, Modifier.fillMaxSize(), blurred = blurred, settings = settings)
     }
 }
 
@@ -180,6 +215,10 @@ internal fun FullScreenPlayerArtwork(
     fullscreen: Boolean = false,
     swap: ArtworkSwap? = null,
     cornerRadius: androidx.compose.ui.unit.Dp = FullScreenArtworkCornerRadius,
+    vinylRingWearEnabled: Boolean = false,
+    vinylWearProgress: Float = 0f,
+    gyroSheenEnabled: Boolean = false,
+    isCompactPanelOpen: Boolean = false,
 ) {
     val colors = LocalTuneColors.current
     val shape = RoundedCornerShape(cornerRadius)
@@ -191,32 +230,227 @@ internal fun FullScreenPlayerArtwork(
             modifier.background(colors.glassElevated),
             contentAlignment = Alignment.Center,
         ) {
-        ArtworkLayers(artwork, outgoingArtwork, incomingArtwork, crossfadeProgress, isArtworkCrossfading, swap)
+            ArtworkLayers(artwork, outgoingArtwork, incomingArtwork, crossfadeProgress, isArtworkCrossfading, swap)
+            ArtworkNoveltyOverlays(
+                vinylRingWearEnabled = vinylRingWearEnabled,
+                vinylWearProgress = vinylWearProgress,
+                gyroSheenEnabled = gyroSheenEnabled,
+                isCompactPanelOpen = isCompactPanelOpen,
+            )
         }
     } else {
+        val density = LocalDensity.current
+        val primaryShadowPaint = remember(density.density) {
+            android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.Black.copy(alpha = 0.15f).toArgb()
+                val blurPx = with(density) { 12.dp.toPx() }.coerceAtLeast(0.5f)
+                maskFilter = BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL)
+            }
+        }
+        val contactShadowPaint = remember(density.density) {
+            android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.Black.copy(alpha = 0.05f).toArgb()
+                val blurPx = with(density) { 2.dp.toPx() }.coerceAtLeast(0.5f)
+                maskFilter = BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL)
+            }
+        }
         Box(
             modifier
                 // 苹果封面是下偏的软投影：主阴影大模糊、向下偏移，另叠一层贴边接触阴影。
-                // Modifier.shadow 只能按 elevation 出均匀投影，做不出这种分布。
-                .dropShadow(shape = shape) {
-                    radius = 12.dp.toPx()
-                    spread = 0f
-                    color = Color.Black
-                    alpha = 0.15f
-                    offset = Offset(0f, 4.dp.toPx())
-                }
-                .dropShadow(shape = shape) {
-                    radius = 2.dp.toPx()
-                    spread = 0f
-                    color = Color.Black
-                    alpha = 0.05f
-                    offset = Offset(0f, 1.5.dp.toPx())
+                // 使用 BlurMaskFilter 直接绘制，避免 Compose dropShadow 在动态圆角/尺寸动画时
+                // 向无界 AndroidShadowContext 缓存海量 Alpha8 Bitmap 导致 OOM 与系统卡死。
+                .drawBehind {
+                    if (size.width > 0f && size.height > 0f) {
+                        val cornerPx = cornerRadius.toPx().coerceIn(0f, minOf(size.width, size.height) / 2f)
+                        val primaryOffsetY = 4.dp.toPx()
+                        val contactOffsetY = 1.5.dp.toPx()
+                        val nativeCanvas = drawContext.canvas.nativeCanvas
+                        nativeCanvas.drawRoundRect(
+                            0f,
+                            primaryOffsetY,
+                            size.width,
+                            size.height + primaryOffsetY,
+                            cornerPx,
+                            cornerPx,
+                            primaryShadowPaint,
+                        )
+                        nativeCanvas.drawRoundRect(
+                            0f,
+                            contactOffsetY,
+                            size.width,
+                            size.height + contactOffsetY,
+                            cornerPx,
+                            cornerPx,
+                            contactShadowPaint,
+                        )
+                    }
                 }
                 .clip(shape).background(colors.glassElevated)
                 .border(0.5.dp, colors.borderGlass, shape),
             contentAlignment = Alignment.Center,
         ) {
             ArtworkLayers(artwork, outgoingArtwork, incomingArtwork, crossfadeProgress, isArtworkCrossfading, swap)
+            ArtworkNoveltyOverlays(
+                vinylRingWearEnabled = vinylRingWearEnabled,
+                vinylWearProgress = vinylWearProgress,
+                gyroSheenEnabled = gyroSheenEnabled,
+                isCompactPanelOpen = isCompactPanelOpen,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArtworkNoveltyOverlays(
+    vinylRingWearEnabled: Boolean,
+    vinylWearProgress: Float,
+    gyroSheenEnabled: Boolean,
+    isCompactPanelOpen: Boolean,
+) {
+    val context = LocalContext.current
+    val reduceMotion = LocalReduceMotion.current
+    val showWear = vinylRingWearEnabled && vinylWearProgress > 0.01f && !isCompactPanelOpen
+    if (showWear) {
+        val w = vinylWearProgress.coerceIn(0f, 1f)
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val minDim = minOf(size.width, size.height)
+            val center = Offset(size.width / 2f, size.height / 2f)
+            // Outer cardboard sleeve ring impression from repeated record handling.
+            drawCircle(
+                color = Color(0xFFF3EBDD).copy(alpha = 0.045f + 0.135f * w),
+                radius = minDim * 0.456f,
+                center = center,
+                style = Stroke(width = (8.dp.toPx() + 8.dp.toPx() * w)),
+            )
+            // Secondary subtle inner paper scuff ring.
+            drawCircle(
+                color = Color(0xFFE7DAC4).copy(alpha = 0.025f + 0.085f * w),
+                radius = minDim * 0.428f,
+                center = Offset(center.x + 1.5.dp.toPx(), center.y - 1.dp.toPx()),
+                style = Stroke(width = 3.5.dp.toPx()),
+            )
+            // Faint top & bottom edge cardboard rub.
+            val edgeBand = 12.dp.toPx()
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color(0xFFEDE2CE).copy(alpha = 0.09f * w), Color.Transparent),
+                    startY = 0f,
+                    endY = edgeBand,
+                ),
+            )
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color.Transparent, Color(0xFFEDE2CE).copy(alpha = 0.08f * w)),
+                    startY = (size.height - edgeBand).coerceAtLeast(0f),
+                    endY = size.height,
+                ),
+            )
+            // Gentle darkened edge vignette on aged sleeves.
+            drawRect(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color.Transparent,
+                        Color(0xFF1A140F).copy(alpha = 0.14f * w),
+                    ),
+                    center = center,
+                    radius = minDim * 0.72f,
+                ),
+            )
+        }
+    }
+
+    val activeGyro = gyroSheenEnabled && !isCompactPanelOpen && !reduceMotion
+    var tiltX by remember { mutableFloatStateOf(0f) }
+    var tiltY by remember { mutableFloatStateOf(0f) }
+    DisposableEffect(context, activeGyro) {
+        if (!activeGyro) {
+            tiltX = 0f
+            tiltY = 0f
+            return@DisposableEffect onDispose {}
+        }
+        val manager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        val sensor = manager?.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            ?: manager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (manager == null || sensor == null) {
+            return@DisposableEffect onDispose {}
+        }
+        var baselineX: Float? = null
+        var baselineY: Float? = null
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val gx = event.values[0]
+                val gy = event.values[1]
+                val bx = baselineX ?: gx.also { baselineX = it }
+                val by = baselineY ?: gy.also { baselineY = it }
+                // Slowly re-center baseline so natural posture shifts stay comfortable
+                // while deliberate wrist tilts sweep the glass reflection immediately.
+                baselineX = bx * 0.992f + gx * 0.008f
+                baselineY = by * 0.992f + gy * 0.008f
+                val relX = -(gx - bx) / 3.6f
+                val relY = (gy - by) / 3.6f
+                val absX = -gx / 5.2f
+                val absY = (gy - 4.5f) / 5.2f
+                val targetX = (relX * 0.72f + absX * 0.28f).coerceIn(-1f, 1f)
+                val targetY = (relY * 0.72f + absY * 0.28f).coerceIn(-1f, 1f)
+                tiltX = tiltX * 0.68f + targetX * 0.32f
+                tiltY = tiltY * 0.68f + targetY * 0.32f
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+        manager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
+        onDispose {
+            manager.unregisterListener(listener)
+        }
+    }
+    if (activeGyro) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val sweepShift = tiltX * size.width * 0.48f + tiltY * size.height * 0.26f
+            val centerX = size.width * 0.5f + sweepShift
+            val centerY = size.height * 0.5f + tiltY * size.height * 0.28f
+            val halfSpan = size.minDimension * 0.36f
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color.White.copy(alpha = 0.04f),
+                        Color.White.copy(alpha = 0.24f),
+                        Color.White.copy(alpha = 0.05f),
+                        Color.Transparent,
+                    ),
+                    start = Offset(centerX - halfSpan, centerY - halfSpan),
+                    end = Offset(centerX + halfSpan, centerY + halfSpan),
+                ),
+                blendMode = BlendMode.Screen,
+            )
+            val secondaryOffset = size.minDimension * 0.26f
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color.White.copy(alpha = 0.10f),
+                        Color.Transparent,
+                    ),
+                    start = Offset(centerX - secondaryOffset - halfSpan * 0.5f, centerY - secondaryOffset - halfSpan * 0.5f),
+                    end = Offset(centerX - secondaryOffset + halfSpan * 0.5f, centerY - secondaryOffset + halfSpan * 0.5f),
+                ),
+                blendMode = BlendMode.Screen,
+            )
+            val tiltMagnitude = kotlin.math.hypot(tiltX, tiltY).coerceIn(0f, 1f)
+            val rimAlpha = 0.05f + 0.14f * tiltMagnitude
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = rimAlpha),
+                        Color.Transparent,
+                        Color.White.copy(alpha = rimAlpha * 0.6f),
+                    ),
+                    start = Offset(if (tiltX >= 0f) 0f else size.width, if (tiltY >= 0f) 0f else size.height),
+                    end = Offset(if (tiltX >= 0f) size.width else 0f, if (tiltY >= 0f) size.height else 0f),
+                ),
+                blendMode = BlendMode.Screen,
+            )
         }
     }
 }
@@ -308,7 +542,7 @@ internal fun rememberFullscreenArtwork(
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(file.path, bounds)
                 val sample = fullscreenSampleSize(bounds.outWidth, bounds.outHeight, 1080)
-                System.err.println("ARTDIM ${file.name} ${bounds.outWidth}x${bounds.outHeight} sample=$sample")
+                Log.d("ARTDIM", "${file.name} ${bounds.outWidth}x${bounds.outHeight} sample=$sample")
                 val bitmap = BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply {
                     inSampleSize = sample
                     inPreferredConfig = Bitmap.Config.RGB_565
@@ -326,13 +560,20 @@ internal fun rememberFullscreenArtwork(
             artwork = FullScreenArtwork(image, existingDominant, bitmap, identity)
             return@LaunchedEffect
         }
+        val cachedDominant = identity?.let { FullScreenDominantCache.get(it) }
         // 先出图再取色：Palette 不应该拖住封面出现。
-        val fastDominant = withContext(Dispatchers.Default) {
+        val fastDominant = cachedDominant ?: withContext(Dispatchers.Default) {
             bitmap?.let { fallbackDominantColor(it) } ?: Color.Transparent
         }
+        if (identity != null && fastDominant != Color.Transparent) {
+            FullScreenDominantCache.put(identity, fastDominant)
+        }
         artwork = FullScreenArtwork(image, fastDominant, bitmap, identity)
-        if (bitmap != null) {
+        if (bitmap != null && cachedDominant == null) {
             val refined = withContext(Dispatchers.Default) { adaptiveDominantColor(bitmap) }
+            if (identity != null && refined != Color.Transparent) {
+                FullScreenDominantCache.put(identity, refined)
+            }
             val current = artwork
             if (current != null && current.image === image) {
                 artwork = current.copy(dominant = refined)
@@ -363,13 +604,43 @@ internal fun rememberCoilArtwork(url: String?, sizePx: Int, identity: String?): 
             }.getOrNull()
         } ?: return@LaunchedEffect
         val image = bitmap.asImageBitmap()
-        val fast = withContext(Dispatchers.Default) { fallbackDominantColor(bitmap) }
+        val cachedDominant = identity?.let { FullScreenDominantCache.get(it) }
+        val fast = cachedDominant ?: withContext(Dispatchers.Default) { fallbackDominantColor(bitmap) }
+        if (identity != null && fast != Color.Transparent) {
+            FullScreenDominantCache.put(identity, fast)
+        }
         artwork = FullScreenArtwork(image, fast, bitmap, identity)
-        val refined = withContext(Dispatchers.Default) { adaptiveDominantColor(bitmap) }
-        val current = artwork
-        if (current != null && current.image === image) artwork = current.copy(dominant = refined)
+        if (cachedDominant == null) {
+            val refined = withContext(Dispatchers.Default) { adaptiveDominantColor(bitmap) }
+            if (identity != null && refined != Color.Transparent) {
+                FullScreenDominantCache.put(identity, refined)
+            }
+            val current = artwork
+            if (current != null && current.image === image) artwork = current.copy(dominant = refined)
+        }
     }
     return artwork
+}
+
+@Composable
+internal fun rememberCoilThumbnail(url: String?, sizePx: Int): ImageBitmap? {
+    val context = LocalContext.current
+    var image by remember(url, sizePx) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(url, sizePx) {
+        val target = url?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        val bitmap = withContext(Dispatchers.IO) {
+            runCatching {
+                val loader = SingletonImageLoader.get(context)
+                val request = ImageRequest.Builder(context)
+                    .data(tuneSizedUrl(target, sizePx))
+                    .allowHardware(false)
+                    .build()
+                loader.execute(request).image?.toBitmap()
+            }.getOrNull()
+        } ?: return@LaunchedEffect
+        image = bitmap.asImageBitmap()
+    }
+    return image
 }
 
 /** A crossfade layer is path-scoped; only the normal player cover may persist across paths. */
@@ -378,14 +649,72 @@ internal fun fullscreenArtworkMemoryKey(artworkPath: String?, keepPrevious: Bool
 
 private object FullscreenArtworkRetainedKey
 
+internal object FullScreenDominantCache {
+    private val cache = android.util.LruCache<String, Color>(128)
+
+    fun get(identity: String): Color? = synchronized(cache) { cache.get(identity) }
+
+    fun put(identity: String, color: Color) {
+        if (color == Color.Transparent) return
+        synchronized(cache) { cache.put(identity, color) }
+    }
+
+    fun getOrSampleQuick(identity: String?, bitmap: Bitmap?): Color? {
+        if (identity != null) {
+            get(identity)?.let { return it }
+        }
+        if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return null
+        val sampled = sampleStridedDominantColor(bitmap)
+        if (identity != null && sampled != Color.Transparent) {
+            put(identity, sampled)
+        }
+        return sampled.takeIf { it != Color.Transparent }
+    }
+}
+
+private fun sampleStridedDominantColor(bitmap: Bitmap): Color {
+    val w = bitmap.width
+    val h = bitmap.height
+    val cols = 6
+    val rows = 6
+    var rSum = 0L
+    var gSum = 0L
+    var bSum = 0L
+    var count = 0L
+    for (row in 0 until rows) {
+        val y = ((row + 0.5f) * h / rows).toInt().coerceIn(0, h - 1)
+        for (col in 0 until cols) {
+            val x = ((col + 0.5f) * w / cols).toInt().coerceIn(0, w - 1)
+            val pixel = bitmap.getPixel(x, y)
+            if (android.graphics.Color.alpha(pixel) > 32) {
+                rSum += android.graphics.Color.red(pixel)
+                gSum += android.graphics.Color.green(pixel)
+                bSum += android.graphics.Color.blue(pixel)
+                count++
+            }
+        }
+    }
+    if (count == 0L) return Color.Transparent
+    return Color(
+        red = (rSum / count).toInt(),
+        green = (gSum / count).toInt(),
+        blue = (bSum / count).toInt(),
+    )
+}
+
 internal fun adaptiveDominantColor(bitmap: Bitmap): Color {
     return runCatching { bitmap.extractAdaptivePlayerColors().background }.getOrDefault(fallbackDominantColor(bitmap))
 }
 
 private fun fallbackDominantColor(bitmap: Bitmap): Color {
+    if (bitmap.isRecycled) return Color.Transparent
     val sample = Bitmap.createScaledBitmap(bitmap, 24, 24, true)
     val pixels = IntArray(24 * 24)
-    sample.getPixels(pixels, 0, 24, 0, 0, 24, 24)
+    try {
+        sample.getPixels(pixels, 0, 24, 0, 0, 24, 24)
+    } finally {
+        if (sample !== bitmap && !sample.isRecycled) sample.recycle()
+    }
     val opaque = pixels.filter { android.graphics.Color.alpha(it) > 32 }
     if (opaque.isEmpty()) return Color.Transparent
     return Color(

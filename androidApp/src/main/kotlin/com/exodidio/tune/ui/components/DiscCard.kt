@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
@@ -42,14 +43,18 @@ fun DiscCard(
     onLongClick: (() -> Unit)? = null,
 ) {
     val colors = LocalTuneColors.current
-    val bitmap = rememberArtworkThumbnail(artworkPath, targetPx = 250)
-    val clickModifier = remember(onClick, onLongClick) {
-        if (onClick != null || onLongClick != null) {
+    val bitmap = rememberArtworkThumbnail(artworkPath, targetPx = 600)
+    val bitmapAlpha = rememberArtworkFadeAlpha(artworkPath, bitmap != null)
+    val interactive = onClick != null || onLongClick != null
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressModifier = if (interactive) Modifier.pressScale(interactionSource, pressedScale = 0.965f) else Modifier
+    val clickModifier = remember(onClick, onLongClick, interactionSource) {
+        if (interactive) {
             Modifier.combinedClickable(
                 onClick = { onClick?.invoke() },
                 onLongClick = onLongClick,
                 role = Role.Button,
-                interactionSource = MutableInteractionSource(),
+                interactionSource = interactionSource,
                 indication = null,
             )
         } else {
@@ -59,6 +64,7 @@ fun DiscCard(
 
     Column(
         modifier = modifier
+            .then(pressModifier)
             .clip(RoundedCornerShape(TuneRadii.LargeArtwork))
             .then(clickModifier),
     ) {
@@ -76,11 +82,11 @@ fun DiscCard(
                     bitmap = bitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize(),
+                    modifier = Modifier.matchParentSize().alpha(bitmapAlpha),
                 )
                 !artworkUrl.isNullOrBlank() -> TuneRemoteImage(
                     url = artworkUrl,
-                    sizePx = 400,
+                    sizePx = 600,
                     modifier = Modifier.matchParentSize(),
                     fallback = {
                         MaterialSymbol(

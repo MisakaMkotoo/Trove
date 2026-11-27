@@ -1,17 +1,22 @@
-# Gradle / Android
-.gradle/
-build/
+# generated FFmpeg libs
+androidApp/src/main/jniLibs/
 local.properties
-.idea/
-*.iml
-captures/
+
+# Gradle / Android build outputs
+.gradle/
+**/build/
+**/.cxx/
 .externalNativeBuild/
-.cxx/
+.kotlin/
+captures/
+build-artifacts/
+
+# Packaged artifacts
 *.apk
 *.aab
-*.jks
-*.keystore
-androidApp/src/main/jniLibs/
+*.hprof
 
-# macOS
+# IDE / workspace scratch
+.idea/
+.keep-not-used
 .DS_Store

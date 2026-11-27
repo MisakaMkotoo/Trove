@@ -1,6 +1,7 @@
 package com.exodidio.tune.netease
 
 import android.content.Context
+import android.util.Log
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
@@ -71,7 +72,7 @@ internal object NeteaseCoverStore {
                         val file = target.takeIf { result.isSuccess && it.isFile && it.length() > 0 }
                         if (file == null) {
                             negative[songId] = urlKey to System.currentTimeMillis()
-                            System.err.println("COVER download failed song=$songId url=$sizedUrl")
+                            Log.w("NeteaseCover", "download failed song=$songId")
                         } else {
                             NeteaseImageCache.trim(app)
                         }

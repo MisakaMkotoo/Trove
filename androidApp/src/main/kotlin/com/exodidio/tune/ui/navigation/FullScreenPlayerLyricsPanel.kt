@@ -1,16 +1,17 @@
 package com.exodidio.tune.ui.navigation
 
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.view.Surface
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -20,37 +21,27 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.background
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -59,328 +50,57 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.preferredFrameRate
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.BlurEffect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asAndroidBitmap
-import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.layer.GraphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
-import androidx.compose.ui.graphics.rememberGraphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.preferredFrameRate
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.exodidio.tune.R
-import com.exodidio.tune.ui.theme.LocalTuneColors
+import com.exodidio.tune.lyrics.LyricOffsetStore
+import com.exodidio.tune.lyrics.LyricsGravitySolver
 import com.exodidio.tune.ui.components.LocalReduceMotion
+import com.exodidio.tune.ui.theme.LocalTuneColors
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.contentOrNull
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.math.sqrt
-
-internal data class PlayerLyricWord(
-    val startMs: Long,
-    val durationMs: Long,
-    val text: String,
-)
-
-internal data class PlayerLyricLine(
-    val primary: String,
-    val secondary: String? = null,
-    val timestampSeconds: Float? = null,
-    val endTimestampSeconds: Float? = null,
-    val words: List<PlayerLyricWord> = emptyList(),
-    /** 开唱前的三连点行：按普通歌词行参与滚动/扫亮/上抬。 */
-    val isCountdown: Boolean = false,
-)
-
-internal data class ParsedPlayerLyrics(
-    val lines: List<PlayerLyricLine>,
-    val firstVocalStartMs: Long? = null,
-)
-
-private val TimestampedLyricLine = Regex("^\\[(\\d+):(\\d+)(?:[.:](\\d+))?\\](.*)$")
-private val LeadingLyricTimestamp = Regex("^\\[(\\d+):(\\d+)(?:[.:](\\d+))?\\]")
-private val BilingualSeparator = Regex("\\s*\\^\\s*|\\s*/\\s*")
-private const val ForwardSeekAnimatedApproachRows = 3
-/** 手动翻动歌词后，静止这么久就回到跟随播放的状态。 */
-private const val BrowseIdleReturnMs = 5_000L
-/** 歌词绘制层满幅到屏幕边，文字内容缩进这段距离。 */
-private val LyricsContentHorizontalInset = 35.dp
-
-/** 歌词字号档位：0 小、1 标准（默认）、2 大。 */
-internal fun lyricFontScale(level: Int): Float = when (level) {
-    0 -> 0.92f
-    1 -> 1f
-    else -> 1.12f
-}
-
-private fun androidx.compose.ui.text.TextStyle.scaledBy(scale: Float): androidx.compose.ui.text.TextStyle =
-    if (scale == 1f) this else copy(fontSize = fontSize * scale, lineHeight = lineHeight * scale)
-
-internal enum class LyricsSeekDirection { Backward, Forward }
-private enum class LyricsScrollMode { Follow, Browse }
-internal fun lyricsSeekDirection(targetIndex: Int, firstVisibleIndex: Int): LyricsSeekDirection =
-    if (targetIndex < firstVisibleIndex) LyricsSeekDirection.Backward else LyricsSeekDirection.Forward
-
-private val TtmlParagraph = Regex("<p[^>]*begin=\"([^\"]+)\"[^>]*>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
-private val TtmlTag = Regex("<[^>]+>")
-
-internal fun parseTtmlTimestamp(value: String): Float? {
-    val v = value.trim()
-    // Formats: HH:MM:SS.mmm, MM:SS.mmm, SS.mmm, with comma or dot
-    val normalized = v.replace(',', '.')
-    val parts = normalized.split(':')
-    return try {
-        when (parts.size) {
-            3 -> parts[0].toFloat() * 3600f + parts[1].toFloat() * 60f + parts[2].toFloat()
-            2 -> parts[0].toFloat() * 60f + parts[1].toFloat()
-            1 -> parts[0].trimEnd('s').toFloat()
-            else -> null
-        }
-    } catch (_: Exception) { null }
-}
-
-internal fun parseTtmlLyrics(content: String): List<PlayerLyricLine> =
-    TtmlParagraph.findAll(content).mapNotNull { match ->
-        val timestamp = parseTtmlTimestamp(match.groupValues[1])
-        val text = match.groupValues[2].replace(TtmlTag, "").replace("&amp;", "&")
-            .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").trim()
-        text.takeIf { it.isNotEmpty() }?.let { parsePlayerLyricText(it, timestamp) }
-    }.toList()
-
-internal fun parsePlayerLyrics(content: String): List<PlayerLyricLine> {
-    val parsed = parsePlayerLyricsInternal(content)
-    val timed = parsed.count { it.timestampSeconds != null }
-    val last = parsed.mapNotNull { it.timestampSeconds }.maxOrNull()
-    System.err.println("LYRPARSE chars=${content.length} lines=${parsed.size} timed=$timed lastTs=$last")
-    if (timed == 0) {
-        System.err.println("LYRPARSE sample=${content.take(160).replace('\n', ' ')}")
-    }
-    return parsed
-}
-
-private val YrcLinePattern = Regex("^\\[(\\d+),(\\d+)\\](.*)$")
-private val YrcWordPattern = Regex("\\((\\d+),(\\d+),(\\d+)\\)([^(]*)")
-private val TimedLinePattern = Regex("^\\[(\\d+):(\\d+(?:[.:]\\d+)?)\\](.*)$")
-private val LyricCreditPattern = Regex(
-    "(?i)^\\s*(作词|作曲|编曲|制作人?|监制|出品|录音|混音|母带|和声|吉他|贝斯|鼓|弦乐|管乐|人声|词|曲|" +
-        "lyricist|composer|arranger|producer|vocals?|mixed|mastered|recorded|guitar|bass|drums)\\b",
-)
-
-/** 解析歌词文本：网易云逐字封装优先，其次普通 LRC。 */
-internal fun parsePlayerLyricsDocument(content: String?): ParsedPlayerLyrics {
-    if (content.isNullOrBlank()) return ParsedPlayerLyrics(emptyList())
-    val envelope = runCatching {
-        if (content.trimStart().startsWith("{") && content.contains("\"tuneLyrics\"")) {
-            kotlinx.serialization.json.Json.parseToJsonElement(content) as? kotlinx.serialization.json.JsonObject
-        } else {
-            null
-        }
-    }.getOrNull()
-    if (envelope != null) {
-        val yrc = envelope["yrc"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
-        if (yrc.isNotBlank()) {
-            val translations = envelopeTimedLines(
-                envelope["ytlrc"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
-                    .ifBlank {
-                        envelope["tlyric"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
-                    },
-            )
-            val lines = parseYrcLines(yrc, translations)
-            if (lines.isNotEmpty()) {
-                return ParsedPlayerLyrics(lines, firstVocalStartMs(lines))
-            }
-        }
-        val fallback = envelope["lrc"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
-        val lines = parsePlayerLyrics(fallback)
-        return ParsedPlayerLyrics(lines, firstVocalStartMs(lines))
-    }
-    val lines = parsePlayerLyrics(content)
-    return ParsedPlayerLyrics(lines, firstVocalStartMs(lines))
-}
-
-private fun envelopeTimedLines(content: String): Map<Long, String> {
-    if (content.isBlank()) return emptyMap()
-    return content.lineSequence().mapNotNull { raw ->
-        val match = TimedLinePattern.find(raw.trim()) ?: return@mapNotNull null
-        val minutes = match.groupValues[1].toLongOrNull() ?: return@mapNotNull null
-        val seconds = match.groupValues[2].toDoubleOrNull() ?: return@mapNotNull null
-        val text = match.groupValues[3].trim()
-        if (text.isBlank()) null else (minutes * 60_000L + (seconds * 1000).toLong()) to text
-    }.toMap()
-}
-
-private fun parseYrcLines(content: String, translations: Map<Long, String>): List<PlayerLyricLine> =
-    content.lineSequence().mapNotNull { raw ->
-        val line = YrcLinePattern.find(raw.trim()) ?: return@mapNotNull null
-        val lineStartMs = line.groupValues[1].toLongOrNull() ?: return@mapNotNull null
-        val lineDurationMs = line.groupValues[2].toLongOrNull() ?: 0L
-        val words = YrcWordPattern.findAll(line.groupValues[3]).mapNotNull { match ->
-            val start = match.groupValues[1].toLongOrNull() ?: return@mapNotNull null
-            val duration = match.groupValues[2].toLongOrNull() ?: 0L
-            val text = match.groupValues[4]
-            if (text.isBlank()) null else PlayerLyricWord(start, duration, text)
-        }.toList()
-        val text = words.joinToString("") { it.text }.trim()
-        if (text.isEmpty() || lineDurationMs <= 0L) return@mapNotNull null
-        PlayerLyricLine(
-            primary = text,
-            secondary = translations[lineStartMs],
-            timestampSeconds = lineStartMs / 1_000f,
-            endTimestampSeconds = (lineStartMs + lineDurationMs) / 1_000f,
-            words = words,
-        )
-    }.toList()
-
-/** 开唱前的三连点行：三个点各占开唱前时长的三分之一。 */
-private fun buildCountdownLine(firstVocalStartMs: Long): PlayerLyricLine {
-    val segmentMs = (firstVocalStartMs / 3L).coerceAtLeast(1L)
-    val words = (0 until 3).map { index ->
-        PlayerLyricWord(
-            startMs = index * segmentMs,
-            durationMs = segmentMs,
-            text = "● ",
-        )
-    }
-    return PlayerLyricLine(
-        primary = "● ● ●",
-        timestampSeconds = 0f,
-        endTimestampSeconds = firstVocalStartMs / 1_000f,
-        words = words,
-        isCountdown = true,
-    )
-}
-
-/** 第一条非制作名单的正文行开始时间。 */
-private fun firstVocalStartMs(lines: List<PlayerLyricLine>): Long? {
-    val candidate = lines.firstOrNull { line ->
-        val start = line.timestampSeconds ?: return@firstOrNull false
-        val end = line.endTimestampSeconds ?: start
-        start > 0f && end > start && LyricCreditPattern.find(line.primary) == null
-    } ?: return null
-    return ((candidate.timestampSeconds ?: 0f) * 1_000f).toLong()
-}
-
-private fun parsePlayerLyricsInternal(content: String): List<PlayerLyricLine> {
-    if (content.contains("<tt", ignoreCase = true) || TtmlParagraph.containsMatchIn(content)) {
-        parseTtmlLyrics(content).takeIf { it.isNotEmpty() }?.let { return it }
-    }
-    return content.lineSequence().flatMap { rawLine ->
-        // 一行可能有多个时间戳（副歌复用），逐个展开。
-        val timestamps = mutableListOf<Float>()
-        var rest = rawLine.trim()
-        while (true) {
-            val match = LeadingLyricTimestamp.find(rest) ?: break
-            if (match.range.first != 0) break
-            timestamps += matchTimestampSeconds(match)
-            rest = rest.substring(match.range.last + 1)
-        }
-        val text = rest.trim()
-        if (text.isEmpty()) emptySequence()
-        else if (timestamps.isEmpty()) sequenceOf(parsePlayerLyricText(text, null))
-        else timestamps.asSequence().map { parsePlayerLyricText(text, it) }
-    }.toList()
-}
-
-private fun matchTimestampSeconds(match: MatchResult): Float {
-    val minutes = match.groupValues[1].toFloatOrNull() ?: 0f
-    val seconds = match.groupValues[2].toFloatOrNull() ?: 0f
-    val fractionText = match.groupValues[3]
-    val fraction = when (fractionText.length) {
-        0 -> 0f
-        1 -> fractionText.toFloatOrNull()?.div(10f)
-        2 -> fractionText.toFloatOrNull()?.div(100f)
-        else -> fractionText.take(3).toFloatOrNull()?.div(1000f)
-    } ?: 0f
-    return minutes * 60f + seconds + fraction
-}
-
-internal fun hasSyncedPlayerLyrics(content: String?): Boolean =
-    content != null && parsePlayerLyricsDocument(content).lines.any { it.timestampSeconds != null }
-
-/** Resume automatic following once playback reaches the tapped lyric or passes it. */
-internal fun shouldResumeLyricsAutoScroll(
-    selectedLineIndex: Int?,
-    activeIndex: Int,
-    activeIndexWhenLineSelected: Int?,
-    selectedLineAnimationComplete: Boolean,
-): Boolean = selectedLineAnimationComplete && selectedLineIndex != null &&
-    activeIndex >= selectedLineIndex && activeIndex != activeIndexWhenLineSelected
-
-/** The active line may advance beyond the visible viewport while the app is backgrounded. */
-internal fun shouldFollowLyricsActiveLine(previousActiveLineInViewport: Boolean, returnedToForeground: Boolean): Boolean =
-    previousActiveLineInViewport || returnedToForeground
-
-/** A repeat/replay restarts the same track near zero without changing its track ID. */
-internal fun shouldResetLyricsForReplay(previousPositionMs: Long, currentPositionMs: Long): Boolean =
-    previousPositionMs > 1_000L && currentPositionMs <= 1_000L
-
-/** Prefer a slider's requested position until playback confirms the seek. */
-internal fun displayedLyricsPositionMs(playbackPositionMs: Long, pendingSeekPositionMs: Long?): Long =
-    pendingSeekPositionMs ?: playbackPositionMs
-
-/** Programmatic lyric positioning must not be interpreted as manual browsing. */
-internal fun shouldEnterLyricsBrowseMode(isUserDragging: Boolean, isFollowingSelectedLine: Boolean = false): Boolean =
-    isUserDragging && !isFollowingSelectedLine
-
-/** Small finger drift on a lyric row is still a seek, not a manual browse. */
-internal fun shouldSeekFromLyricTap(dragDistancePx: Float, tapSlopPx: Float): Boolean = dragDistancePx <= tapSlopPx
-
-internal fun syncedLyricBlurRadius(distance: Int) = when (distance) {
-    0 -> 0.dp
-    1 -> 0.35.dp
-    2 -> 1.25.dp
-    else -> 2.dp
-}
-
-private fun parsePlayerLyricText(text: String, timestampSeconds: Float?): PlayerLyricLine {
-    val parts = BilingualSeparator.split(text, limit = 2)
-    val secondary = parts.getOrNull(1)?.trim()?.takeIf(String::isNotEmpty)
-    return PlayerLyricLine(primary = parts.first().trim(), secondary = secondary, timestampSeconds = timestampSeconds)
-}
 
 @Composable
 internal fun FullScreenPlayerLyricsPanel(
@@ -391,6 +111,7 @@ internal fun FullScreenPlayerLyricsPanel(
     translationVisible: Boolean = true,
     onTranslationToggle: () -> Unit = {},
     springStrength: Float = 170f,
+    browseIdleReturnMs: Long = BrowseIdleReturnMs,
     currentPositionMs: Long,
     pendingSeekPositionMs: Long? = null,
     seekRequestId: Long = 0L,
@@ -413,6 +134,8 @@ internal fun FullScreenPlayerLyricsPanel(
     onSeekInteraction: () -> Unit = {},
     /** 歌词字号档位：0 小、1 标准、2 大。 */
     fontLevel: Int = 1,
+    /** 歌词重力彩蛋：唱完的词条掉到底部堆叠，摇晃散开。 */
+    lyricsGravityEnabled: Boolean = false,
 ) {
     val fontScale = lyricFontScale(fontLevel)
     val parsedDocument = remember(lyrics) { parsePlayerLyricsDocument(lyrics) }
@@ -433,11 +156,16 @@ internal fun FullScreenPlayerLyricsPanel(
     }
     val syncedLines = remember(parsedLines) { parsedLines.filter { it.timestampSeconds != null } }
     val hasTranslation = remember(parsedLines) { parsedLines.any { it.secondary != null } }
+    val lyricOffsets by LyricOffsetStore.offsets.collectAsStateWithLifecycle()
+    val lyricOffsetMs = lyricOffsets[trackId] ?: 0L
+    val effectivePositionMs = (currentPositionMs - lyricOffsetMs).coerceAtLeast(0L)
+    val effectivePendingSeekMs = pendingSeekPositionMs?.let { (it - lyricOffsetMs).coerceAtLeast(0L) }
     // 每次重绘都投最高刷新率：ARR 默认会把无触摸的自动滚动压到 60Hz。
     val view = LocalView.current
     val maxRefreshRate = remember(view) { view.display?.supportedModes?.maxByOrNull { it.refreshRate }?.refreshRate ?: 120f }
     Box(
         modifier = modifier
+            .clipToBounds()
             .preferredFrameRate(maxRefreshRate)
             .pointerInput(Unit) {
                 // 只有没被歌词文字消费的点击才会到这里：行间、短句右侧、上下留白。
@@ -454,20 +182,22 @@ internal fun FullScreenPlayerLyricsPanel(
             syncedLines.isNotEmpty() -> SyncedLyricsList(
                 trackId,
                 syncedLines,
-                currentPositionMs,
-                pendingSeekPositionMs,
+                effectivePositionMs,
+                effectivePendingSeekMs,
                 seekRequestId,
-                onSeek,
+                { lineMs -> onSeek((lineMs + lyricOffsetMs).coerceAtLeast(0L)) },
                 Modifier.fillMaxSize(),
                 translationVisible,
                 isPlaying = isPlaying,
                 springStrength = springStrength,
+                browseIdleReturnMs = browseIdleReturnMs,
                 fullscreen = fullscreen,
                 bottomInsetPx = bottomInsetPx,
                 onShowControls = onShowControls,
                 onHideControls = onHideControls,
                 onSeekInteraction = onSeekInteraction,
                 fontScale = fontScale,
+                lyricsGravityEnabled = lyricsGravityEnabled,
             )
             else -> PlainLyricsList(
                 parsedLines,
@@ -480,20 +210,25 @@ internal fun FullScreenPlayerLyricsPanel(
                 onHideControls = onHideControls,
             )
         }
-        if (!loading && !lyrics.isNullOrBlank() && hasTranslation && translationButtonVisible) {
-            val controlsInsetDp = with(LocalDensity.current) { controlsInsetPx.toDp() }
+        val controlsInsetDp = with(LocalDensity.current) { controlsInsetPx.toDp() }
+        val buttonExtraBottomDp = with(LocalDensity.current) { 25f.toDp() }
+        AnimatedVisibility(
+            visible = !loading && !lyrics.isNullOrBlank() && hasTranslation && translationButtonVisible,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(180)),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(
+                    start = LyricsContentHorizontalInset,
+                    bottom = controlsInsetDp + 12.dp + buttonExtraBottomDp,
+                ),
+        ) {
             TranslationToggle(
                 enabled = translationVisible,
                 onClick = {
                     onInteraction()
                     onTranslationToggle()
                 },
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(
-                        start = LyricsContentHorizontalInset,
-                        bottom = controlsInsetDp + 12.dp + with(LocalDensity.current) { 25f.toDp() },
-                    ),
             )
         }
     }
@@ -558,19 +293,26 @@ private fun SyncedLyricsList(
     translationVisible: Boolean,
     isPlaying: Boolean = true,
     springStrength: Float = 170f,
+    browseIdleReturnMs: Long = BrowseIdleReturnMs,
     fullscreen: Boolean = false,
     bottomInsetPx: Float = 0f,
     fontScale: Float = 1f,
     onShowControls: () -> Unit = {},
     onHideControls: () -> Unit = {},
     onSeekInteraction: () -> Unit = {},
+    lyricsGravityEnabled: Boolean = false,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
+    val view = LocalView.current
+    val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     var viewportHeightPx by remember { mutableIntStateOf(0) }
     var viewportWidthPx by remember { mutableIntStateOf(0) }
     var isUserDragging by remember { mutableStateOf(false) }
+    // 松手后的惯性滚动任务：再次按下必须先取消，否则衰减动画会和拖动抢写 browseScroll。
+    val flingJobState = remember { mutableStateOf<Job?>(null) }
     // 屏幕空间锚点：稳定态由锚点行 Y 决定；换行时用逐行解析弹簧做“后一行追前一行”。
     var anchorIndex by remember(lines) { mutableIntStateOf(0) }
     var anchorScreenY by remember(lines) { mutableFloatStateOf(0f) }
@@ -584,8 +326,9 @@ private fun SyncedLyricsList(
     var transitionStiffness by remember { mutableFloatStateOf(LyricFollowStiffness) }
     // 过渡以屏幕 Y 为状态：行高变化时目标按实时前缀高度重算，切换翻译不会跳。
     var transitionLaunchScreenY by remember(lines) { mutableStateOf<FloatArray?>(null) }
-    // 布局期回填的实测行高；只在主线程布局/事件中读写，不参与重组。
+    // 布局期回填的实测行高与屏幕 Y；只在主线程布局/事件中读写，不参与重组。
     val measuredHeights = remember(lines) { IntArray(lines.size) }
+    val placedScreenYs = remember(lines) { FloatArray(lines.size) }
     val edgeRangePx = with(density) { 60.dp.toPx() }
     val maskPaints = remember { VerticalMaskPaints() }
     val edgeFadeStops = listOf(
@@ -608,7 +351,7 @@ private fun SyncedLyricsList(
     var browseIdleVersion by remember(lines) { mutableLongStateOf(0L) }
     var browseReturnTicket by remember(lines) { mutableLongStateOf(0L) }
     val displayedPositionMs = displayedLyricsPositionMs(currentPositionMs, pendingSeekPositionMs)
-    val lyricClock = rememberLyricClock(displayedPositionMs, isPlaying)
+    val lyricClock = rememberLyricClock(displayedPositionMs, isPlaying, trackKey = trackId)
     val activeIndex = remember(lines, displayedPositionMs) {
         lines.indexOfLast { (it.timestampSeconds ?: Float.MAX_VALUE) <= displayedPositionMs / 1_000f }
     }
@@ -628,7 +371,23 @@ private fun SyncedLyricsList(
     }
     val secondaryBaseStyle = MaterialTheme.typography.bodyLarge
     val secondaryStyle = remember(secondaryBaseStyle, fontScale) { secondaryBaseStyle.scaledBy(fontScale) }
+    val gravityBlockStyle = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
     val textMeasurer = rememberTextMeasurer()
+    val gravitySolver = remember(trackId, density.density) {
+        LyricsGravitySolver(maxBlocks = 56, pixelsPerDp = density.density)
+    }
+    val gravityLayouts = remember(gravitySolver) { HashMap<Long, TextLayoutResult>() }
+    val gravityWakeChannel = remember(gravitySolver) { Channel<Unit>(Channel.CONFLATED) }
+    var gravityRenderVersion by remember(gravitySolver) { mutableIntStateOf(0) }
+    var lastGravityActiveIndex by remember(gravitySolver, lines, lyricsGravityEnabled) {
+        mutableIntStateOf(-1)
+    }
+    var lastSensorGravityX by remember { mutableFloatStateOf(0f) }
+    var lastSensorGravityY by remember { mutableFloatStateOf(Float.NaN) }
+    val latestBottomInsetPx by rememberUpdatedState(bottomInsetPx)
+    val pillPadHPx = with(density) { 12.dp.roundToPx() }
+    val pillPadVPx = with(density) { 6.dp.roundToPx() }
+    val horizInsetPx = with(density) { LyricsContentHorizontalInset.roundToPx() }
     val rowTextWidthPx = with(density) {
         (viewportWidthPx - LyricsContentHorizontalInset.roundToPx() * 2).coerceAtLeast(0)
     }
@@ -687,6 +446,15 @@ private fun SyncedLyricsList(
         val distance = (index - transitionIndex).coerceAtLeast(0)
         val progress = springStepResponse(chaseStiffness(transitionStiffness, distance), transitionElapsedMs / 1_000f)
         return start + (finalScreenY(index) - start) * progress
+    }
+
+    /** 屏幕 Y 落在哪一行：拖动起手时用这一行当锚点，抓取时画面不跳。 */
+    fun rowIndexAtScreenY(y: Float): Int {
+        for (index in lines.indices) {
+            val top = rowScreenYAt(index)
+            if (y < top + measuredHeights.getOrElse(index) { 0 }) return index
+        }
+        return lines.lastIndex.coerceAtLeast(0)
     }
 
     fun finishTransition() {
@@ -791,9 +559,26 @@ private fun SyncedLyricsList(
         scrollMode = LyricsScrollMode.Follow
         anchorIndex = 0
         anchorScreenY = focusScreenY(0)
+        gravitySolver.clear()
+        gravityLayouts.clear()
+        lastGravityActiveIndex = latestActiveIndex
+        gravityRenderVersion += 1
     }
     LaunchedEffect(trackId) {
         resetToStart()
+    }
+    LaunchedEffect(gravitySolver) {
+        if (!lastSensorGravityY.isNaN()) {
+            gravitySolver.setGravity(lastSensorGravityX, lastSensorGravityY)
+        }
+    }
+    LaunchedEffect(lyricsGravityEnabled) {
+        if (!lyricsGravityEnabled) {
+            gravitySolver.clear()
+            gravityLayouts.clear()
+            lastGravityActiveIndex = -1
+            gravityRenderVersion += 1
+        }
     }
     LaunchedEffect(trackId, currentPositionMs) {
         if (shouldResetLyricsForReplay(previousPositionMs, currentPositionMs)) resetToStart()
@@ -850,6 +635,12 @@ private fun SyncedLyricsList(
             // respects browse mode after a previous scroll.
             isBrowsing = false
             selectedLineIndex = null
+            if (lyricsGravityEnabled) {
+                gravitySolver.clear()
+                gravityLayouts.clear()
+                lastGravityActiveIndex = latestActiveIndex
+                gravityRenderVersion += 1
+            }
             animateToActiveLine(activeIndex, LyricSeekStiffness)
             hasPositionedInitialLine = true
             previousActiveIndex = activeIndex
@@ -879,11 +670,12 @@ private fun SyncedLyricsList(
         translationProgress.animateTo(target, tween(durationMillis = 240, easing = FastOutSlowInEasing))
     }
 
-    // 浏览歌词时不再显示当前行、也不跟随；静止 5 秒后回到跟随状态。
-    LaunchedEffect(browseIdleVersion, isBrowsing) {
-        if (!isBrowsing) return@LaunchedEffect
-        delay(BrowseIdleReturnMs)
-        if (!isBrowsing) return@LaunchedEffect
+    // 浏览歌词时不再显示当前行、也不跟随；手指离开后静止设定时长回到跟随状态。
+    // isUserDragging 参与 key：按住期间的计时会被取消，避免手指还在屏上就被切回 Follow。
+    LaunchedEffect(browseIdleVersion, isBrowsing, isUserDragging, browseIdleReturnMs) {
+        if (!isBrowsing || isUserDragging) return@LaunchedEffect
+        delay(browseIdleReturnMs.coerceAtLeast(500L))
+        if (!isBrowsing || isUserDragging) return@LaunchedEffect
         browseReturnTicket += 1
         isBrowsing = false
     }
@@ -942,73 +734,279 @@ private fun SyncedLyricsList(
             isRowVisible(activeIndex)
         ) startFollow(activeIndex, snap = true)
     }
+    LaunchedEffect(activeIndex, lines, lyricsGravityEnabled, gravitySolver, viewportWidthPx, viewportHeightPx) {
+        if (!lyricsGravityEnabled || activeIndex < 0 || viewportWidthPx <= 0 || viewportHeightPx <= 0) return@LaunchedEffect
+        if (lastGravityActiveIndex < 0) {
+            lastGravityActiveIndex = activeIndex
+            return@LaunchedEffect
+        }
+        if (activeIndex > lastGravityActiveIndex) {
+            if (activeIndex - lastGravityActiveIndex <= 2) {
+                val maxTextW = (viewportWidthPx - horizInsetPx * 2 - pillPadHPx * 2).coerceAtLeast(80)
+                val floorHeight = (viewportHeightPx - latestBottomInsetPx).coerceAtLeast(120f)
+                for (idx in lastGravityActiveIndex until activeIndex) {
+                    val line = lines.getOrNull(idx) ?: continue
+                    if (line.isCountdown || line.primary.isBlank()) continue
+                    val layout = textMeasurer.measure(
+                        text = AnnotatedString(line.primary),
+                        style = gravityBlockStyle,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        constraints = Constraints(maxWidth = maxTextW),
+                    )
+                    val pillW = (layout.size.width + pillPadHPx * 2).toFloat().coerceAtLeast(48f)
+                    val pillH = (layout.size.height + pillPadVPx * 2).toFloat().coerceAtLeast(28f)
+                    val maxY = (floorHeight - pillH).coerceAtLeast(0f)
+                    val startY = placedScreenYs.getOrElse(idx) { focusScreenY(idx) }.coerceIn(0f, maxY)
+                    val startX = if (line.alignEnd) {
+                        (viewportWidthPx - horizInsetPx - pillW).coerceAtLeast(8f)
+                    } else {
+                        horizInsetPx.toFloat()
+                    }
+                    gravitySolver.spawnBlock(
+                        lineIndex = idx,
+                        text = line.primary,
+                        startX = startX,
+                        startY = startY,
+                        width = pillW,
+                        height = pillH,
+                        viewportWidth = viewportWidthPx.toFloat(),
+                    )
+                    gravitySolver.blocks.lastOrNull()?.let { spawned ->
+                        gravityLayouts[spawned.id] = layout
+                    }
+                }
+                val activeIds = gravitySolver.blocks.mapTo(HashSet()) { it.id }
+                gravityLayouts.keys.retainAll(activeIds)
+                gravityWakeChannel.trySend(Unit)
+                gravityRenderVersion += 1
+            } else {
+                gravitySolver.clear()
+                gravityLayouts.clear()
+                gravityRenderVersion += 1
+            }
+        } else if (activeIndex < lastGravityActiveIndex) {
+            gravitySolver.clear()
+            gravityLayouts.clear()
+            gravityRenderVersion += 1
+        }
+        lastGravityActiveIndex = activeIndex
+    }
+    LaunchedEffect(bottomInsetPx, gravitySolver, lyricsGravityEnabled, viewportHeightPx) {
+        if (!lyricsGravityEnabled || viewportHeightPx <= 0) return@LaunchedEffect
+        val simHeight = (viewportHeightPx - bottomInsetPx).coerceAtLeast(120f)
+        if (gravitySolver.onFloorBoundsChanging(simHeight)) {
+            gravityWakeChannel.trySend(Unit)
+        }
+    }
+    LaunchedEffect(lyricsGravityEnabled, gravitySolver, viewportWidthPx, viewportHeightPx) {
+        if (!lyricsGravityEnabled || viewportWidthPx <= 0 || viewportHeightPx <= 0) return@LaunchedEffect
+        while (true) {
+            if (!gravitySolver.hasAwakeBlocks()) {
+                gravityWakeChannel.receive()
+                continue
+            }
+            var lastNanos = 0L
+            while (gravitySolver.hasAwakeBlocks()) {
+                withFrameNanos { frameNanos ->
+                    if (lastNanos != 0L) {
+                        val dtSec = (frameNanos - lastNanos) / 1_000_000_000f
+                        val simHeight = (viewportHeightPx - latestBottomInsetPx).coerceAtLeast(120f)
+                        gravitySolver.step(dtSec, viewportWidthPx.toFloat(), simHeight)
+                        gravityRenderVersion += 1
+                    }
+                    lastNanos = frameNanos
+                }
+            }
+        }
+    }
+    DisposableEffect(context, view, lyricsGravityEnabled, reduceMotion, density.density, gravitySolver) {
+        if (!lyricsGravityEnabled || reduceMotion) {
+            return@DisposableEffect onDispose {}
+        }
+        val manager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        if (manager == null) {
+            return@DisposableEffect onDispose {}
+        }
+        val gravitySensor = manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        val linearSensor = manager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        val accelFallback = if (gravitySensor == null) manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) else null
+        if (gravitySensor == null && accelFallback == null) {
+            return@DisposableEffect onDispose {}
+        }
+
+        val fullGravityPx = with(density) { 920.dp.toPx() }
+        var hasLowPassGravity = false
+        var lpGx = 0f
+        var lpGy = 9.81f
+        var lastLinearEventNs = 0L
+        var lastHapticAtMs = 0L
+
+        fun toScreenAxes(sx: Float, sy: Float): Pair<Float, Float> {
+            return when (view.display?.rotation ?: Surface.ROTATION_0) {
+                Surface.ROTATION_90 -> sy to -sx
+                Surface.ROTATION_180 -> sx to -sy
+                Surface.ROTATION_270 -> -sy to sx
+                else -> -sx to sy
+            }
+        }
+
+        fun updateGravityFromSensor(rawGx: Float, rawGy: Float) {
+            val (screenGx, screenGy) = toScreenAxes(rawGx, rawGy)
+            val planeMag = hypot(screenGx, screenGy)
+            // When laid nearly flat on a table (< ~9°), blend a gentle downward component so lines still drift to the bottom.
+            val flatFactor = ((1.6f - planeMag) / 1.6f).coerceIn(0f, 1f)
+            val effectiveGy = screenGy + flatFactor * 2.8f
+            val gxPx = (screenGx / 9.81f) * fullGravityPx
+            val gyPx = (effectiveGy / 9.81f) * fullGravityPx
+            lastSensorGravityX = gxPx
+            lastSensorGravityY = gyPx
+            val wasAwake = gravitySolver.hasAwakeBlocks()
+            gravitySolver.setGravity(axPxPerSec2 = gxPx, ayPxPerSec2 = gyPx)
+            if (!wasAwake && gravitySolver.hasAwakeBlocks()) {
+                gravityWakeChannel.trySend(Unit)
+            }
+        }
+
+        fun applyLinearAccelerationSample(rawAx: Float, rawAy: Float, timestampNs: Long) {
+            if (gravitySolver.blocks.isEmpty()) {
+                lastLinearEventNs = timestampNs
+                return
+            }
+            val (screenAx, screenAy) = toScreenAxes(rawAx, rawAy)
+            val linMag = hypot(screenAx, screenAy)
+            val dtSensor = if (lastLinearEventNs != 0L) {
+                ((timestampNs - lastLinearEventNs) / 1_000_000_000f).coerceIn(0.005f, 0.035f)
+            } else {
+                0.02f
+            }
+            lastLinearEventNs = timestampNs
+            if (linMag <= 1.45f) return
+
+            val excessScale = (linMag - 1.45f) / linMag
+            val impulseScale = (fullGravityPx / 9.81f) * 1.45f * dtSensor * excessScale
+            val angNoise = if (linMag > 8.0f) ((linMag - 8.0f) * 0.25f).coerceAtMost(4.5f) else 0f
+            val wasAwake = gravitySolver.hasAwakeBlocks()
+            gravitySolver.applyLinearImpulse(
+                dvxPxPerSec = screenAx * impulseScale,
+                dvyPxPerSec = screenAy * impulseScale,
+                angularNoiseFactor = angNoise,
+            )
+            if (!wasAwake && gravitySolver.hasAwakeBlocks()) {
+                gravityWakeChannel.trySend(Unit)
+            }
+            if (linMag > 14f) {
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                if (nowMs - lastHapticAtMs > 420L) {
+                    lastHapticAtMs = nowMs
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                }
+            }
+        }
+
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                when (event.sensor.type) {
+                    Sensor.TYPE_GRAVITY -> {
+                        updateGravityFromSensor(event.values[0], event.values[1])
+                    }
+                    Sensor.TYPE_LINEAR_ACCELERATION -> {
+                        applyLinearAccelerationSample(event.values[0], event.values[1], event.timestamp)
+                    }
+                    Sensor.TYPE_ACCELEROMETER -> {
+                        val ax = event.values[0]
+                        val ay = event.values[1]
+                        if (!hasLowPassGravity) {
+                            lpGx = ax
+                            lpGy = ay
+                            hasLowPassGravity = true
+                        } else {
+                            val alpha = 0.82f
+                            lpGx = alpha * lpGx + (1f - alpha) * ax
+                            lpGy = alpha * lpGy + (1f - alpha) * ay
+                        }
+                        updateGravityFromSensor(lpGx, lpGy)
+                        applyLinearAccelerationSample(ax - lpGx, ay - lpGy, event.timestamp)
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+        if (gravitySensor != null) {
+            manager.registerListener(listener, gravitySensor, SensorManager.SENSOR_DELAY_GAME)
+            if (linearSensor != null) {
+                manager.registerListener(listener, linearSensor, SensorManager.SENSOR_DELAY_GAME)
+            }
+        } else {
+            manager.registerListener(listener, accelFallback, SensorManager.SENSOR_DELAY_GAME)
+        }
+        onDispose {
+            manager.unregisterListener(listener)
+        }
+    }
     Box(
         modifier = modifier
+            .clipToBounds()
             .onSizeChanged {
                 viewportHeightPx = it.height
                 viewportWidthPx = it.width
             }
             .pointerInput(lines) {
                 val velocityTracker = VelocityTracker()
-                val directionStepPx = with(density) { 12.dp.toPx() }
-                var lastVerticalSign = 0
-                var verticalRunPx = 0f
-                var lastTriggeredSign = 0
+                val directionGate = density.lyricsDirectionGate()
                 detectVerticalDragGestures(
-                    onDragStart = {
+                    onDragStart = { startOffset ->
                         isUserDragging = true
                         isBrowsing = true
                         browseIdleVersion += 1
+                        flingJobState.value?.cancel()
+                        // 先按起手位置那一行的当前画面坐标取滚动量，再收尾过渡；
+                        // 否则拿到的是过渡终点，列表会瞬跳一下。
+                        val grabRow = rowIndexAtScreenY(startOffset.y)
+                        browseScroll = clampScroll(prefixTop(grabRow) - rowScreenYAt(grabRow))
                         finishTransition()
-                        browseScroll = currentScroll()
                         scrollMode = LyricsScrollMode.Browse
                         followCompletedRun = followRunId
-                        lastVerticalSign = 0
-                        verticalRunPx = 0f
-                        lastTriggeredSign = 0
+                        directionGate.reset()
                         velocityTracker.resetTracking()
                     },
                     onDragEnd = {
                         isUserDragging = false
                         val velocity = velocityTracker.calculateVelocity().y
-                        scope.launch { flingOffset(velocity) }
+                        flingJobState.value = scope.launch { flingOffset(velocity) }
                     },
                     onDragCancel = { isUserDragging = false },
                 ) { change, dragAmount ->
                     change.consume()
                     velocityTracker.addPosition(change.uptimeMillis, change.position)
-                    // 同一组触摸不抬手时，每次换向累计到阈值都重新响应：
+                    // 同一组触摸不抬手时，每次真实换向都重新响应：
                     // 手指下滑（上翻）→ 唤出控件；手指上滑（下翻）→ 隐藏控件、进入全屏。
-                    val sign = if (dragAmount > 0f) 1 else if (dragAmount < 0f) -1 else 0
-                    if (sign != 0) {
-                        if (sign != lastVerticalSign) {
-                            lastVerticalSign = sign
-                            verticalRunPx = 0f
-                        }
-                        verticalRunPx += abs(dragAmount)
-                        if (verticalRunPx >= directionStepPx && lastTriggeredSign != sign) {
-                            lastTriggeredSign = sign
-                            verticalRunPx = 0f
-                            if (sign > 0) onShowControls() else onHideControls()
-                        }
+                    when (directionGate.onDrag(change.position.y, dragAmount, change.uptimeMillis)) {
+                        1 -> onShowControls()
+                        -1 -> onHideControls()
                     }
                     browseScroll = clampScroll(browseScroll - dragAmount)
                 }
-            }
-            .drawWithContent {
-            val cutoff = (size.height - bottomInsetPx).coerceIn(0f, size.height)
-            drawLyricsEdgeFade(
-                bottomCutoff = cutoff,
-                edgeRange = edgeRangePx,
-                edgeFadeStops = edgeFadeStops,
-                maskPaints = maskPaints,
-            ) {
-                // 截止线以下硬裁切：超长当前行也不会透到控件区。
-                clipRect(bottom = cutoff) { this@drawWithContent.drawContent() }
-            }
-        },
+            },
         contentAlignment = Alignment.TopStart,
     ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithContent {
+                    val cutoff = (size.height - bottomInsetPx).coerceIn(0f, size.height)
+                    drawLyricsEdgeFade(
+                        bottomCutoff = cutoff,
+                        edgeRange = edgeRangePx,
+                        edgeFadeStops = edgeFadeStops,
+                        maskPaints = maskPaints,
+                    ) {
+                        // 顶部与截止线以下硬裁切：滚出顶部和超长当前行都不越界绘制。
+                        clipRect(top = 0f, bottom = cutoff) { this@drawWithContent.drawContent() }
+                    }
+                },
+        ) {
         Layout(
             modifier = Modifier
                 .fillMaxSize()
@@ -1025,8 +1023,15 @@ private fun SyncedLyricsList(
                         textWidthPx = rowTextWidthPx,
                         distance = if (activeIndex >= 0) abs(index - activeIndex) else Int.MAX_VALUE,
                         fontScale = fontScale,
+                        hiddenAsFallen = lyricsGravityEnabled && activeIndex >= 0 && index < activeIndex,
                         onClick = {
-                            if (!line.isCountdown) {
+                            if (!line.isCountdown && isLyricRowClickableWithinViewport(
+                                    rowTopY = placedScreenYs.getOrElse(index) { 0f },
+                                    rowHeightPx = measuredHeights.getOrElse(index) { 0 },
+                                    viewportHeightPx = viewportHeightPx,
+                                    bottomInsetPx = bottomInsetPx,
+                                )
+                            ) {
                                 isBrowsing = false
                                 activeIndexWhenLineSelected = activeIndex
                                 selectedLineAnimationComplete = false
@@ -1074,468 +1079,55 @@ private fun SyncedLyricsList(
                     } else {
                         topInsetPx + top - baseScroll
                     }
-                    placeable.place(insetPx, screenY.roundToInt())
+                    // 对唱行靠右：按实测宽度补左偏移，未分边的行仍在左侧。
+                    val x = insetPx + if (lines[index].alignEnd) (childWidth - placeable.width) else 0
+                    if (index in placedScreenYs.indices) placedScreenYs[index] = screenY
+                    placeable.place(x, screenY.roundToInt())
                     top += heights[index]
                 }
             }
         }
-    }
-}
-
-/** 播放位置插值时钟：200ms 的进度 tick 之间按帧补齐，暂停即冻结。 */
-@Composable
-private fun rememberLyricClock(positionMs: Long, isPlaying: Boolean): androidx.compose.runtime.State<Long> {
-    val state = remember { mutableLongStateOf(positionMs) }
-    val latestPosition by rememberUpdatedState(positionMs)
-    val latestPlaying by rememberUpdatedState(isPlaying)
-    // 常驻单循环：200ms tick 只更新基准，不重启循环，避免每秒周期性掉帧。
-    LaunchedEffect(Unit) {
-        var base = latestPosition
-        var startedAtFrame = withFrameNanos { it }
-        while (true) {
-            val frame = withFrameNanos { it }
-            val playing = latestPlaying
-            val tick = latestPosition
-            if (!playing) {
-                state.longValue = tick
-                base = tick
-                startedAtFrame = frame
-                continue
-            }
-            if (tick != base) {
-                base = tick
-                startedAtFrame = frame
-            }
-            state.longValue = base + (frame - startedAtFrame) / 1_000_000L
         }
-    }
-    return state
-}
-
-/** 当前行的逐字扫亮 + 逐段上抬；字形预生成位图，逐帧只做 GPU 合成。 */
-@Composable
-private fun WordKaraokeLine(
-    words: List<PlayerLyricWord>,
-    clock: androidx.compose.runtime.State<Long>,
-    style: androidx.compose.ui.text.TextStyle,
-    color: Color,
-    rowAlpha: Float,
-    maxWidthPx: Int,
-) {
-    val textMeasurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    val layout = remember(words, style, maxWidthPx, textMeasurer) {
-        layoutKaraokeWords(words, style, maxWidthPx, textMeasurer, density)
-    }
-    val liftPx = with(density) { 1.5.dp.toPx() }
-    Canvas(
-        Modifier
-            .fillMaxWidth()
-            .height(with(density) { layout.heightPx.toDp() }),
-    ) {
-        val positionMs = clock.value
-        val native = drawContext.canvas.nativeCanvas
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            isFilterBitmap = true
-            this.color = android.graphics.Color.WHITE
-        }
-        layout.items.forEachIndexed { index, item ->
-            val duration = item.durationMs.coerceAtLeast(1L)
-            val fillProgress = ((positionMs - item.word.startMs).toFloat() / duration).coerceIn(0f, 1f)
-            // AMLL 参数：上浮动效时长独立于字时长，最短 1000ms，再乘 1.4。
-            val liftDuration = (maxOf(1_000f, duration.toFloat()) * 1.4f).coerceAtLeast(1f)
-            val liftProgress = ((positionMs - item.word.startMs).toFloat() / liftDuration).coerceIn(0f, 1f)
-            // 0.05em 终值 + sin 中段额外抬升，形成 Apple 的“快起、轻顶、落定”。
-            val liftFactor = (liftProgress + sin(Math.PI.toFloat() * liftProgress)).coerceIn(0f, 2f)
-            val liftedTop = item.top - liftPx * liftFactor
-            val dimAlpha = (255 * rowAlpha * 0.26f).roundToInt().coerceIn(0, 255)
-            val brightAlpha = (255 * rowAlpha).roundToInt().coerceIn(0, 255)
-            if (positionMs < item.word.startMs) {
-                paint.alpha = dimAlpha
-                native.drawBitmap(item.bitmap, item.x, item.top, paint)
-                return@forEachIndexed
-            }
-            paint.alpha = dimAlpha
-            native.drawBitmap(item.bitmap, item.x, liftedTop, paint)
-            if (fillProgress >= 1f) {
-                paint.alpha = brightAlpha
-                native.drawBitmap(item.bitmap, item.x, liftedTop, paint)
-                return@forEachIndexed
-            }
-            // 真渐变遮罩：渐变宽度 = 0.5 × 词高，以扫过位置为中心，左亮右暗。
-            val fadeWidth = (item.height * 0.5f).coerceAtLeast(1f)
-            val sweepX = item.x + item.width * fillProgress
-            val fadeStart = sweepX - fadeWidth * 0.5f
-            val fadeEnd = sweepX + fadeWidth * 0.5f
-            val layer = native.saveLayer(item.x, liftedTop, item.x + item.width, liftedTop + item.height, null)
-            paint.alpha = brightAlpha
-            native.drawBitmap(item.bitmap, item.x, liftedTop, paint)
-            val startFraction = ((fadeStart - item.x) / item.width).coerceIn(0f, 1f)
-            val endFraction = ((fadeEnd - item.x) / item.width).coerceIn(0f, 1f)
-            if (endFraction > startFraction) {
-                val maskPaint = android.graphics.Paint().apply {
-                    xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
-                    shader = android.graphics.LinearGradient(
-                        item.x,
-                        0f,
-                        item.x + item.width,
-                        0f,
-                        intArrayOf(0xFFFFFFFF.toInt(), 0xFFFFFFFF.toInt(), 0x00FFFFFF, 0x00FFFFFF),
-                        floatArrayOf(0f, startFraction, endFraction, 1f),
-                        android.graphics.Shader.TileMode.CLAMP,
-                    )
-                }
-                native.drawRect(item.x, liftedTop, item.x + item.width, liftedTop + item.height, maskPaint)
-            }
-            native.restoreToCount(layer)
-            // 跨词光晕：下一词左侧一小段按当前词尾进度提前透出。
-            val next = layout.items.getOrNull(index + 1)
-            if (next != null && fillProgress > 0.55f) {
-                val bleed = ((fillProgress - 0.55f) / 0.45f).coerceIn(0f, 1f)
-                paint.alpha = (brightAlpha * 0.28f * bleed).roundToInt().coerceIn(0, 255)
-                val bleedWidth = (next.height * 0.5f * 0.6f).coerceAtLeast(1f)
-                val save = native.save()
-                native.clipRect(next.x, next.top, next.x + bleedWidth, next.top + next.height)
-                native.drawBitmap(next.bitmap, next.x, next.top, paint)
-                native.restoreToCount(save)
-            }
-        }
-    }
-}
-
-private data class KaraokeWordItem(
-    val word: PlayerLyricWord,
-    val bitmap: android.graphics.Bitmap,
-    val x: Float,
-    val top: Float,
-    val width: Float,
-    val height: Float,
-    /** 有效时长：优先用 yrc 给的字时长，缺失时用与下一段的间隔做平均速度。 */
-    val durationMs: Long,
-)
-
-private data class KaraokeWordLayout(val items: List<KaraokeWordItem>, val heightPx: Int)
-
-private fun layoutKaraokeWords(
-    words: List<PlayerLyricWord>,
-    style: androidx.compose.ui.text.TextStyle,
-    maxWidthPx: Int,
-    measurer: androidx.compose.ui.text.TextMeasurer,
-    density: androidx.compose.ui.unit.Density,
-): KaraokeWordLayout {
-    val lineHeightPx = with(density) { style.lineHeight.toPx() }
-    val width = maxWidthPx.coerceAtLeast(1)
-    var x = 0f
-    var lineTop = 0f
-    val items = ArrayList<KaraokeWordItem>(words.size)
-    words.forEachIndexed { index, word ->
-        val result = measurer.measure(
-            AnnotatedString(word.text),
-            style = style.copy(fontWeight = FontWeight.Bold, color = Color.White),
-            constraints = Constraints(maxWidth = width),
-        )
-        val wordWidth = result.size.width.toFloat()
-        if (x > 0f && x + wordWidth > width) {
-            x = 0f
-            lineTop += lineHeightPx
-        }
-        val wordHeight = result.size.height.toFloat()
-        val imageBitmap = androidx.compose.ui.graphics.ImageBitmap(
-            result.size.width.coerceAtLeast(1),
-            result.size.height.coerceAtLeast(1),
-        )
-        result.multiParagraph.paint(androidx.compose.ui.graphics.Canvas(imageBitmap))
-        val bitmap = imageBitmap.asAndroidBitmap()
-        val nextStart = words.getOrNull(index + 1)?.startMs
-        val effectiveDuration = word.durationMs.takeIf { it > 0L }
-            ?: nextStart?.let { (it - word.startMs).coerceAtLeast(1L) }
-            ?: 1L
-        items += KaraokeWordItem(
-            word = word,
-            bitmap = bitmap,
-            x = x,
-            top = lineTop + (lineHeightPx - wordHeight) / 2f,
-            width = wordWidth,
-            height = wordHeight,
-            durationMs = effectiveDuration,
-        )
-        x += wordWidth
-    }
-    return KaraokeWordLayout(items, (lineTop + lineHeightPx).roundToInt().coerceAtLeast(1))
-}
-
-private fun smoothStep(value: Float): Float {
-    val v = value.coerceIn(0f, 1f)
-    return v * v * (3f - 2f * v)
-}
-
-/** 快起慢停的 easing：抬升更有弹性，但保持单调不过冲。 */
-private fun easeOutCubic(value: Float): Float {
-    val v = value.coerceIn(0f, 1f)
-    val inv = 1f - v
-    return 1f - inv * inv * inv
-}
-
-/** 歌词容器：不模糊，只对内容做顶部/底部竖直渐隐。 */
-private class VerticalMaskPaints {
-    private var geometryKey: String = ""
-    private val paints = mutableMapOf<String, android.graphics.Paint>()
-
-    fun paint(tag: String, geometryKey: String, build: () -> android.graphics.Paint): android.graphics.Paint {
-        if (this.geometryKey != geometryKey) {
-            paints.clear()
-            this.geometryKey = geometryKey
-        }
-        return paints.getOrPut(tag, build)
-    }
-}
-
-private fun DrawScope.drawLyricsEdgeFade(
-    bottomCutoff: Float,
-    edgeRange: Float,
-    edgeFadeStops: List<Pair<Float, Float>>,
-    maskPaints: VerticalMaskPaints,
-    content: DrawScope.() -> Unit,
-) {
-    val w = size.width
-    val h = size.height
-    if (w <= 0f || h <= 0f) {
-        content()
-        return
-    }
-    val native = drawContext.canvas.nativeCanvas
-    val full = Rect(0f, 0f, w, h)
-    val cutoff = bottomCutoff.coerceIn(0f, h)
-    val range = edgeRange.coerceAtLeast(1f)
-    val geometryKey = "${w}x${h}x${cutoff}x${range}"
-
-    fun top(stops: List<Pair<Float, Float>>) =
-        stops.map { (d, a) -> (d * range) to a }.sortedBy { it.first }
-    fun bottom(stops: List<Pair<Float, Float>>) =
-        stops.map { (d, a) -> (cutoff - d * range) to a }.sortedBy { it.first }
-
-    native.saveLayer(0f, 0f, w, h, null)
-    content()
-    drawVerticalAlphaMask(full, "fade-top", top(edgeFadeStops), geometryKey, maskPaints)
-    drawVerticalAlphaMask(full, "fade-bottom", bottom(edgeFadeStops), geometryKey, maskPaints)
-    native.restore()
-}
-
-/** 用一个竖直 alpha 渐变遮住当前层的指定区域（DstIn）；Paint/Shader 按几何尺寸缓存复用。 */
-private fun DrawScope.drawVerticalAlphaMask(
-    bounds: Rect,
-    tag: String,
-    stops: List<Pair<Float, Float>>,
-    geometryKey: String,
-    maskPaints: VerticalMaskPaints,
-) {
-    if (stops.size < 2) return
-    val firstY = stops.first().first
-    val lastY = stops.last().first
-    if (lastY - firstY <= 0.5f) return
-    val paint = maskPaints.paint(tag, geometryKey) {
-        val colors = stops.map { (_, alpha) ->
-            ((alpha.coerceIn(0f, 1f) * 255f).roundToInt() shl 24) or 0x00FFFFFF
-        }.toIntArray()
-        val positions = stops.map { (y, _) -> ((y - firstY) / (lastY - firstY)).coerceIn(0f, 1f) }.toFloatArray()
-        android.graphics.Paint().apply {
-            isAntiAlias = false
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-            shader = android.graphics.LinearGradient(
-                0f, firstY, 0f, lastY,
-                colors, positions, android.graphics.Shader.TileMode.CLAMP,
-            )
-        }
-    }
-    drawContext.canvas.nativeCanvas.drawRect(bounds.left, bounds.top, bounds.right, bounds.bottom, paint)
-}
-
-/** 跟随滚动刚度：屏幕锚点向焦点做临界阻尼弹簧（单调不过冲）。 */
-private const val LyricFollowStiffness = 90f
-/** 拖动/点按跳转回位用更软的刚度（AMLL seek 参数）。 */
-private const val LyricSeekStiffness = 90f
-/** 三连点字号系数：约为普通歌词字号的 0.8，视觉直径约为原始小点的 3 倍。 */
-private const val KaraokeDotScale = 0.8f
-/** 逐行跟随的刚度衰减：越靠后的行越软，形成“后一行追前一行”的滞后感。 */
-private val LyricChaseFactors = floatArrayOf(1f, 0.55f, 0.35f, 0.24f, 0.18f, 0.15f)
-
-private fun chaseStiffness(base: Float, distance: Int): Float =
-    base * LyricChaseFactors[distance.coerceIn(0, LyricChaseFactors.lastIndex)]
-
-/** 临界阻尼弹簧的阶跃响应（AMLL 阻尼：c = 2.2×√k，即 ζ=1.1，略过阻尼、不回弹）。 */
-private fun springStepResponse(stiffness: Float, seconds: Float): Float {
-    if (seconds <= 0f) return 0f
-    val omega = sqrt(stiffness)
-    val zeta = 1.1f
-    val decay = kotlin.math.exp(-zeta * omega * seconds)
-    val damped = omega * sqrt(zeta * zeta - 1f)
-    return 1f - decay * (
-        kotlin.math.cosh(damped * seconds) +
-            (zeta * omega / damped) * kotlin.math.sinh(damped * seconds)
-        )
-}
-/** 拖尾涉及的最大行数：越远滞后越大。 */
-private const val LyricTrailMaxRows = 6
-
-@Composable
-private fun SyncedLyricRow(
-    line: PlayerLyricLine,
-    fullscreen: Boolean = false,
-    translationProgress: () -> Float,
-    translationHeightPx: Int,
-    words: List<PlayerLyricWord> = emptyList(),
-    clock: androidx.compose.runtime.State<Long>? = null,
-    textWidthPx: Int = 0,
-    distance: Int,
-    onClick: () -> Unit,
-    fontScale: Float = 1f,
-) {
-    val colors = LocalTuneColors.current
-    // The pointer coroutine remains alive across playback-position and track
-    // recompositions. Read the newest callback when a tap finishes so it
-    // cannot dispatch through the callback captured for an earlier track.
-    val latestOnClick = rememberUpdatedState(onClick)
-    // 浏览态也保持“当前行高亮、其余按距离变淡”的正常显示。
-    val targetOpacity = when (distance) {
-        0 -> 1f
-        1 -> 0.25f
-        2 -> 0.15f
-        else -> 0.10f
-    }
-    // 弹簧而非固定时长：越远的行刚度越低，淡入/淡出自然错峰。
-    val effectSpring = remember(distance) {
-        spring<Float>(
-            stiffness = (240f - distance.coerceIn(0, LyricTrailMaxRows) * 35f).coerceAtLeast(130f),
-            dampingRatio = 1f,
-        )
-    }
-    val activeSpring = remember { spring<Float>(stiffness = 160f, dampingRatio = 1f) }
-    val primaryBase = if (fullscreen) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.headlineSmall
-    // 三连点行把点当作一个字：字号放大，点直径约为普通字号的 3 倍视觉大小。
-    val linePrimaryBase = if (line.isCountdown) {
-        primaryBase.copy(
-            fontSize = primaryBase.fontSize * KaraokeDotScale,
-            lineHeight = primaryBase.lineHeight * KaraokeDotScale,
-        )
-    } else {
-        primaryBase
-    }
-    val primaryStyle = remember(linePrimaryBase, fontScale) { linePrimaryBase.scaledBy(fontScale) }
-    val secondaryBase = MaterialTheme.typography.bodyLarge
-    val secondaryStyle = remember(secondaryBase, fontScale) { secondaryBase.scaledBy(fontScale) }
-    val density = LocalDensity.current
-    val opacity by animateFloatAsState(targetOpacity, effectSpring, label = "synced-lyric-opacity")
-    val scale by animateFloatAsState(if (distance == 0) 1.07f else 1f, activeSpring, label = "synced-lyric-scale")
-    val activeOffsetPx = with(density) { 6.dp.toPx() }
-    val animatedTranslationY by animateFloatAsState(
-        if (distance == 0) -activeOffsetPx else 0f,
-        activeSpring,
-        label = "synced-lyric-offset",
-    )
-    // 追随/拖尾位移全部由列表的布局统一计算，行本身只负责颜色、缩放与点击。
-    val lyricInteractionSource = remember { MutableInteractionSource() }
-    Column(
-        modifier = Modifier
-            // 宽度只包住文字：短句右侧的留白不属于歌词行，点那里由容器唤出控件。
-            .wrapContentWidth(Alignment.Start)
-            // Reserve room for active-line scaling without changing wrapping
-            // only when the active state changes.
-            .padding(top = 10.dp, bottom = 10.dp)
-            // 只有文字本身可点：行间、短句右侧与上下留白留给容器。
-            .clickable(
-                interactionSource = lyricInteractionSource,
-                indication = null,
-                role = Role.Button,
-            ) { latestOnClick.value() }
-            // Transform after text layout so the active line grows subtly
-            // without changing its wrapping or displacing adjacent lyrics.
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationY = animatedTranslationY
-                transformOrigin = TransformOrigin(0f, 0.5f)
-                clip = false
-            }
-            .testTag("synced_lyric_${line.timestampSeconds}"),
-    ) {
-        if (distance == 0 && line.words.isNotEmpty() && clock != null && textWidthPx > 0) {
-            WordKaraokeLine(
-                words = line.words,
-                clock = clock,
-                style = primaryStyle,
-                color = colors.onPrimary,
-                rowAlpha = opacity,
-                maxWidthPx = textWidthPx,
-            )
-        } else {
-            Text(
-                text = line.primary,
-                color = colors.onPrimary.copy(alpha = opacity),
-                style = primaryStyle,
-                // Keep glyph metrics stable when the line becomes active; changing
-                // weight here would re-wrap the same text during scale animation.
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        val translation = line.secondary
-        if (translation != null) {
-            val fullHeightPx = (translationHeightPx + with(density) { 4.dp.roundToPx() }).coerceAtLeast(0)
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    // 行高在布局阶段读取进度：整列不会因为每一帧的进度变化而重组。
-                    .layout { measurable, constraints ->
-                        val height = (fullHeightPx * translationProgress()).roundToInt().coerceIn(0, fullHeightPx)
-                        val placeable = measurable.measure(
-                            Constraints.fixed(constraints.maxWidth, height),
+        if (lyricsGravityEnabled) {
+            val colors = LocalTuneColors.current
+            val blockBgColor = colors.glassElevated.copy(alpha = 0.78f)
+            val blockBorderColor = colors.borderGlass
+            val blockTextColor = colors.onPrimary.copy(alpha = 0.92f)
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                @Suppress("UNUSED_EXPRESSION")
+                gravityRenderVersion
+                val blocks = gravitySolver.blocks
+                for (block in blocks) {
+                    val layout = gravityLayouts[block.id] ?: continue
+                    val cx = block.x + block.width / 2f
+                    val cy = block.y + block.height / 2f
+                    withTransform({
+                        rotate(degrees = block.angleDeg, pivot = Offset(cx, cy))
+                    }) {
+                        val radius = CornerRadius(14.dp.toPx(), 14.dp.toPx())
+                        drawRoundRect(
+                            color = blockBgColor,
+                            topLeft = Offset(block.x, block.y),
+                            size = Size(block.width, block.height),
+                            cornerRadius = radius,
                         )
-                        layout(placeable.width, height) { placeable.place(0, 0) }
-                    }
-                    .clipToBounds(),
-            ) {
-                Text(
-                    text = translation,
-                    color = colors.foregroundSubtle,
-                    style = secondaryStyle,
-                    modifier = Modifier
-                        .padding(top = 4.dp)
-                        .graphicsLayer { alpha = translationProgress() * opacity },
-                )
-            }
-        }
-    }
-}
-
-/** 纯文本歌词没有自己的拖动处理，用不消费事件的观察器实现同样的方向手势。 */
-private fun Modifier.lyricsOverlayDirections(
-    stepPx: Float,
-    onPullDown: () -> Unit,
-    onPullUp: () -> Unit,
-): Modifier = pointerInput(stepPx) {
-    awaitPointerEventScope {
-        while (true) {
-            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            var lastSign = 0
-            var runPx = 0f
-            var lastTriggered = 0
-            while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                val dy = change.position.y - change.previousPosition.y
-                val sign = if (dy > 0f) 1 else if (dy < 0f) -1 else 0
-                if (sign != 0) {
-                    if (sign != lastSign) {
-                        lastSign = sign
-                        runPx = 0f
-                    }
-                    runPx += abs(dy)
-                    if (runPx >= stepPx && lastTriggered != sign) {
-                        lastTriggered = sign
-                        runPx = 0f
-                        if (sign > 0) onPullDown() else onPullUp()
+                        drawRoundRect(
+                            color = blockBorderColor,
+                            topLeft = Offset(block.x, block.y),
+                            size = Size(block.width, block.height),
+                            cornerRadius = radius,
+                            style = Stroke(width = 0.8.dp.toPx()),
+                        )
+                        drawText(
+                            textLayoutResult = layout,
+                            color = blockTextColor,
+                            topLeft = Offset(
+                                block.x + pillPadHPx,
+                                block.y + (block.height - layout.size.height) / 2f,
+                            ),
+                        )
                     }
                 }
-                if (!change.pressed) break
             }
         }
     }
@@ -1555,7 +1147,7 @@ private fun PlainLyricsList(
     val colors = LocalTuneColors.current
     val reduceMotion = LocalReduceMotion.current
     val density = LocalDensity.current
-    val directionStepPx = with(density) { 12.dp.toPx() }
+    val directionGate = remember(density) { density.lyricsDirectionGate() }
     val edgeRangePx = with(density) { 60.dp.toPx() }
     val maskPaints = remember { VerticalMaskPaints() }
     val edgeFadeStops = listOf(
@@ -1577,8 +1169,9 @@ private fun PlainLyricsList(
     val exit = if (reduceMotion) fadeOut(tween(0)) else fadeOut(tween(140)) + shrinkVertically(tween(200))
     Box(
         modifier = modifier
+            .clipToBounds()
             .lyricsOverlayDirections(
-                stepPx = directionStepPx,
+                gate = directionGate,
                 onPullDown = onShowControls,
                 onPullUp = onHideControls,
             )
@@ -1590,7 +1183,7 @@ private fun PlainLyricsList(
                     edgeFadeStops = edgeFadeStops,
                     maskPaints = maskPaints,
                 ) {
-                    clipRect(bottom = cutoff) { this@drawWithContent.drawContent() }
+                    clipRect(top = 0f, bottom = cutoff) { this@drawWithContent.drawContent() }
                 }
             },
     ) {
@@ -1631,4 +1224,16 @@ private fun LyricsEmptyState(modifier: Modifier) {
         style = MaterialTheme.typography.bodyLarge,
         modifier = modifier.padding(top = 24.dp),
     )
+}
+
+internal fun isLyricRowClickableWithinViewport(
+    rowTopY: Float,
+    rowHeightPx: Int,
+    viewportHeightPx: Int,
+    bottomInsetPx: Float,
+): Boolean {
+    if (rowHeightPx <= 0 || viewportHeightPx <= 0) return false
+    val cutoff = (viewportHeightPx.toFloat() - bottomInsetPx).coerceIn(0f, viewportHeightPx.toFloat())
+    val rowBottomY = rowTopY + rowHeightPx.toFloat()
+    return rowBottomY > 0f && rowTopY < cutoff
 }

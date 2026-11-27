@@ -27,6 +27,8 @@ import com.exodidio.tune.sync.LibraryTrack
 import com.exodidio.tune.sync.PlaylistMutation
 import com.exodidio.tune.sync.PlaylistMutationOperation
 import com.exodidio.tune.sync.PlaylistMutationPayload
+import com.exodidio.tune.library.SmartPlaylistEngine
+import com.exodidio.tune.library.SmartPlaylistSpec
 import com.exodidio.tune.library.stagePlaylistArtwork
 import com.exodidio.tune.netease.NeteaseRepository
 import java.util.UUID
@@ -38,6 +40,8 @@ internal data class PlaylistListItem(
     val artworkPaths: List<String> = emptyList(),
     val customArtworkPath: String? = null,
     val syncFailed: Boolean = false,
+    val isSmart: Boolean = false,
+    val smartSpec: SmartPlaylistSpec? = null,
 ) { val isFavorite: Boolean get() = id == FavoritesPlaylistId }
 
 internal data class NeteasePlaylistSummary(
@@ -66,24 +70,56 @@ internal class LibraryPlaylistsViewModel(private val context: Context, syncStore
     val createdPlaylistIds: SharedFlow<String> = _createdPlaylistIds.asSharedFlow()
 
     val uiState: StateFlow<LibraryPlaylistsUiState> = combine(
-        syncStore.playlists,
-        syncStore.tracks,
-        syncStore.onlineFavorites,
-        syncStore.artworkPaths,
-        NeteaseRepository.playlists,
-    ) { playlists, tracks, onlineFavorites, artworkPaths, netease ->
-        val allTracks = tracks + onlineFavorites.filterNot { online -> tracks.any { it.id == online.id } }
+        listOf(
+            syncStore.playlists,
+            syncStore.tracks,
+            syncStore.onlineFavorites,
+            syncStore.playbackOnlyTracksFlow,
+            syncStore.artworkPaths,
+            NeteaseRepository.playlists,
+            syncStore.dailyTrackListeningStats,
+        ),
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val playlists = values[0] as List<LibraryPlaylist>
+        @Suppress("UNCHECKED_CAST")
+        val tracks = values[1] as List<LibraryTrack>
+        @Suppress("UNCHECKED_CAST")
+        val onlineFavorites = values[2] as List<LibraryTrack>
+        @Suppress("UNCHECKED_CAST")
+        val playbackOnlyTracks = values[3] as List<LibraryTrack>
+        @Suppress("UNCHECKED_CAST")
+        val artworkPaths = values[4] as Map<String, String>
+        @Suppress("UNCHECKED_CAST")
+        val netease = values[5] as List<com.exodidio.tune.netease.NeteasePlaylistRecord>
+        @Suppress("UNCHECKED_CAST")
+        val listeningStats = values[6] as List<com.exodidio.tune.player.DailyTrackListeningStat>
+        val playCounts = SmartPlaylistEngine.aggregatePlayCounts(listeningStats)
+        val trackIds = tracks.mapTo(HashSet(tracks.size)) { it.id }
+        val onlineFavIds = onlineFavorites.mapTo(HashSet(onlineFavorites.size)) { it.id }
+        val allTracks = tracks +
+            onlineFavorites.filterNot { it.id in trackIds } +
+            playbackOnlyTracks.filterNot { it.id in trackIds || it.id in onlineFavIds }
         val availableTrackIds = allTracks.mapTo(mutableSetOf(), LibraryTrack::id)
         LibraryPlaylistsUiState(
             isLoaded = true,
             playlists = playlistsWithFavorites(playlists, allTracks).map { playlist ->
+                val smartSpec = SmartPlaylistEngine.parseSpec(playlist.metadataJson)
+                val resolvedPlaylist = if (smartSpec != null) {
+                    val smartTrackIds = SmartPlaylistEngine.evaluate(smartSpec, allTracks, playCounts).map { it.id }
+                    playlist.copy(trackIds = smartTrackIds)
+                } else {
+                    playlist
+                }
                 PlaylistListItem(
-                    playlist.id,
-                    playlist.name,
-                    playlist.trackIds.filter { it in availableTrackIds },
-                    playlistArtworkPaths(playlist, allTracks, artworkPaths),
-                    playlistManualArtworkPath(playlist, artworkPaths),
-                    false,
+                    id = resolvedPlaylist.id,
+                    name = resolvedPlaylist.name,
+                    trackIds = resolvedPlaylist.trackIds.filter { it in availableTrackIds },
+                    artworkPaths = playlistArtworkPaths(resolvedPlaylist, allTracks, artworkPaths),
+                    customArtworkPath = playlistManualArtworkPath(resolvedPlaylist, artworkPaths),
+                    syncFailed = false,
+                    isSmart = smartSpec != null,
+                    smartSpec = smartSpec,
                 )
             },
             neteasePlaylists = netease.filter { it.addedToPlaylists }.map { playlist ->
@@ -97,6 +133,27 @@ internal class LibraryPlaylistsViewModel(private val context: Context, syncStore
             },
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LibraryPlaylistsUiState(isLoaded = false))
+
+    fun createSmartPlaylist(rawName: String, spec: SmartPlaylistSpec) {
+        val name = rawName.trim()
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            val playlistId = UUID.randomUUID().toString()
+            val metadata = SmartPlaylistEngine.encodeMetadataJson(spec)
+            syncStore.createSmartPlaylist(playlistId, name, metadata)
+            _createdPlaylistIds.emit(playlistId)
+        }
+    }
+
+    fun updateSmartPlaylist(playlistId: String, rawName: String, spec: SmartPlaylistSpec) {
+        val name = rawName.trim()
+        if (name.isBlank() || playlistId == FavoritesPlaylistId) return
+        viewModelScope.launch {
+            val existingMetadata = syncStore.playlists.value.firstOrNull { it.id == playlistId }?.metadataJson ?: "{}"
+            val metadata = SmartPlaylistEngine.encodeMetadataJson(spec, existingMetadata)
+            syncStore.updateSmartPlaylist(playlistId, name, metadata)
+        }
+    }
 
     fun createPlaylist(rawName: String, artworkUri: Uri? = null, initialTrackIds: List<String> = emptyList()) {
         val name = rawName.trim()
@@ -188,6 +245,29 @@ internal class LibraryPlaylistsViewModel(private val context: Context, syncStore
                 PlaylistMutation(UUID.randomUUID().toString(), playlistId, PlaylistMutationOperation.DELETE, System.currentTimeMillis()),
             )
         }
+    }
+
+    fun deduplicatePlaylist(playlistId: String): Int {
+        if (playlistId == FavoritesPlaylistId || playlistId.isBlank()) return 0
+        val playlist = syncStore.playlists.value.firstOrNull { it.id == playlistId } ?: return 0
+        if (SmartPlaylistEngine.parseSpec(playlist.metadataJson) != null) return 0
+        val tracksById = buildMap {
+            syncStore.tracks.value.forEach { put(it.id, it) }
+            syncStore.onlineFavorites.value.forEach { putIfAbsent(it.id, it) }
+            playlist.trackIds.forEach { id ->
+                if (!containsKey(id)) {
+                    syncStore.trackForPlayback(id)?.let { put(id, it) }
+                }
+            }
+        }
+        val deduped = deduplicatePlaylistTrackIds(playlist.trackIds, tracksById)
+        val removed = playlist.trackIds.size - deduped.size
+        if (removed > 0) {
+            viewModelScope.launch {
+                syncStore.replacePlaylistTracks(playlistId, deduped)
+            }
+        }
+        return removed
     }
 }
 

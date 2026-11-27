@@ -30,9 +30,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -63,11 +66,19 @@ fun ArtworkHeroBackdrop(
 ) {
     val colors = LocalTuneColors.current
     val bitmap = rememberArtworkThumbnail(artworkPath, targetPx = 240)
-    var dominant by remember(artworkPath) { mutableStateOf(colors.background) }
-    LaunchedEffect(bitmap, colors.background) {
-        dominant = bitmap?.let { image -> withContext(Dispatchers.Default) { artworkAverageColor(image) } } ?: colors.background
-        onDominantColorChanged(dominant)
+    var extractedDominant by remember(artworkPath) { mutableStateOf<Color?>(null) }
+    LaunchedEffect(bitmap) {
+        val computed = bitmap?.let { image ->
+            withContext(Dispatchers.Default) {
+                artworkAverageColor(image).takeIf { it != Color.Transparent }
+            }
+        }
+        extractedDominant = computed
+        if (computed != null) {
+            onDominantColorChanged(computed)
+        }
     }
+    val dominant = extractedDominant ?: colors.background
     val style = heroBackdropColors(reduceTransparency)
     Box(modifier = modifier.background(colors.background)) {
         if (!reduceTransparency) {
@@ -88,9 +99,15 @@ fun ArtworkHeroBackdrop(
 }
 
 private fun artworkAverageColor(bitmap: ImageBitmap): Color {
-    val sample = android.graphics.Bitmap.createScaledBitmap(bitmap.asAndroidBitmap(), 24, 24, true)
+    val source = bitmap.asAndroidBitmap()
+    if (source.isRecycled) return Color.Transparent
+    val sample = android.graphics.Bitmap.createScaledBitmap(source, 24, 24, true)
     val pixels = IntArray(24 * 24)
-    sample.getPixels(pixels, 0, 24, 0, 0, 24, 24)
+    try {
+        sample.getPixels(pixels, 0, 24, 0, 0, 24, 24)
+    } finally {
+        if (sample !== source && !sample.isRecycled) sample.recycle()
+    }
     val opaque = pixels.filter { android.graphics.Color.alpha(it) > 32 }
     if (opaque.isEmpty()) return Color.Transparent
     return Color(
@@ -177,16 +194,58 @@ fun DetailHero(
 @Composable
 private fun DetailHeroGlassAction(symbol: String, label: String, onClick: () -> Unit, reduceTransparency: Boolean = false) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current || reduceTransparency
+    val isLiquidGlass = LocalControlStyle.current == com.exodidio.tune.settings.ControlStyle.LiquidGlass && !reduceMotion
+    val useOpticalGlass = isLiquidGlass && tuneGlassBackdrop() != null
+    val glassBlurDp = LocalLiquidGlassBlurDp.current.dp
+    val physics = rememberTuneLiquidButtonPhysics(
+        maxDisplacementDp = 4.5.dp,
+        pressedScale = if (isLiquidGlass) 1.12f else 1.05f,
+    )
     Box(
         modifier = Modifier
             .size(48.dp)
-            .clip(CircleShape)
-            .semantics { contentDescription = label }
-            .clickable(role = Role.Button, onClick = onClick),
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = label
+                onClick(label = label) {
+                    onClick()
+                    true
+                }
+            }
+            .liquidButtonGesture(
+                physics = physics,
+                reduceMotion = reduceMotion,
+                allowParentVerticalScroll = true,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Box(
-            modifier = Modifier.size(40.dp).clip(CircleShape).background(if (reduceTransparency) colors.glassOpaque else colors.glassElevated).border(0.5.dp, colors.borderGlass, CircleShape),
+            modifier = Modifier
+                .size(40.dp)
+                .then(
+                    if (useOpticalGlass) {
+                        Modifier.tuneLiquidGlassBackground(
+                            hazeState = null,
+                            colors = colors,
+                            shape = CircleShape,
+                            glassBlurRadius = glassBlurDp,
+                            enableLens = true,
+                            lensRadius = 16.dp,
+                            refractionHeight = 10.dp,
+                            chromaticAberration = true,
+                            pressProgress = physics.pressProgress,
+                            layerBlock = physics.layerBlock,
+                        )
+                    } else {
+                        Modifier
+                            .graphicsLayer(physics.layerBlock)
+                            .clip(CircleShape)
+                            .background(if (reduceTransparency) colors.glassOpaque else colors.glassElevated)
+                            .border(0.5.dp, colors.borderGlass, CircleShape)
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) { MaterialSymbol(symbol, null, size = 20.dp, tint = colors.textMain, filled = true) }
     }

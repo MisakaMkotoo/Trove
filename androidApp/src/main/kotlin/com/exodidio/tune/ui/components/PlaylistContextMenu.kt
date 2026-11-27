@@ -25,9 +25,12 @@ internal fun PlaylistContextMenu(
     onEdit: () -> Unit = {},
     onDelete: () -> Unit = {},
     onExportM3u: () -> Unit = {},
+    onDeduplicate: () -> Unit = {},
     showReorder: Boolean = true,
     showEdit: Boolean = true,
     showExport: Boolean = true,
+    showDeduplicate: Boolean = false,
+    onMultiSelect: (() -> Unit)? = null,
     onRefresh: (() -> Unit)? = null,
     onDownloadAll: (() -> Unit)? = null,
     onRemoveFromPlaylists: (() -> Unit)? = null,
@@ -55,6 +58,11 @@ internal fun PlaylistContextMenu(
             add(ContextActionMenuEntry.Action(stringResource(R.string.track_context_add_to_queue), MaterialSymbols.AddToQueue) {
                 closeAfter { onAddToQueue(playableIds) }
             })
+            if (onMultiSelect != null && playableIds.isNotEmpty()) {
+                add(ContextActionMenuEntry.Action(stringResource(R.string.batch_select_enter), MaterialSymbols.Check) {
+                    closeAfter(onMultiSelect)
+                })
+            }
             add(ContextActionMenuEntry.Divider)
             if (canDelete && showReorder) {
                 add(ContextActionMenuEntry.Action(stringResource(R.string.playlist_reorder), MaterialSymbols.Menu) { closeAfter(onReorder) })
@@ -62,6 +70,9 @@ internal fun PlaylistContextMenu(
             }
             if (showEdit) {
                 add(ContextActionMenuEntry.Action(stringResource(R.string.playlist_edit), MaterialSymbols.Edit) { closeAfter(onEdit) })
+            }
+            if (canDelete && showDeduplicate) {
+                add(ContextActionMenuEntry.Action(stringResource(R.string.playlist_deduplicate), MaterialSymbols.FilterList) { closeAfter(onDeduplicate) })
             }
             if (showExport) {
                 add(ContextActionMenuEntry.Action(stringResource(R.string.playlist_export), MaterialSymbols.FileExport) { closeAfter(onExportM3u) })

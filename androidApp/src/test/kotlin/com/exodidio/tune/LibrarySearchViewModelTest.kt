@@ -93,4 +93,17 @@ class LibrarySearchViewModelTest {
         assertTrue(trackHasDivider(3, 4))
         assertFalse(trackHasDivider(4, 4))
     }
+
+    @Test fun searchDefaultsToNeteaseTab() {
+        val state = com.exodidio.tune.ui.screens.LibrarySearchUiState()
+        assertTrue(state.onlineMode)
+        assertEquals(com.exodidio.tune.ui.screens.OnlineSearchCategory.All, state.onlineCategory)
+    }
+
+    @Test fun onlineSearchCategoryHasAllFiveTabs() {
+        assertEquals(
+            listOf("All", "Songs", "Playlists", "Artists", "Albums"),
+            com.exodidio.tune.ui.screens.OnlineSearchCategory.entries.map { it.name },
+        )
+    }
 }

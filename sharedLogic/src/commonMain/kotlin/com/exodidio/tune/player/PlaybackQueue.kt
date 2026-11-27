@@ -249,6 +249,36 @@ class PlaybackQueue(private val random: Random = Random.Default) {
         return QueueTransition.Unchanged
     }
 
+    /**
+     * Removes duplicate tracks from the active and original queues while preserving
+     * the first occurrence of each distinct [keyForTrack] (except keeping [currentTrackId]
+     * if it collides with an earlier duplicate so playback is never interrupted).
+     * Returns the number of removed items.
+     */
+    fun deduplicateQueue(keyForTrack: (String) -> String = { it }): Int {
+        if (active.size <= 1) return 0
+        val current = currentTrackId()
+        val beforeSize = active.size
+        val survivorByKey = linkedMapOf<String, String>()
+        for (id in active) {
+            val key = keyForTrack(id).ifBlank { id }
+            val existing = survivorByKey[key]
+            if (existing == null || (id == current && existing != current)) {
+                survivorByKey[key] = id
+            }
+        }
+        val keptIds = survivorByKey.values.toHashSet()
+        val seenActive = HashSet<String>(keptIds.size)
+        val result = active.filter { it in keptIds && seenActive.add(it) }.toMutableList()
+        val removed = beforeSize - result.size
+        if (removed <= 0) return 0
+        active = result
+        val seenOriginal = HashSet<String>(keptIds.size)
+        original = original.filter { it in keptIds && seenOriginal.add(it) }.toMutableList()
+        currentIndex = current?.let(active::indexOf) ?: (if (active.isEmpty()) -1 else 0)
+        return removed
+    }
+
     private fun currentTrackId(): String? = active.getOrNull(currentIndex)
     private fun selectFirstOrStop(): QueueTransition = active.firstOrNull()?.let {
         currentIndex = 0; QueueTransition.Play(it)

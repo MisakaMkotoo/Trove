@@ -35,36 +35,39 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.exodidio.tune.ui.theme.LocalTuneColors
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 
-/** Shared virtualized, divided list treatment for Library entity pages. */
+internal class PullDownFilterState(
+    val visible: Boolean,
+    val hideDistancePx: Float,
+    val revealDistancePx: Float,
+    val isUserDragging: Boolean,
+    val scrollConnection: NestedScrollConnection,
+)
+
 @Composable
-fun <T> LibraryVirtualList(
-    items: List<T>,
-    isLoaded: Boolean = true,
-    key: (T) -> Any,
-    contentType: Any,
+internal fun rememberPullDownFilterState(
     listState: LazyListState,
-    contentPadding: PaddingValues,
-    modifier: Modifier = Modifier,
-    dividerTestTag: String? = null,
-    filterKey: String? = null,
-    filterActive: Boolean = false,
-    filterContent: (@Composable (showPlaceholderAndLeadingSymbol: Boolean) -> Unit)? = null,
-    leadingContent: (@Composable () -> Unit)? = null,
-    alphabeticalIndexKey: ((T) -> String)? = null,
-    alphabeticalIndexItemsPerLazyItem: Int = 1,
-    emptyContent: @Composable () -> Unit,
-    customItemsContent: (LazyListScope.() -> Unit)? = null,
-    itemContent: @Composable (T) -> Unit,
-) {
+    filterKey: Any?,
+    filterActive: Boolean,
+    enabled: Boolean = true,
+): PullDownFilterState {
     var filterVisible by rememberSaveable(filterKey) { mutableStateOf(false) }
     var revealDistancePx by remember(filterKey) { mutableFloatStateOf(0f) }
     var hideDistancePx by remember(filterKey) { mutableFloatStateOf(0f) }
     val filterThresholdPx = with(LocalDensity.current) { 48.dp.toPx() }
     val isUserDragging by listState.interactionSource.collectIsDraggedAsState()
 
+    LaunchedEffect(enabled) {
+        if (!enabled) {
+            filterVisible = false
+            revealDistancePx = 0f
+            hideDistancePx = 0f
+        }
+    }
     LaunchedEffect(filterActive) {
-        if (filterActive) {
+        if (filterActive && enabled) {
             filterVisible = true
             hideDistancePx = 0f
         }
@@ -76,10 +79,10 @@ fun <T> LibraryVirtualList(
         }
     }
 
-    val filterScrollConnection = remember(listState, filterActive, filterContent, filterThresholdPx) {
+    val scrollConnection = remember(listState, filterActive, enabled, filterThresholdPx) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source != NestedScrollSource.UserInput || filterContent == null) return Offset.Zero
+                if (source != NestedScrollSource.UserInput || !enabled) return Offset.Zero
                 if (!filterVisible && listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 && available.y > 0f) {
                     revealDistancePx += available.y
                     if (revealDistancePx >= filterThresholdPx) {
@@ -107,13 +110,47 @@ fun <T> LibraryVirtualList(
                 }
                 return Offset.Zero
             }
-
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source != NestedScrollSource.UserInput || filterContent == null) return Offset.Zero
-                return Offset.Zero
-            }
         }
     }
+    return PullDownFilterState(
+        visible = filterVisible,
+        hideDistancePx = hideDistancePx,
+        revealDistancePx = revealDistancePx,
+        isUserDragging = isUserDragging,
+        scrollConnection = scrollConnection,
+    )
+}
+
+/** Shared virtualized, divided list treatment for Library entity pages. */
+@Composable
+fun <T> LibraryVirtualList(
+    items: List<T>,
+    isLoaded: Boolean = true,
+    key: (T) -> Any,
+    contentType: Any,
+    listState: LazyListState,
+    contentPadding: PaddingValues,
+    modifier: Modifier = Modifier,
+    listHazeState: HazeState? = null,
+    dividerTestTag: String? = null,
+    filterKey: String? = null,
+    filterActive: Boolean = false,
+    hasAnyVisibleItems: Boolean = items.isNotEmpty(),
+    filterContent: (@Composable (showPlaceholderAndLeadingSymbol: Boolean) -> Unit)? = null,
+    leadingContent: (@Composable () -> Unit)? = null,
+    alphabeticalIndexKey: ((T) -> String)? = null,
+    alphabeticalIndexItemsPerLazyItem: Int = 1,
+    emptyContent: @Composable () -> Unit,
+    customItemsContent: (LazyListScope.() -> Unit)? = null,
+    itemContent: @Composable (T) -> Unit,
+) {
+    val pullDownFilterState = rememberPullDownFilterState(
+        listState = listState,
+        filterKey = filterKey,
+        filterActive = filterActive,
+        enabled = filterContent != null,
+    )
+    val filterScrollConnection = pullDownFilterState.scrollConnection
 
     val colors = LocalTuneColors.current
     val alphabeticalIndexEntries = remember(items, alphabeticalIndexKey, filterContent, leadingContent, alphabeticalIndexItemsPerLazyItem) {
@@ -130,21 +167,26 @@ fun <T> LibraryVirtualList(
         // result set. Replacing the entire list when there are no matches
         // disposes BasicTextField and drops its focus.
         Box(modifier = modifier.fillMaxSize().nestedScroll(filterScrollConnection)) {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                state = listState,
-                contentPadding = contentPadding,
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (listHazeState == null) Modifier
+                        else Modifier.background(colors.background).hazeSource(listHazeState),
+                    ),
             ) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    contentPadding = contentPadding,
+                ) {
                 item(key = "library-list-text-filter", contentType = "library-list-text-filter") {
                     LibraryTextFilterSlot(
-                        visible = filterVisible,
-                        dismissalProgressPx = hideDistancePx,
-                        previewHeightPx = revealDistancePx,
-                        isUserDragging = isUserDragging,
+                        state = pullDownFilterState,
                         content = filterContent,
                     )
                 }
-                if (items.isEmpty() && isLoaded) {
+                if (!hasAnyVisibleItems && isLoaded) {
                     item(key = "library-list-empty-state", contentType = "library-list-empty-state") {
                         Box(modifier = Modifier.fillMaxWidth().height(320.dp)) { emptyContent() }
                     }
@@ -168,6 +210,7 @@ fun <T> LibraryVirtualList(
                     }
                 }
             }
+            }
             AlphabeticalIndex(
                 entries = alphabeticalIndexEntries,
                 listState = listState,
@@ -177,17 +220,25 @@ fun <T> LibraryVirtualList(
         return
     }
 
-    if (items.isEmpty()) {
+    if (!hasAnyVisibleItems) {
         if (isLoaded) Box(modifier = modifier.fillMaxSize()) { emptyContent() }
         return
     }
 
     Box(modifier = modifier.fillMaxSize().nestedScroll(filterScrollConnection)) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            state = listState,
-            contentPadding = contentPadding,
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (listHazeState == null) Modifier
+                    else Modifier.background(colors.background).hazeSource(listHazeState),
+                ),
         ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                state = listState,
+                contentPadding = contentPadding,
+            ) {
             if (leadingContent != null) {
                 item(contentType = "library-list-leading-content") { leadingContent() }
             }
@@ -205,6 +256,7 @@ fun <T> LibraryVirtualList(
                     }
                 }
             }
+        }
         }
         AlphabeticalIndex(
             entries = alphabeticalIndexEntries,
@@ -230,7 +282,21 @@ private fun LibraryListDivider(
 }
 
 @Composable
-private fun LibraryTextFilterSlot(
+internal fun LibraryTextFilterSlot(
+    state: PullDownFilterState,
+    content: @Composable (showPlaceholderAndLeadingSymbol: Boolean) -> Unit,
+) {
+    LibraryTextFilterSlot(
+        visible = state.visible,
+        dismissalProgressPx = state.hideDistancePx,
+        previewHeightPx = state.revealDistancePx,
+        isUserDragging = state.isUserDragging,
+        content = content,
+    )
+}
+
+@Composable
+internal fun LibraryTextFilterSlot(
     visible: Boolean,
     dismissalProgressPx: Float = 0f,
     previewHeightPx: Float = 0f,

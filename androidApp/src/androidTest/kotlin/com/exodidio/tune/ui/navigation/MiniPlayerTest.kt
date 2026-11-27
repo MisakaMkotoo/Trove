@@ -1,5 +1,6 @@
 package com.exodidio.tune.ui.navigation
 
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.assertCountEquals
@@ -7,7 +8,9 @@ import androidx.compose.ui.test.assertWidthIsEqualTo
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -306,6 +309,31 @@ class MiniPlayerTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithContentDescription("Previous").assertExists()
         composeTestRule.onNodeWithContentDescription("Next").assertExists()
+    }
+
+    @Test
+    fun bufferingPlaybackShowsSpinnerAndRemainsClickableToPause() {
+        var clicks = 0
+        var playbackState by mutableStateOf<PlaybackState>(
+            PlaybackState.Playing(item, positionMs = 30_000L, durationMs = 120_000L, isBuffering = true),
+        )
+        composeTestRule.setContent {
+            NavigationChromeForTest(
+                state = playbackState,
+                onPlayPause = {
+                    clicks += 1
+                    playbackState = PlaybackState.Paused(item, 30_000L, 120_000L)
+                },
+            )
+        }
+
+        composeTestRule.onNodeWithTag(MiniPlayerBufferingSpinnerTestTag).assertExists()
+        composeTestRule.onNodeWithContentDescription("Pause").assertIsEnabled().performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(1, clicks)
+        composeTestRule.onAllNodesWithTag(MiniPlayerBufferingSpinnerTestTag).assertCountEquals(0)
+        composeTestRule.onNodeWithContentDescription("Play").assertExists()
     }
 
     @androidx.compose.runtime.Composable

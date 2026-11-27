@@ -115,10 +115,8 @@ private fun PlaylistEditorBottomSheet(
         if (uri == null) { artwork = null; return@LaunchedEffect }
         val key = ArtworkThumbnailCache.cacheKey(uri.toString(), 336)
         ArtworkThumbnailCache.get(key)?.let { artwork = it; return@LaunchedEffect }
-        if (!ArtworkThumbnailCache.claimInFlight(key)) return@LaunchedEffect
-        var loaded: androidx.compose.ui.graphics.ImageBitmap? = null
-        try {
-            loaded = withContext(Dispatchers.IO) {
+        val loaded = runCatching {
+            ArtworkThumbnailCache.loadOrAwait(key) {
                 runCatching {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -130,11 +128,9 @@ private fun PlaylistEditorBottomSheet(
                         })
                     }?.asImageBitmap()
                 }.getOrNull()
-            }
-            if (loaded != null) { ArtworkThumbnailCache.put(key, loaded); artwork = loaded }
-        } finally {
-            if (loaded == null) ArtworkThumbnailCache.releaseInFlight(key)
-        }
+            }.await()
+        }.getOrNull()
+        if (loaded != null) artwork = loaded
     }
     val existingArtwork = rememberArtworkThumbnail(artworkPath, targetPx = 336)
     val valid = !showNameInput || name.trim().isNotEmpty()

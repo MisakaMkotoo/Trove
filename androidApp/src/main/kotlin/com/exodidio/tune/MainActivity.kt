@@ -27,6 +27,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -53,6 +54,7 @@ import com.exodidio.tune.library.LocalLibraryScanner
 import com.exodidio.tune.library.ScanFolderPreferences
 import com.exodidio.tune.library.audioPermission
 import com.exodidio.tune.sync.LibraryPlaylist
+import com.exodidio.tune.sync.metadataObject
 import com.exodidio.tune.player.AndroidPlaybackRuntime
 import com.exodidio.tune.player.AndroidPlaybackSession
 import com.exodidio.tune.player.PlaybackService
@@ -120,16 +122,30 @@ class MainActivity : ComponentActivity() {
 
     // M3U playlist import/export via the Storage Access Framework.
     private var exportTargetPlaylistId: String? = null
+    private var pendingLrcExportContent: String? = null
     private val importM3uLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { handleM3uImport(it) }
     }
-    private val exportM3uLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument()) { uri ->
+    private val exportM3uLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("audio/x-mpegurl")) { uri ->
         uri?.let { savedUri ->
             exportTargetPlaylistId?.let { playlistId ->
                 handleM3uExport(savedUri, playlistId)
             }
         }
         exportTargetPlaylistId = null
+    }
+    private val exportLrcLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val content = pendingLrcExportContent
+        pendingLrcExportContent = null
+        if (uri != null && content != null) {
+            handleLrcExport(uri, content)
+        }
+    }
+    private val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        uri?.let(::handleBackupExport)
+    }
+    private val importBackupLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(::handleBackupRestore)
     }
     private val searchViewModel: LibrarySearchViewModel by viewModels {
         LibrarySearchViewModel.Factory(
@@ -150,6 +166,13 @@ class MainActivity : ComponentActivity() {
     private val genreDetailsViewModel: GenreDetailsViewModel by viewModels {
         GenreDetailsViewModel.Factory(AndroidSyncRuntime.syncStore, AndroidPlaybackRuntime.controller())
     }
+    private val foldersViewModel: com.exodidio.tune.ui.screens.LibraryFoldersViewModel by viewModels {
+        com.exodidio.tune.ui.screens.LibraryFoldersViewModel.Factory(
+            applicationContext,
+            AndroidSyncRuntime.syncStore,
+            AndroidPlaybackRuntime.controller(),
+        )
+    }
     private val composerDetailsViewModel: ComposerDetailsViewModel by viewModels {
         ComposerDetailsViewModel.Factory(AndroidSyncRuntime.syncStore, AndroidPlaybackRuntime.controller())
     }
@@ -160,8 +183,10 @@ class MainActivity : ComponentActivity() {
         requestHighRefreshRate()
         AndroidSyncRuntime.initialize(applicationContext)
         com.exodidio.tune.netease.NeteaseRepository.initialize(applicationContext)
+        com.exodidio.tune.netease.NeteaseWifiAutoCacheManager.initialize(applicationContext)
         com.exodidio.tune.ui.components.TuneImages.initialize(applicationContext)
         AndroidPlaybackRuntime.initialize(applicationContext, AndroidSyncRuntime.syncStore)
+        com.exodidio.tune.lyrics.LyricOffsetStore.initialize(applicationContext)
         // 先把上次同步的电脑曲库垫进去，界面不用等网络；随后再后台刷新。
         // 恢复也放到 IO：整库元数据解析不能占着 onCreate 的主线程。
         lifecycleScope.launch(Dispatchers.IO) {
@@ -220,6 +245,8 @@ class MainActivity : ComponentActivity() {
             ) insightViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(insightViewModel.uiState.value) }
             val artistsUiState by if (activePage == AppStackPage.LibraryArtists) artistsViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(artistsViewModel.uiState.value) }
             val albumsUiState by if (activePage == AppStackPage.LibraryAlbums) albumsViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(albumsViewModel.uiState.value) }
+            val foldersUiState by if (activePage == AppStackPage.LibraryFolders) foldersViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(foldersViewModel.uiState.value) }
+            val allFolders by if (activePage == AppStackPage.LibraryFolders || activePage == AppStackPage.LibraryFolderDetails) foldersViewModel.allFolders.collectAsStateWithLifecycle() else remember { mutableStateOf(foldersViewModel.allFolders.value) }
             val genresUiState by if (activePage == AppStackPage.LibraryGenres) genresViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(genresViewModel.uiState.value) }
             val composersUiState by if (activePage == AppStackPage.LibraryComposers) composersViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(composersViewModel.uiState.value) }
             val playlistsUiState by if (activePage == AppStackPage.LibraryPlaylists) playlistsViewModel.uiState.collectAsStateWithLifecycle() else remember { mutableStateOf(playlistsViewModel.uiState.value) }
@@ -280,13 +307,33 @@ class MainActivity : ComponentActivity() {
             }
 
             val crossfadeSettings by playbackPreferences.settings.collectAsStateWithLifecycle(
-                initialValue = com.exodidio.tune.player.CrossfadeSettings(0, 4, true),
+                initialValue = com.exodidio.tune.player.CrossfadeSettings(0, 4, true, true),
             )
             val showFullscreenQualityBadge by playbackPreferences.showFullscreenQualityBadge.collectAsStateWithLifecycle(initialValue = false)
             val hideShortAudio by playbackPreferences.hideShortAudio.collectAsStateWithLifecycle(initialValue = false)
             val appleBackdropSettings by playbackPreferences.appleBackdrop.collectAsStateWithLifecycle(
                 initialValue = com.exodidio.tune.player.AppleBackdropSettings.Default,
             )
+            val dynamicBackdropSettings by playbackPreferences.dynamicBackdrop.collectAsStateWithLifecycle(
+                initialValue = com.exodidio.tune.player.DynamicBackdropSettings.Default,
+            )
+            val audioQualityMode by playbackPreferences.audioQuality.collectAsStateWithLifecycle(
+                initialValue = com.exodidio.tune.player.AudioQualityMode.Auto,
+            )
+            val mediaNotificationStyle by playbackPreferences.mediaNotificationStyle.collectAsStateWithLifecycle(
+                initialValue = com.exodidio.tune.player.MediaNotificationStyle.Default,
+            )
+            val funFeaturesSettings by playbackPreferences.funFeatures.collectAsStateWithLifecycle(
+                initialValue = com.exodidio.tune.player.FunFeaturesSettings(),
+            )
+            val dailyListeningStats by AndroidSyncRuntime.syncStore.dailyTrackListeningStats
+                .collectAsStateWithLifecycle(initialValue = emptyList())
+            val trackPlayCounts = remember(dailyListeningStats) {
+                com.exodidio.tune.library.SmartPlaylistEngine.aggregatePlayCounts(dailyListeningStats)
+            }
+            LaunchedEffect(audioQualityMode) {
+                com.exodidio.tune.player.AudioQualityRuntime.mode = audioQualityMode
+            }
             val adaptiveTextColor by playbackPreferences.adaptiveTextColor.collectAsStateWithLifecycle(initialValue = false)
             val normalizationSettings by normalizationPreferences.settings.collectAsStateWithLifecycle(
                 initialValue = com.exodidio.tune.player.NormalizationSettings(),
@@ -295,15 +342,23 @@ class MainActivity : ComponentActivity() {
                 initialValue = com.exodidio.tune.player.EqualizerSettings(),
             )
             val lyricsSettings by lyricsPreferences.settings.collectAsStateWithLifecycle(initialValue = com.exodidio.tune.lyrics.LyricsSettings())
-            // Avoid clearing a valid preference while Room is still loading the active manifest.
-            val normalizationAvailable by AndroidSyncRuntime.syncStore.analysisAvailable.collectAsStateWithLifecycle(initialValue = true)
-            LaunchedEffect(normalizationAvailable) {
-                if (!normalizationAvailable) normalizationPreferences.disable()
+            val perSongLyricsConfigs by com.exodidio.tune.lyrics.PerSongLyricsConfigStore.configs.collectAsStateWithLifecycle()
+            var hasAutoSyncModels by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                com.exodidio.tune.lyrics.PerSongLyricsConfigStore.load(applicationContext)
+                hasAutoSyncModels = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.exodidio.tune.lyrics.autosync.AutoSyncModelStore.installedLanguages(applicationContext).isNotEmpty()
+                }
             }
+            // Normalization is always available: cached BS.1770 analysis + real-time adaptive LUFS follower.
+            val normalizationAvailable by AndroidSyncRuntime.syncStore.analysisAvailable.collectAsStateWithLifecycle(initialValue = true)
             val playbackState by playbackController.state.collectAsStateWithLifecycle()
             val playbackQueue by playbackController.queue.collectAsStateWithLifecycle()
             val moodRadioActive by playbackController.moodRadioActive.collectAsStateWithLifecycle()
             val artworkCrossfade by playbackController.artworkCrossfade.collectAsStateWithLifecycle()
+            val playbackSpeed by playbackController.playbackSpeed.collectAsStateWithLifecycle()
+            val abLoopState by playbackController.abLoopState.collectAsStateWithLifecycle()
+            val sleepTimerState by playbackController.sleepTimerState.collectAsStateWithLifecycle()
             val lyricsTrackId = when (val state = playbackState) {
                 is PlaybackState.Preparing -> state.item.trackId
                 is PlaybackState.Playing -> state.item.trackId
@@ -321,7 +376,34 @@ class MainActivity : ComponentActivity() {
             val lyrics = manualLyricsOverride?.takeIf { it.trackId == lyricsTrackId }?.content
                 ?: com.exodidio.tune.lyrics.preferredLyrics(providerLyrics)
             var lyricsLoadingTrackId by remember { mutableStateOf<String?>(null) }
-            LaunchedEffect(lyricsTrackId, providerLyrics, lyricsSettings, manualLyricsOverride) {
+            val lyricsFetchKey = Triple(
+                lyricsSettings.sourceOrder,
+                lyricsSettings.enabledSources,
+                lyricsSettings.wordFallbackSource,
+            )
+            var previousLyricsFetchKey by remember {
+                mutableStateOf<Triple<List<com.exodidio.tune.lyrics.LyricsSourceId>, Set<com.exodidio.tune.lyrics.LyricsSourceId>, com.exodidio.tune.lyrics.LyricsSourceId?>?>(null)
+            }
+            LaunchedEffect(lyricsFetchKey) {
+                val previous = previousLyricsFetchKey
+                previousLyricsFetchKey = lyricsFetchKey
+                if (previous != null && previous != lyricsFetchKey) {
+                    lyricsService.cancelAutoAlign()
+                    lyricsService.invalidateSearchCache()
+                    AndroidSyncRuntime.syncStore.clearNonManualProviderLyrics()
+                }
+            }
+            var previousAutoAlignEnabled by remember { mutableStateOf<Boolean?>(null) }
+            LaunchedEffect(lyricsSettings.autoAlignWordTiming) {
+                val enabled = lyricsSettings.autoAlignWordTiming
+                val wasEnabled = previousAutoAlignEnabled
+                previousAutoAlignEnabled = enabled
+                if (wasEnabled == true && !enabled) {
+                    lyricsService.cancelAutoAlign()
+                    AndroidSyncRuntime.syncStore.restoreAllAlignedLyrics()
+                }
+            }
+            LaunchedEffect(lyricsTrackId, providerLyrics, lyricsSettings, perSongLyricsConfigs, manualLyricsOverride) {
                 if (lyricsTrackId == null || manualLyricsOverride?.trackId == lyricsTrackId || !providerLyrics.isNullOrBlank()) return@LaunchedEffect
                 lyricsLoadingTrackId = lyricsTrackId
                 try {
@@ -329,6 +411,16 @@ class MainActivity : ComponentActivity() {
                 } finally {
                     if (lyricsLoadingTrackId == lyricsTrackId) lyricsLoadingTrackId = null
                 }
+            }
+            // 已缓存的歌词不会再 fetch：开关打开后补一次本地对齐（去重在 coordinator）。
+            LaunchedEffect(lyricsTrackId, providerLyrics, lyricsSettings, perSongLyricsConfigs) {
+                val id = lyricsTrackId ?: return@LaunchedEffect
+                if (manualLyricsOverride?.trackId == id) return@LaunchedEffect
+                val content = providerLyrics?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+                hasAutoSyncModels = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.exodidio.tune.lyrics.autosync.AutoSyncModelStore.installedLanguages(applicationContext).isNotEmpty()
+                }
+                lyricsService.alignCachedLyrics(id, content, lyricsSettings)
             }
             DisposableEffect(Unit) {
                 val volumeObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -344,6 +436,8 @@ class MainActivity : ComponentActivity() {
                 onDispose { contentResolver.unregisterContentObserver(volumeObserver) }
             }
             var isFullScreenPlayerVisible by remember { mutableStateOf(false) }
+            var isTerminalMode by remember { mutableStateOf(false) }
+            var restoreFullScreenPlayerNonce by remember { mutableIntStateOf(0) }
             LaunchedEffect(viewModel) {
                 viewModel.effects.collect { effect ->
                     when (effect) {
@@ -355,6 +449,7 @@ class MainActivity : ComponentActivity() {
                             AppStackPage.LibraryTracks -> tracksViewModel.setFilterQuery("")
                             AppStackPage.LibraryArtists -> artistsViewModel.setFilterQuery("")
                             AppStackPage.LibraryAlbums -> albumsViewModel.setFilterQuery("")
+                            AppStackPage.LibraryFolders -> foldersViewModel.setFilterQuery("")
                             AppStackPage.LibraryGenres -> genresViewModel.setFilterQuery("")
                             AppStackPage.LibraryComposers -> composersViewModel.setFilterQuery("")
                             else -> Unit
@@ -365,7 +460,10 @@ class MainActivity : ComponentActivity() {
                         is AppEffect.PickM3uExport -> {
                             exportTargetPlaylistId = effect.playlistId
                             val suggestedName = m3uSuggestedFileName(effect.playlistId)
-                            exportM3uLauncher.launch("audio/m3u8")
+                            exportM3uLauncher.launch(suggestedName)
+                        }
+                        AppEffect.RestoreFullScreenPlayer -> {
+                            restoreFullScreenPlayerNonce++
                         }
                     }
                 }
@@ -377,7 +475,7 @@ class MainActivity : ComponentActivity() {
             }
             val darkTheme = isDarkTheme(uiState.themeMode)
             SideEffect {
-                updateSystemBarAppearance(darkTheme, isFullScreenPlayerVisible)
+                updateSystemBarAppearance(darkTheme || isTerminalMode, isFullScreenPlayerVisible)
             }
             // Keep screen awake when the keep-screen-on setting is enabled (#11).
             SideEffect {
@@ -422,6 +520,8 @@ class MainActivity : ComponentActivity() {
                     onLibraryPeriodSelected = insightViewModel::setLibraryPeriod,
                     onListeningPeriodSelected = insightViewModel::setListeningPeriod,
                     onTrackClick = insightViewModel::playTopTrack,
+                    onReportYearSelected = insightViewModel::setReportYear,
+                    onFootprintClick = insightViewModel::playFootprintTrack,
                 ),
                 library = LibraryDestinationModel(
                     tracks = LibraryTracksModel(
@@ -471,6 +571,18 @@ class MainActivity : ComponentActivity() {
                         onAddToQueue = playbackController::append,
                         orderedTrackIds = genreDetailsViewModel::orderedTrackIds,
                     ),
+                    folders = LibraryFoldersModel(
+                        state = foldersUiState,
+                        allFolders = allFolders,
+                        onSortOptionSelected = foldersViewModel::setSortOption,
+                        onToggleSortOrder = foldersViewModel::toggleSortOrder,
+                        onFilterQueryChange = foldersViewModel::setFilterQuery,
+                        onPlay = foldersViewModel::play,
+                        onTrackPlay = foldersViewModel::playTrack,
+                        onPlayNext = playbackController::playNext,
+                        onAddToQueue = playbackController::append,
+                        orderedTrackIds = foldersViewModel::orderedTrackIds,
+                    ),
                     composers = LibraryComposersModel(
                         state = composersUiState,
                         onSortOptionSelected = composersViewModel::setSortOption,
@@ -494,7 +606,10 @@ class MainActivity : ComponentActivity() {
                         onDelete = playlistsViewModel::deletePlaylist,
                         onCreate = playlistsViewModel::createPlaylist,
                         onCreateWithTracks = { name, artwork, trackIds -> playlistsViewModel.createPlaylist(name, artwork, trackIds) },
+                        onCreateSmart = playlistsViewModel::createSmartPlaylist,
+                        onUpdateSmart = playlistsViewModel::updateSmartPlaylist,
                         onMembershipChange = playlistsViewModel::changePlaylistMembership,
+                        onDeduplicate = playlistsViewModel::deduplicatePlaylist,
                     ),
                     search = LibrarySearchModel(
                         state = searchUiState,
@@ -503,6 +618,7 @@ class MainActivity : ComponentActivity() {
                             playbackRequestFor(searchUiState.tracks, trackId)?.let(playbackController::play)
                         },
                         onOnlineModeChange = searchViewModel::setOnlineMode,
+                        onOnlineCategoryChange = searchViewModel::setOnlineCategory,
                         onOnlineSubmit = searchViewModel::submitOnlineSearch,
                         onOnlineTrackPlay = { index ->
                             val ids = searchUiState.onlineTracks.map { it.id }
@@ -534,25 +650,44 @@ class MainActivity : ComponentActivity() {
                 ),
                 settings = SettingsDestinationModel(
                     lyricsSettings = lyricsSettings,
-                    onLyricsSourceChanged = { source -> preferenceScope.launch { lyricsPreferences.setPreferredSource(source) } },
-                    onLrclibChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setLrclib(enabled) } },
-                    onKugouChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setKugou(enabled) } },
-                    onNeteaseChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setNetease(enabled) } },
+                    onLyricsSourcesChanged = { order, enabled ->
+                        preferenceScope.launch { lyricsPreferences.setSources(order, enabled) }
+                    },
+                    onLyricsWordFallbackChanged = { source ->
+                        preferenceScope.launch { lyricsPreferences.setWordFallbackSource(source) }
+                    },
                     onLyricSpringStrengthChanged = { strength -> preferenceScope.launch { lyricsPreferences.setLyricSpringStrength(strength) } },
                     onLyricAutoFullscreenChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setLyricAutoFullscreen(enabled) } },
+                    onLyricFocusReturnDelayChanged = { delayMs -> preferenceScope.launch { lyricsPreferences.setLyricFocusReturnDelayMs(delayMs) } },
+                    onLyricAutoFullscreenDelayChanged = { delayMs -> preferenceScope.launch { lyricsPreferences.setLyricAutoFullscreenDelayMs(delayMs) } },
+                    onSystemLyricModeChanged = { mode -> preferenceScope.launch { lyricsPreferences.setSystemLyricMode(mode) } },
+                    onStandaloneLyricNotificationChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setStandaloneLyricNotification(enabled) } },
+                    onLyricsAutoAlignChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setAutoAlignWordTiming(enabled) } },
+                    onPerSongLyricsConfigChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setPerSongLyricsConfigEnabled(enabled) } },
+                    onHyperosSuperIslandChanged = { enabled -> preferenceScope.launch { lyricsPreferences.setHyperosSuperIsland(enabled) } },
                     crossfadeSeconds = crossfadeSettings.seconds,
                     lastEnabledCrossfadeSeconds = crossfadeSettings.lastEnabledSeconds,
                     onCrossfadeSecondsChanged = playbackController::setCrossfadeSeconds,
                     blendArtworkDuringCrossfade = crossfadeSettings.blendArtworkDuringCrossfade,
                     onBlendArtworkDuringCrossfadeChanged = playbackController::setBlendArtworkDuringCrossfade,
+                    gaplessPlayback = crossfadeSettings.gaplessPlayback,
+                    onGaplessPlaybackChanged = playbackController::setGaplessPlayback,
                     showFullscreenQualityBadge = showFullscreenQualityBadge,
                     onShowFullscreenQualityBadgeChanged = { enabled -> preferenceScope.launch { playbackPreferences.setShowFullscreenQualityBadge(enabled) } },
                     hideShortAudio = hideShortAudio,
                     onHideShortAudioChanged = { enabled -> preferenceScope.launch { playbackPreferences.setHideShortAudio(enabled) } },
+                    audioQuality = audioQualityMode,
+                    onAudioQualityChanged = { mode -> preferenceScope.launch { playbackPreferences.setAudioQuality(mode) } },
                     appleBackdrop = appleBackdropSettings,
                     onAppleBackdropChanged = { settings -> preferenceScope.launch { playbackPreferences.setAppleBackdrop(settings) } },
+                    dynamicBackdrop = dynamicBackdropSettings,
+                    onDynamicBackdropChanged = { settings -> preferenceScope.launch { playbackPreferences.setDynamicBackdrop(settings) } },
                     adaptiveTextColor = adaptiveTextColor,
                     onAdaptiveTextColorChanged = { enabled -> preferenceScope.launch { playbackPreferences.setAdaptiveTextColor(enabled) } },
+                    mediaNotificationStyle = mediaNotificationStyle,
+                    onMediaNotificationStyleChanged = { style ->
+                        preferenceScope.launch { playbackPreferences.setMediaNotificationStyle(style) }
+                    },
                     normalizationAvailable = normalizationAvailable,
                     normalization = normalizationSettings,
                     onNormalizationChanged = { settings -> preferenceScope.launch { normalizationPreferences.update { settings } } },
@@ -563,6 +698,16 @@ class MainActivity : ComponentActivity() {
                     onEqualizerProfileCreate = { name -> preferenceScope.launch { equalizerPreferences.createProfile(name) } },
                     onEqualizerProfileReset = { key -> preferenceScope.launch { equalizerPreferences.resetDefault(key) } },
                     onEqualizerProfileDelete = { key -> preferenceScope.launch { equalizerPreferences.deleteProfile(key) } },
+                    funFeatures = funFeaturesSettings,
+                    onFunFeaturesChanged = { updated ->
+                        preferenceScope.launch { playbackPreferences.setFunFeatures(updated) }
+                    },
+                    onExportBackup = {
+                        exportBackupLauncher.launch("tune-backup-${java.time.LocalDate.now()}.zip")
+                    },
+                    onRestoreBackup = {
+                        importBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                    },
                 ),
             )
             val playback = PlaybackModel(
@@ -573,19 +718,87 @@ class MainActivity : ComponentActivity() {
                 lyricsLoading = lyricsLoadingTrackId == lyricsTrackId,
                 translationVisible = lyricsSettings.translationVisible,
                 onTranslationToggle = {
-                    preferenceScope.launch { lyricsPreferences.setTranslationVisible(!lyricsSettings.translationVisible) }
+                    preferenceScope.launch { lyricsPreferences.toggleTranslationVisible() }
                 },
                 lyricSpringStrength = lyricsSettings.lyricSpringStrength,
                 lyricAutoFullscreen = lyricsSettings.lyricAutoFullscreen,
+                lyricFocusReturnDelayMs = lyricsSettings.lyricFocusReturnDelayMs,
+                lyricAutoFullscreenDelayMs = lyricsSettings.lyricAutoFullscreenDelayMs,
                 onSearchLyrics = { track, title, artist -> lyricsService.search(track.id, title, artist, lyricsSettings) },
                 onLyricsSelected = { trackId, lyric ->
-                    AndroidSyncRuntime.syncStore.saveProviderLyrics(trackId, lyric.content, lyric.source)
+                    lyricsService.cancelAutoAlign(trackId)
+                    AndroidSyncRuntime.syncStore.saveProviderLyrics(trackId, lyric.content, lyric.source, manual = true)
                     if (trackId == lyricsTrackId) manualLyricsOverride = ManualLyricsOverride(trackId, lyric.content)
                 },
+                lyricsMenu = com.exodidio.tune.ui.components.LyricsMenuActions(
+                    lyricsSettings = lyricsSettings,
+                    perSongConfigs = perSongLyricsConfigs,
+                    hasAutoSyncModels = hasAutoSyncModels,
+                    sourceFlowFor = AndroidSyncRuntime.syncStore::providerLyricsSource,
+                    baseSourceFor = AndroidSyncRuntime.syncStore::currentProviderLyricsBaseSource,
+                    lyricsContentFlowFor = AndroidSyncRuntime.syncStore::providerLyrics,
+                    onSelectSource = { trackId, source ->
+                        if (trackId == lyricsTrackId) manualLyricsOverride = null
+                        if (lyricsSettings.perSongLyricsConfigEnabled) {
+                            com.exodidio.tune.lyrics.PerSongLyricsConfigStore.setPreferredSource(
+                                applicationContext,
+                                trackId,
+                                source,
+                            )
+                            lyricsService.fetchFromSource(trackId, source, lyricsSettings)
+                        } else if (source == null) {
+                            lyricsService.fetchFromSource(trackId, null, lyricsSettings)
+                        } else {
+                            val nextOrder = listOf(source) + lyricsSettings.sourceOrder.filterNot { it == source }
+                            val nextEnabled = lyricsSettings.enabledSources + source
+                            if (nextOrder != lyricsSettings.sourceOrder || nextEnabled != lyricsSettings.enabledSources) {
+                                lyricsPreferences.setSources(nextOrder, nextEnabled)
+                                true
+                            } else {
+                                lyricsService.fetchFromSource(
+                                    trackId,
+                                    source,
+                                    lyricsSettings.copy(sourceOrder = nextOrder, enabledSources = nextEnabled),
+                                )
+                            }
+                        }
+                    },
+                    onToggleAutoAlign = { trackId, enabled ->
+                        preferenceScope.launch {
+                            if (lyricsSettings.perSongLyricsConfigEnabled) {
+                                com.exodidio.tune.lyrics.PerSongLyricsConfigStore.setAutoAlignOverride(
+                                    applicationContext,
+                                    trackId,
+                                    enabled,
+                                )
+                                if (!enabled) {
+                                    lyricsService.cancelAutoAlign(trackId)
+                                    AndroidSyncRuntime.syncStore.restoreAlignedLyrics(trackId)
+                                } else {
+                                    val content = AndroidSyncRuntime.syncStore.currentProviderLyrics(trackId)
+                                    if (!content.isNullOrBlank()) {
+                                        lyricsService.alignCachedLyrics(trackId, content, lyricsSettings)
+                                    }
+                                }
+                            } else {
+                                lyricsPreferences.setAutoAlignWordTiming(enabled)
+                            }
+                        }
+                    },
+                    onResetPerSong = { trackId ->
+                        preferenceScope.launch {
+                            com.exodidio.tune.lyrics.PerSongLyricsConfigStore.clearTrack(applicationContext, trackId)
+                            lyricsService.cancelAutoAlign(trackId)
+                            AndroidSyncRuntime.syncStore.clearProviderLyrics(trackId)
+                            lyricsService.fetch(trackId, lyricsSettings)
+                        }
+                    },
+                ),
                 artworkCrossfade = artworkCrossfade,
                 blendArtworkDuringCrossfade = crossfadeSettings.blendArtworkDuringCrossfade,
                 showFullscreenQualityBadge = showFullscreenQualityBadge,
                 appleBackdrop = appleBackdropSettings,
+                dynamicBackdrop = dynamicBackdropSettings,
                 adaptiveTextColor = adaptiveTextColor,
                 systemVolume = systemMusicVolumeState,
                 onPrevious = playbackController::previous,
@@ -602,6 +815,32 @@ class MainActivity : ComponentActivity() {
                         AndroidSyncRuntime.syncStore.setFavorite(trackId, favorite)
                     }
                 },
+                onNeteaseLikeToggle = { trackId, liked ->
+                    val songId = com.exodidio.tune.netease.NeteaseRepository.songIdForTrack(trackId)
+                    if (songId != null) {
+                        if (com.exodidio.tune.netease.NeteaseRepository.cookie(this@MainActivity).isNullOrBlank()) {
+                            android.widget.Toast.makeText(
+                                this@MainActivity,
+                                R.string.netease_login_required_action,
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        } else {
+                            val track = playbackQueueTracks.firstOrNull { it.id == trackId }
+                                ?: AndroidSyncRuntime.syncStore.trackForPlayback(trackId)
+                            preferenceScope.launch {
+                                com.exodidio.tune.netease.NeteaseRepository
+                                    .setTrackLiked(this@MainActivity, track, songId, liked)
+                                    .onFailure { err ->
+                                        android.widget.Toast.makeText(
+                                            this@MainActivity,
+                                            getString(R.string.netease_like_failed, err.message.orEmpty()),
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                            }
+                        }
+                    }
+                },
                 onTrackPlayNext = playbackController::playNext,
                 onTrackAddToQueue = { trackId -> playbackController.append(listOf(trackId)) },
                 moodRadioEligibleTrackIds = moodRadioEligibleTrackIds,
@@ -613,15 +852,52 @@ class MainActivity : ComponentActivity() {
                 },
                 onMiniPlayerDismiss = playbackController::clearQueue,
                 onOpenMediaOutputSwitcher = ::openMediaOutputSwitcher,
+                playbackSpeed = playbackSpeed,
+                abLoopState = abLoopState,
+                sleepTimerState = sleepTimerState,
+                onPlaybackSpeedSelected = playbackController::setPlaybackSpeed,
+                onSetAbLoopPointA = playbackController::setAbLoopPointA,
+                onSetAbLoopPointB = playbackController::setAbLoopPointB,
+                onFineTuneAbLoop = playbackController::fineTuneAbLoop,
+                onClearAbLoop = playbackController::clearAbLoop,
+                onDeduplicateQueue = playbackController::deduplicateQueue,
+                onSleepTimerMinutes = playbackController::setSleepTimerMinutes,
+                onSleepTimerAfterTrack = playbackController::setSleepTimerAfterCurrentTrack,
+                onCancelSleepTimer = playbackController::cancelSleepTimer,
+                onExportLrc = { title, artist, rawLyrics, offsetMs ->
+                    val content = com.exodidio.tune.lyrics.LrcExporter.buildExportableLrc(
+                        title = title,
+                        artist = artist,
+                        rawLyrics = rawLyrics,
+                        offsetMs = offsetMs,
+                    )
+                    pendingLrcExportContent = content
+                    exportLrcLauncher.launch(
+                        com.exodidio.tune.lyrics.LrcExporter.suggestedFileName(title, artist),
+                    )
+                },
+                funFeatures = funFeaturesSettings,
+                currentTrackPlayCount = if (funFeaturesSettings.vinylRingWear && lyricsTrackId != null) {
+                    trackPlayCounts[lyricsTrackId] ?: 0
+                } else {
+                    0
+                },
+                onCassetteScrubChange = playbackController::setCassetteScrub,
+                onReadAudioLevels = playbackController::readAudioLevels,
             )
             App(
                 uiState = uiState,
                 destinations = destinations,
                 playback = playback,
                 onIntent = viewModel::dispatch,
+                restoreFullScreenPlayerNonce = restoreFullScreenPlayerNonce,
                 onFullScreenPlayerVisibilityChanged = { visible ->
                     isFullScreenPlayerVisible = visible
-                    updateSystemBarAppearance(darkTheme, visible)
+                    updateSystemBarAppearance(darkTheme || isTerminalMode, visible)
+                },
+                onTerminalModeChanged = { enabled ->
+                    isTerminalMode = enabled
+                    updateSystemBarAppearance(darkTheme || enabled, isFullScreenPlayerVisible)
                 },
             )
         }
@@ -719,26 +995,108 @@ class MainActivity : ComponentActivity() {
 
     private fun handleM3uExport(uri: Uri, playlistId: String) {
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                val store = AndroidSyncRuntime.syncStore
-                val playlist: LibraryPlaylist? = store.playlists.value.firstOrNull { it.id == playlistId }
-                val tracks = store.tracks.value
-                val trackById = tracks.associateBy { it.id }
-                val entries = playlist?.trackIds?.mapNotNull { trackId ->
-                    trackById[trackId]?.let { track ->
-                        track.title to (track.audioPath ?: "")
-                    }
-                } ?: emptyList()
-                val content = m3uContent(entries.filter { it.second.isNotBlank() })
-                writeTextToUri(contentResolver, uri, content)
+            val store = AndroidSyncRuntime.syncStore
+            val allTracks = store.tracks.value + store.onlineFavorites.value + store.playbackOnlyTracksFlow.value
+            val trackById = allTracks.associateBy { it.id }
+            val selectedTracks = if (playlistId == com.exodidio.tune.ui.screens.FavoritesPlaylistId) {
+                allTracks.filter { com.exodidio.tune.ui.screens.isFavoriteOf(it.metadataObject()) }
+            } else {
+                val playlist = store.playlists.value.firstOrNull { it.id == playlistId }
+                val smartSpec = playlist?.let { com.exodidio.tune.library.SmartPlaylistEngine.parseSpec(it.metadataJson) }
+                if (smartSpec != null) {
+                    val playCounts = com.exodidio.tune.library.SmartPlaylistEngine.aggregatePlayCounts(
+                        store.dailyTrackListeningStats.value,
+                    )
+                    com.exodidio.tune.library.SmartPlaylistEngine.evaluate(smartSpec, allTracks, playCounts)
+                } else {
+                    playlist?.trackIds?.mapNotNull(trackById::get).orEmpty()
+                }
             }
+            val entries = selectedTracks.mapNotNull { track ->
+                track.audioPath?.takeIf { it.isNotBlank() }?.let { path -> track.title to path }
+            }
+            if (entries.isEmpty()) {
+                android.widget.Toast.makeText(
+                    this@MainActivity,
+                    R.string.playlist_export_empty,
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+            val saved = withContext(Dispatchers.IO) {
+                runCatching {
+                    val content = m3uContent(entries)
+                    writeTextToUri(contentResolver, uri, content)
+                }.getOrDefault(false)
+            }
+            val message = if (saved) {
+                getString(R.string.playlist_export_success, entries.size)
+            } else {
+                getString(R.string.playlist_export_failed)
+            }
+            android.widget.Toast.makeText(this@MainActivity, message, android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun m3uSuggestedFileName(playlistId: String): String {
-        val name = AndroidSyncRuntime.syncStore.playlists.value.firstOrNull { it.id == playlistId }?.name
+        val name = if (playlistId == com.exodidio.tune.ui.screens.FavoritesPlaylistId) {
+            getString(R.string.library_favorites)
+        } else {
+            AndroidSyncRuntime.syncStore.playlists.value.firstOrNull { it.id == playlistId }?.name
+        }
         val base = name?.takeIf { it.isNotBlank() } ?: "playlist"
         return "$base.m3u8"
+    }
+
+    private fun handleLrcExport(uri: Uri, content: String) {
+        lifecycleScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                runCatching { writeTextToUri(contentResolver, uri, content) }.getOrDefault(false)
+            }
+            android.widget.Toast.makeText(
+                this@MainActivity,
+                if (saved) R.string.player_export_lrc_success else R.string.player_export_lrc_failed,
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+
+    private fun handleBackupExport(uri: Uri) {
+        lifecycleScope.launch {
+            val result = com.exodidio.tune.settings.AppBackupManager.exportBackup(
+                context = applicationContext,
+                uri = uri,
+                syncStore = AndroidSyncRuntime.syncStore,
+            )
+            val message = result.fold(
+                onSuccess = { summary ->
+                    getString(R.string.backup_export_success, summary.playlistCount, summary.favoriteCount)
+                },
+                onFailure = { error ->
+                    getString(R.string.backup_export_failed, error.message.orEmpty())
+                },
+            )
+            android.widget.Toast.makeText(this@MainActivity, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun handleBackupRestore(uri: Uri) {
+        lifecycleScope.launch {
+            val result = com.exodidio.tune.settings.AppBackupManager.restoreBackup(
+                context = applicationContext,
+                uri = uri,
+                syncStore = AndroidSyncRuntime.syncStore,
+            )
+            val message = result.fold(
+                onSuccess = { summary ->
+                    getString(R.string.backup_restore_success, summary.playlistCount, summary.favoriteCount)
+                },
+                onFailure = { error ->
+                    getString(R.string.backup_restore_failed, error.message.orEmpty())
+                },
+            )
+            android.widget.Toast.makeText(this@MainActivity, message, android.widget.Toast.LENGTH_LONG).show()
+        }
     }
     override fun onResume() {
         super.onResume()
@@ -757,7 +1115,7 @@ class MainActivity : ComponentActivity() {
             .onFailure { error -> Log.w("Tune", "PlaybackService start deferred: ${error.message}") }
     }
 
-    /** 显式请求屏幕最高刷新率；不设置的话系统常把普通应用按 60Hz 合成。 */
+    /** 显式请求屏幕最高刷新率；仅在显示模式变化时更新窗口属性，避免系统旋转锁定状态被重置。 */
     private fun requestHighRefreshRate() {
         runCatching {
             @Suppress("DEPRECATION")
@@ -766,7 +1124,13 @@ class MainActivity : ComponentActivity() {
             val modes = display.supportedModes
             val best = modes.maxByOrNull { it.refreshRate } ?: return@runCatching
             if (best.refreshRate <= 60f) return@runCatching
-            window.attributes = window.attributes.apply {
+            val current = window.attributes
+            if (current.preferredDisplayModeId == best.modeId &&
+                current.preferredRefreshRate == best.refreshRate
+            ) {
+                return@runCatching
+            }
+            window.attributes = current.apply {
                 preferredRefreshRate = best.refreshRate
                 preferredDisplayModeId = best.modeId
             }
@@ -803,5 +1167,9 @@ internal fun showSystemOutputSwitcher(router: MediaRouter2, sessionToken: MediaS
             }
         }
     }
-    return router.showSystemOutputSwitcher()
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        router.showSystemOutputSwitcher()
+    } else {
+        false
+    }
 }

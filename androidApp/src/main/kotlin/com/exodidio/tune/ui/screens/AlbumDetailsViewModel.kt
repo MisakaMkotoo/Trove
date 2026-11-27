@@ -47,19 +47,26 @@ internal fun albumPlaybackRequestFor(tracks: List<LibraryTrack>, trackId: String
     return startIndex.takeIf { it >= 0 }?.let { PlaybackRequest(tracks.map { it.id }, it) }
 }
 
-internal fun albumDetailsUiStateFor(state: AlbumDetailsUiState, albumId: String): AlbumDetailsUiState {
-    val tracks = state.tracks.filter { track ->
-        track.albumId == albumId || track.metadataObject()
+internal fun trackEffectiveAlbumId(track: LibraryTrack): String =
+    track.albumId.ifBlank {
+        track.metadataObject()
             ?.get("album")
             ?.let { it as? kotlinx.serialization.json.JsonObject }
             ?.get("id")
             ?.let { it as? kotlinx.serialization.json.JsonPrimitive }
-            ?.content == albumId
-    }.sortedWith(
-        compareBy<LibraryTrack> { if (it.discNumber > 0) it.discNumber else Int.MAX_VALUE }
-            .thenBy { if (it.trackNumber > 0) it.trackNumber else Int.MAX_VALUE }
-            .thenBy { it.syncOrder },
-    )
+            ?.content
+            .orEmpty()
+    }
+
+internal val albumTrackDisplayComparator =
+    compareBy<LibraryTrack> { if (it.discNumber > 0) it.discNumber else Int.MAX_VALUE }
+        .thenBy { if (it.trackNumber > 0) it.trackNumber else Int.MAX_VALUE }
+        .thenBy { it.syncOrder }
+
+internal fun albumDetailsUiStateFor(state: AlbumDetailsUiState, albumId: String): AlbumDetailsUiState {
+    val tracks = state.tracks.filter { track ->
+        track.albumId == albumId || (track.albumId.isBlank() && trackEffectiveAlbumId(track) == albumId)
+    }.sortedWith(albumTrackDisplayComparator)
     return AlbumDetailsUiState(state.albums.firstOrNull { it.id == albumId }, tracks)
 }
 

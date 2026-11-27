@@ -16,8 +16,9 @@ import androidx.compose.ui.test.assertLeftPositionInRootIsEqualTo
 import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -171,7 +172,7 @@ class FullScreenPlayerTest {
             }
         }
 
-        composeTestRule.onNodeWithContentDescription("Favorite").performClick()
+        composeTestRule.onNodeWithContentDescription("Library").performClick()
         composeTestRule.runOnIdle {
             assertEquals(true, change)
             assertEquals(listOf(HapticFeedbackType.Confirm), haptics)
@@ -203,10 +204,42 @@ class FullScreenPlayerTest {
             }
         }
 
-        composeTestRule.onNodeWithContentDescription("Favorite").performClick()
+        composeTestRule.onNodeWithContentDescription("Library").performClick()
         composeTestRule.runOnIdle {
             assertEquals(false, change)
             assertEquals(emptyList<HapticFeedbackType>(), haptics)
+        }
+    }
+
+    @Test
+    fun localTrackShowsSingleLibraryButtonAndNeteaseTrackShowsBothButtons() {
+        var isNetease by mutableStateOf(false)
+        var neteaseLikeToggle: Boolean? = null
+        val neteaseItem = item.copy(trackId = "netease:123456")
+        composeTestRule.setContent {
+            TuneTheme(themeMode = ThemeMode.Dark) {
+                FullScreenPlayer(
+                    visible = true,
+                    dragProgress = 0f,
+                    isDragging = false,
+                    openingFromMiniPlayerSwipe = false,
+                    playbackState = PlaybackState.Playing(if (isNetease) neteaseItem else item, 0L, 120_000L),
+                    volume = 0.5f,
+                    onSeek = {}, onVolumeChange = {}, onPrevious = {}, onPlayPause = {}, onNext = {},
+                    onNeteaseLikeToggle = { _, liked -> neteaseLikeToggle = liked },
+                    onOpenMediaOutputSwitcher = {}, onDismiss = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Library").assertExists()
+        composeTestRule.onAllNodesWithContentDescription("Like on Netease").assertCountEquals(0)
+
+        composeTestRule.runOnIdle { isNetease = true }
+        composeTestRule.onNodeWithContentDescription("Library").assertExists()
+        composeTestRule.onNodeWithContentDescription("Like on Netease").performClick()
+        composeTestRule.runOnIdle {
+            assertEquals(true, neteaseLikeToggle)
         }
     }
 

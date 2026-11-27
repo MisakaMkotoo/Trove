@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        LAN/Mesh Music Sync (http://IP:27185), local loopback stream proxy (127.0.0.1),
+        and dynamic CDN media URLs may use arbitrary IP/HTTP endpoints; enforce HTTPS on
+        auth, API, and HTTPS-capable lyrics/model domains below.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">music.163.com</domain>
+        <domain includeSubdomains="true">lyrics.kugou.com</domain>
+        <domain includeSubdomains="true">lrclib.net</domain>
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">githubusercontent.com</domain>
+    </domain-config>
+</network-security-config>

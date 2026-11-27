@@ -38,14 +38,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.exodidio.tune.R
+import com.exodidio.tune.netease.DiscoverPlaylist
+import com.exodidio.tune.netease.MineAlbum
+import com.exodidio.tune.netease.MineArtist
+import com.exodidio.tune.netease.NeteaseRepository
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.sync.LibraryTrack
+import com.exodidio.tune.ui.components.HeroCard
 import com.exodidio.tune.ui.components.MaterialSymbol
 import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.TrackContextArtist
 import com.exodidio.tune.ui.components.TrackContextMenu
 import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
+import com.exodidio.tune.ui.components.TuneSegmentedTabBar
 import com.exodidio.tune.ui.components.artworkBorder
 import com.exodidio.tune.ui.components.rememberArtworkThumbnail
 import com.exodidio.tune.ui.theme.LocalTuneColors
@@ -74,12 +82,29 @@ internal fun LibraryContent(
     onArtistsSelected: (() -> Unit)? = null,
     onAlbumsSelected: (() -> Unit)? = null,
     onTracksSelected: (() -> Unit)? = null,
+    onFoldersSelected: (() -> Unit)? = null,
     onGenresSelected: (() -> Unit)? = null,
     onComposersSelected: (() -> Unit)? = null,
     onPlaylistsSelected: (() -> Unit)? = null,
     showGenres: Boolean = false,
     showComposers: Boolean = false,
     onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit = {},
+    mergedMode: Boolean = false,
+    selectedMergedTab: Int = 0,
+    onMergedTabSelected: (Int) -> Unit = {},
+    onCloudDiskSelected: (() -> Unit)? = null,
+    onDownloadsSelected: (() -> Unit)? = null,
+    rowStates: NeteaseRowStates = remember { NeteaseRowStates() },
+    onPlayTracks: (List<String>, Int) -> Unit = { _, _ -> },
+    onOpenNeteasePlaylist: (DiscoverPlaylist) -> Unit = {},
+    onOpenCreatedPlaylists: () -> Unit = {},
+    onOpenSavedPlaylists: () -> Unit = {},
+    onOpenSavedAlbums: () -> Unit = {},
+    onOpenNeteaseAlbum: (MineAlbum) -> Unit = {},
+    onOpenArtists: () -> Unit = {},
+    onOpenNeteaseArtist: (MineArtist) -> Unit = {},
+    onOpenPlayRecords: () -> Unit = {},
+    onOpenAccount: () -> Unit = {},
 ) {
     val colors = LocalTuneColors.current
     var contextTrack by remember { mutableStateOf<LibraryTrack?>(null) }
@@ -90,6 +115,33 @@ internal fun LibraryContent(
             .toInt()
             .coerceAtLeast(2)
     }
+
+    val loggedIn by NeteaseRepository.loggedIn.collectAsStateWithLifecycle()
+    val account by NeteaseRepository.accountInfo.collectAsStateWithLifecycle()
+    val mine by NeteaseRepository.mine.collectAsStateWithLifecycle()
+    val playRecords by NeteaseRepository.playRecords.collectAsStateWithLifecycle()
+    LaunchedEffect(mergedMode, loggedIn) {
+        if (mergedMode && loggedIn) {
+            NeteaseRepository.loadAccountInfo()
+            NeteaseRepository.loadMine()
+            NeteaseRepository.loadPlayRecords()
+        }
+    }
+    val neteaseRecentTracks by NeteaseRepository.recentTracks.collectAsStateWithLifecycle()
+    val cloudRecordSongs = remember(playRecords.recent, playRecords.weekRank, playRecords.allRank) {
+        val source = playRecords.recent.ifEmpty {
+            playRecords.weekRank.ifEmpty { playRecords.allRank }
+        }
+        source.take(18).map { it.track }
+    }
+    val mergedHistorySongs = remember(neteaseRecentTracks, cloudRecordSongs) {
+        (neteaseRecentTracks + cloudRecordSongs).distinctBy { it.id }.take(18)
+    }
+    val downloadedSongs = if (mergedMode) rememberNeteaseDownloadedTracks() else emptyList()
+    var showCreateNeteasePlaylistSheet by remember { mutableStateOf(false) }
+    var editingNeteasePlaylist by remember { mutableStateOf<DiscoverPlaylist?>(null) }
+    var deletingNeteasePlaylist by remember { mutableStateOf<DiscoverPlaylist?>(null) }
+
     LazyColumn(
         state = listState,
         modifier = modifier,
@@ -124,6 +176,8 @@ internal fun LibraryContent(
                 CategoryRow(R.string.library_albums, MaterialSymbols.Album, onAlbumsSelected)
                 CategoryDivider()
                 CategoryRow(R.string.library_tracks, MaterialSymbols.MusicNote, onTracksSelected)
+                CategoryDivider()
+                CategoryRow(R.string.library_folders, MaterialSymbols.Folder, onFoldersSelected)
                 if (showGenres) {
                     CategoryDivider()
                     CategoryRow(R.string.library_genres, MaterialSymbols.Label, onGenresSelected)
@@ -132,59 +186,137 @@ internal fun LibraryContent(
                     CategoryDivider()
                     CategoryRow(R.string.library_composers, MaterialSymbols.StylusFountainPen, onComposersSelected)
                 }
+                if (mergedMode) {
+                    CategoryDivider()
+                    CategoryRow(R.string.mine_cloud_disk_title, MaterialSymbols.Sync, onCloudDiskSelected)
+                    CategoryDivider()
+                    CategoryRow(R.string.mine_downloads_title, MaterialSymbols.ArrowDownward, onDownloadsSelected)
+                }
                 CategoryDivider()
             }
         }
-        if (recentTracks.isNotEmpty()) {
-            item(key = "recently-added-title") {
-                Text(
-                    text = stringResource(R.string.library_recently_added),
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                    color = colors.textMain,
+        if (mergedMode) {
+            item(key = "library-merged-tabs") {
+                TuneSegmentedTabBar(
+                    tabs = listOf(
+                        stringResource(R.string.search_tab_netease),
+                        stringResource(R.string.library_tab_local),
+                    ),
+                    selectedIndex = selectedMergedTab,
+                    onSelect = onMergedTabSelected,
                     modifier = Modifier.padding(
                         start = LibraryHorizontalPadding,
                         end = LibraryHorizontalPadding,
-                        top = 28.dp,
-                        bottom = 12.dp,
+                        top = 20.dp,
                     ),
+                    tabTestTagPrefix = "library-merged-root-tab",
                 )
             }
-            recentTracks.chunked(recentColumns).forEach { rowTracks ->
-                item(key = "recent-row-${rowTracks.first().id}") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = LibraryHorizontalPadding, end = LibraryHorizontalPadding, bottom = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(RecentColumnsGap),
-                    ) {
-                        rowTracks.forEach { track ->
-                            TrackContextMenu(
-                                track = track,
-                                expanded = contextTrack?.id == track.id,
-                                onDismiss = { if (contextTrack?.id == track.id) contextTrack = null },
-                                modifier = Modifier.weight(1f),
-                                playbackQueue = playbackQueue,
-                                onPlayNext = onTrackPlayNext,
-                                onAddToQueue = onTrackAddToQueue,
-                                onFavoriteChange = onTrackFavoriteToggle,
-                                onGoToAlbum = onTrackAlbumClick,
-                                onGoToArtist = onTrackArtistClick,
-                                onBottomSheetRequested = onTrackContextBottomSheet,
-                            ) {
-                                RecentTrackTile(
+        }
+        if (mergedMode && selectedMergedTab == 0) {
+            mineNeteaseSections(
+                loggedIn = loggedIn,
+                account = account,
+                mine = mine,
+                mergedHistorySongs = mergedHistorySongs,
+                downloadedSongs = downloadedSongs,
+                includeProfileHeader = false,
+                sectionTopPadding = 28.dp,
+                rowStates = rowStates,
+                playbackQueue = playbackQueue,
+                onPlayTracks = onPlayTracks,
+                onTrackPlayNext = onTrackPlayNext,
+                onTrackAddToQueue = onTrackAddToQueue,
+                onTrackFavoriteToggle = onTrackFavoriteToggle,
+                onTrackContextBottomSheet = onTrackContextBottomSheet,
+                onOpenPlaylist = onOpenNeteasePlaylist,
+                onOpenCreatedPlaylists = onOpenCreatedPlaylists,
+                onOpenSavedPlaylists = onOpenSavedPlaylists,
+                onOpenSavedAlbums = onOpenSavedAlbums,
+                onOpenAlbum = onOpenNeteaseAlbum,
+                onOpenArtists = onOpenArtists,
+                onOpenArtist = onOpenNeteaseArtist,
+                onOpenPlayRecords = onOpenPlayRecords,
+                onOpenCloudDisk = { onCloudDiskSelected?.invoke() },
+                onOpenDownloads = { onDownloadsSelected?.invoke() },
+                onOpenAccount = onOpenAccount,
+                onShowCreatePlaylist = { showCreateNeteasePlaylistSheet = true },
+                onEditPlaylist = { editingNeteasePlaylist = it },
+                onDeletePlaylist = { deletingNeteasePlaylist = it },
+            )
+        } else {
+            if (recentTracks.isNotEmpty()) {
+                item(key = "recently-added-title") {
+                    Text(
+                        text = stringResource(R.string.library_recently_added),
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        color = colors.textMain,
+                        modifier = Modifier.padding(
+                            start = LibraryHorizontalPadding,
+                            end = LibraryHorizontalPadding,
+                            top = 28.dp,
+                            bottom = 12.dp,
+                        ),
+                    )
+                }
+                recentTracks.chunked(recentColumns).forEach { rowTracks ->
+                    item(key = "recent-row-${rowTracks.first().id}") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = LibraryHorizontalPadding, end = LibraryHorizontalPadding, bottom = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(RecentColumnsGap),
+                        ) {
+                            rowTracks.forEach { track ->
+                                TrackContextMenu(
                                     track = track,
-                                    onClick = { onTrackClick?.invoke(track.id) },
-                                    onLongClick = { contextTrack = track },
-                                )
+                                    expanded = contextTrack?.id == track.id,
+                                    onDismiss = { if (contextTrack?.id == track.id) contextTrack = null },
+                                    modifier = Modifier.weight(1f),
+                                    playbackQueue = playbackQueue,
+                                    onPlayNext = onTrackPlayNext,
+                                    onAddToQueue = onTrackAddToQueue,
+                                    onFavoriteChange = onTrackFavoriteToggle,
+                                    onGoToAlbum = onTrackAlbumClick,
+                                    onGoToArtist = onTrackArtistClick,
+                                    onBottomSheetRequested = onTrackContextBottomSheet,
+                                ) {
+                                    RecentTrackTile(
+                                        track = track,
+                                        onClick = { onTrackClick?.invoke(track.id) },
+                                        onLongClick = { contextTrack = track },
+                                    )
+                                }
+                            }
+                            repeat(recentColumns - rowTracks.size) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
-                        repeat(recentColumns - rowTracks.size) {
-                            Spacer(modifier = Modifier.weight(1f))
-                        }
+                    }
+                }
+            } else if (mergedMode) {
+                item(key = "library-recent-empty") {
+                    Box(modifier = Modifier.padding(horizontal = 24.dp, vertical = 24.dp)) {
+                        HeroCard(
+                            symbol = MaterialSymbols.MusicNote,
+                            title = stringResource(R.string.library_recent_empty_title),
+                            description = stringResource(R.string.library_recent_empty_description),
+                        )
                     }
                 }
             }
         }
+    }
+
+    if (mergedMode) {
+        MinePlaylistManageOverlays(
+            showCreateSheet = showCreateNeteasePlaylistSheet,
+            onDismissCreate = { showCreateNeteasePlaylistSheet = false },
+            editingPlaylist = editingNeteasePlaylist,
+            onDismissEdit = { editingNeteasePlaylist = null },
+            deletingPlaylist = deletingNeteasePlaylist,
+            onDismissDelete = { deletingNeteasePlaylist = null },
+        )
     }
 }
 

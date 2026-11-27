@@ -49,12 +49,14 @@ fun Card(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalTuneColors.current
+    val interactionSource = remember { MutableInteractionSource() }
     Card(
         modifier = modifier
+            .pressScale(interactionSource, pressedScale = 0.975f)
             .clickable(
                 onClick = onClick,
                 role = Role.Button,
-                interactionSource = remember { MutableInteractionSource() },
+                interactionSource = interactionSource,
                 indication = null,
             ),
         contentPadding = PaddingValues(20.dp),

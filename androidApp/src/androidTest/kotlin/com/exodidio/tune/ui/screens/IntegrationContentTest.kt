@@ -4,10 +4,10 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.exodidio.tune.lyrics.LyricsSettings
-import com.exodidio.tune.lyrics.LyricsSource
+import com.exodidio.tune.lyrics.LyricsSourceId
 import com.exodidio.tune.settings.ThemeMode
 import com.exodidio.tune.ui.theme.TuneTheme
-import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 
@@ -16,21 +16,19 @@ class IntegrationContentTest {
     val composeTestRule = createComposeRule()
 
     @Test
-    fun lyricsSourceSelectionReportsAutoFetch() {
-        var source = LyricsSource.AutoFetch
+    fun lyricsSourceToggleReportsDisabledSource() {
+        var enabled = LyricsSourceId.entries.toSet()
         composeTestRule.setContent {
             TuneTheme(themeMode = ThemeMode.Dark) {
                 LyricsContent(
                     settings = LyricsSettings(),
-                    onSourceChanged = { source = it },
-                    onLrclibChanged = {},
-                    onKugouChanged = {},
-                    onNeteaseChanged = {},
+                    onSourcesChanged = { _, sources -> enabled = sources },
+                    onWordFallbackChanged = {},
                 )
             }
         }
 
-        composeTestRule.onNodeWithText("Auto fetch").performClick()
-        assertEquals(LyricsSource.AutoFetch, source)
+        composeTestRule.onNodeWithText("NetEase").performClick()
+        assertFalse(LyricsSourceId.Netease in enabled)
     }
 }

@@ -25,6 +25,37 @@
     native <methods>;
 }
 
+# In-process FFmpeg AVIOContext stream bridge invoked via JNI GetMethodID.
+-keep class com.exodidio.tune.netease.NeteaseStreamByteSource {
+    public int read(int);
+    public long seek(long, int);
+    public void abortReadForSeek(long);
+    public void beginSeek(long);
+    public void endSeek(long);
+    public void cancel();
+    public void close();
+}
+
+# ONNX Runtime: `libonnxruntime4j_jni.so` looks up ai.onnxruntime classes and
+# method IDs by name; obfuscation aborts the process inside OrtSession.run.
+-keep class ai.onnxruntime.** { *; }
+-keepclassmembers class ai.onnxruntime.** { *; }
+
+# HyperOS Focus payload builders are used reflectively by the vendor library.
+-keep class com.xzakota.hyper.notification.** { *; }
+
+# Lyricon provider bridge is discovered through manifest meta-data and binder.
+-keep class io.github.proify.lyricon.** { *; }
+-dontwarn io.github.proify.lyricon.**
+
+# Kyant0 AndroidLiquidGlass (RuntimeShader / backdrop layers) and serialized enums.
+-keep class com.kyant.** { *; }
+-keepclassmembers class com.kyant.** { *; }
+-keepclassmembers enum com.exodidio.tune.** {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
 
 # ---- Optional transitive dependencies not present on Android runtime ----
 # Generated from R8 missing_rules.txt — these are never used at runtime on Android.

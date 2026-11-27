@@ -22,14 +22,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,9 +52,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.ContentScale
@@ -55,6 +67,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,20 +88,38 @@ import com.exodidio.tune.player.PlaybackItem
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.player.PlaybackState
 import com.exodidio.tune.player.showsPauseGlyph
-import com.exodidio.tune.ui.components.liquidGlassBackground
+import com.exodidio.tune.settings.ControlStyle
+import com.exodidio.tune.ui.components.LocalControlStyle
+import com.exodidio.tune.ui.components.LocalLiquidGlassBlurDp
+import com.exodidio.tune.ui.components.LocalReduceMotion
+import com.exodidio.tune.ui.components.tuneGlassBackdrop
+import com.exodidio.tune.ui.components.tuneLiquidGlassBackground
+import com.exodidio.tune.ui.components.rememberAnimatedGlassTint
+import com.exodidio.tune.ui.components.rememberArtworkFadeAlpha
 import com.exodidio.tune.ui.components.rememberArtworkThumbnail
 import com.exodidio.tune.ui.theme.LocalTuneColors
 import kotlin.math.absoluteValue
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal val MiniPlayerHeight = 48.dp
 internal val MiniPlayerNavigationGap = 8.dp
-private val MiniPlayerPillRadius = 24.dp
+internal val MiniPlayerPillRadius = 24.dp
+internal const val MiniPlayerMorphCrossfadeThreshold = 0.04f
 private val MetadataSwipeMaximum = 40.dp
 private val MetadataSwipeThreshold = 32.dp
 private const val MetadataSwipeVelocityPxPerMs = 1.2f
+
+internal fun miniPlayerMorphAlpha(fullScreenExpansionProgress: Float): Float =
+    1f - (fullScreenExpansionProgress / MiniPlayerMorphCrossfadeThreshold).coerceIn(0f, 1f)
+
+internal data class MiniPlayerTransitionBounds(
+    val pillRectInRoot: Rect? = null,
+    val artworkRectInRoot: Rect? = null,
+)
 
 @Composable
 internal fun MiniPlayer(
@@ -104,14 +135,20 @@ internal fun MiniPlayer(
     onFullScreenPlayerDrag: (Float) -> Unit,
     onFullScreenPlayerDragEnd: (Boolean) -> Unit,
     stableGlassWidth: Dp? = null,
+    fullScreenExpansionProgress: Float = 0f,
+    onBoundsChanged: (MiniPlayerTransitionBounds) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val item = playbackState.itemOrNull() ?: return
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
+    val isLiquidGlass = LocalControlStyle.current == ControlStyle.LiquidGlass
+    val liquidGlassBlurDp = LocalLiquidGlassBlurDp.current.dp
+    val animatedGlassTint = rememberAnimatedGlassTint(colors, animate = !reduceMotion)
     val shape = RoundedCornerShape(MiniPlayerPillRadius)
-    val isPlaying = playbackState is PlaybackState.Playing
     val isPreparing = playbackState is PlaybackState.Preparing
-    // 在线歌曲点播放后正在重连：按钮先显示“暂停”形态，重连失败会自动退回。
+    val isBuffering = isPreparing || (playbackState as? PlaybackState.Playing)?.isBuffering == true
+    // 在线歌曲点播放后正在重连/缓冲：按钮先显示“暂停”语义，点一下可退回暂停态。
     val showsPause = playbackState.showsPauseGlyph()
     val canNavigatePrevious = playbackQueue.canNavigatePrevious()
     val canNavigateNext = playbackQueue.canNavigateNext()
@@ -119,7 +156,23 @@ internal fun MiniPlayer(
     val latestCanNavigateNext by rememberUpdatedState(canNavigateNext)
     val latestOnPreviousClick by rememberUpdatedState(onPreviousClick)
     val latestOnNextClick by rememberUpdatedState(onNextClick)
-    val artwork = rememberArtworkThumbnail(item.artworkPath)
+    val localArtwork = rememberArtworkThumbnail(item.artworkPath)
+    val coverInfo by androidx.compose.runtime.produceState<com.exodidio.tune.netease.NeteaseRepository.PlaybackCoverInfo?>(
+        initialValue = null,
+        item.trackId,
+        localArtwork != null,
+    ) {
+        value = if (localArtwork != null) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching { com.exodidio.tune.netease.NeteaseRepository.playbackCoverInfo(item.trackId) }
+                    .getOrNull()
+            }
+        }
+    }
+    val coilArtwork = rememberCoilThumbnail(coverInfo?.url, 200)
+    val artwork = localArtwork ?: coilArtwork
     val density = LocalDensity.current
     val hapticFeedback = LocalHapticFeedback.current
     val configuration = LocalConfiguration.current
@@ -142,9 +195,17 @@ internal fun MiniPlayer(
     )
     val displayedDragOffset = dragOffset.value
     val upwardPullProgress = (-displayedDragOffset / maximumOpenPullPx).coerceIn(0f, 1f)
-    val miniPlayerAlpha = 1f - upwardPullProgress
+    val morphHiddenAlpha = miniPlayerMorphAlpha(fullScreenExpansionProgress)
+    val miniPlayerAlpha = (1f - upwardPullProgress) * morphHiddenAlpha
     var fullScreenPullPx by remember { mutableStateOf(0f) }
     var miniPlayerTopPx by remember { mutableStateOf(0f) }
+    val latestMiniPlayerTopPx by rememberUpdatedState(miniPlayerTopPx)
+    var restingPillRect by remember { mutableStateOf<Rect?>(null) }
+    var restingArtworkRect by remember { mutableStateOf<Rect?>(null) }
+    val latestOnBoundsChanged by rememberUpdatedState(onBoundsChanged)
+    androidx.compose.runtime.LaunchedEffect(restingPillRect, restingArtworkRect) {
+        latestOnBoundsChanged(MiniPlayerTransitionBounds(restingPillRect, restingArtworkRect))
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -156,7 +217,6 @@ internal fun MiniPlayer(
                 fullScreenCatchUpTravelPx,
                 maximumOpenPullPx,
                 dismissTargetPx,
-                miniPlayerTopPx,
             ) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -192,7 +252,7 @@ internal fun MiniPlayer(
                                     isVerticalDrag = true
                                     isOpeningFullscreen = totalDragY < 0f
                                     if (isOpeningFullscreen) {
-                                        val fingerStartY = miniPlayerTopPx + down.position.y
+                                        val fingerStartY = latestMiniPlayerTopPx + down.position.y
                                         fullScreenCatchUpPx = (fullScreenTransitionDistancePx - fingerStartY)
                                             .coerceAtLeast(0f)
                                     }
@@ -283,13 +343,34 @@ internal fun MiniPlayer(
                 onClick { onOpenFullScreenPlayer(); true }
             },
     ) {
+        val useOpticalGlass = stableGlassWidth == null &&
+            isLiquidGlass &&
+            !reduceMotion &&
+            tuneGlassBackdrop() != null
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .offset { IntOffset(0, displayedDragOffset.roundToInt()) }
+                .onGloballyPositioned { coords ->
+                    // 即使全屏页已展开，底层 MiniPlayer 完成进场/合并过渡后也要继续同步静止坐标，
+                    // 避免未合并模式下按住全屏页下滑收起时目标矩形停留在半路。
+                    if (abs(displayedDragOffset) < 0.5f) {
+                        val rect = coords.boundsInRoot()
+                        if (rect.width > 0f && rect.height > 0f) {
+                            restingPillRect = rect
+                        }
+                    }
+                }
                 .alpha(miniPlayerAlpha)
-                .clip(shape)
-                .border(0.5.dp, colors.borderGlass, shape),
+                .then(
+                    if (!useOpticalGlass) {
+                        Modifier
+                            .clip(shape)
+                            .border(0.5.dp, colors.borderGlass, shape)
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
             Box(
             modifier = if (stableGlassWidth == null) {
@@ -300,10 +381,17 @@ internal fun MiniPlayer(
                     .requiredWidth(stableGlassWidth)
                     .fillMaxHeight()
             }
-                .liquidGlassBackground(
-                    hazeState,
-                    colors,
+                .tuneLiquidGlassBackground(
+                    hazeState = hazeState,
+                    colors = colors,
+                    shape = shape,
                     hazeBlurRadius = 30.dp,
+                    glassBlurRadius = liquidGlassBlurDp,
+                    glassTint = if (isLiquidGlass) null else animatedGlassTint,
+                    enableLens = true,
+                    lensRadius = 16.dp,
+                    refractionHeight = 9.dp,
+                    chromaticAberration = isLiquidGlass && !reduceMotion,
                 ),
         )
         Row(
@@ -315,25 +403,58 @@ internal fun MiniPlayer(
         Box(
             modifier = Modifier
                 .size(34.dp)
+                .onGloballyPositioned { coords ->
+                    if (abs(displayedDragOffset) < 0.5f) {
+                        val rect = coords.boundsInRoot()
+                        if (rect.width > 0f && rect.height > 0f) {
+                            restingArtworkRect = rect
+                        }
+                    }
+                }
                 .clip(RoundedCornerShape(8.dp))
                 .background(colors.glassElevated)
                 .border(0.5.dp, colors.borderGlass, RoundedCornerShape(8.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            if (artwork != null) {
-                Image(
-                    bitmap = artwork,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
+            AnimatedContent(
+                targetState = item.trackId,
+                transitionSpec = {
+                    if (reduceMotion) {
+                        EnterTransition.None togetherWith ExitTransition.None
+                    } else {
+                        (fadeIn(tween(220, easing = FastOutSlowInEasing)) +
+                            scaleIn(initialScale = 0.92f, animationSpec = tween(220, easing = FastOutSlowInEasing))) togetherWith
+                            fadeOut(tween(150, easing = FastOutSlowInEasing))
+                    }
+                },
+                label = "mini-player-artwork-transition",
+            ) { targetTrackId ->
+                var slotArtwork by remember(targetTrackId) { mutableStateOf(artwork) }
+                if (targetTrackId == item.trackId) {
+                    slotArtwork = artwork
+                }
+                val artworkAlpha = rememberArtworkFadeAlpha(targetTrackId, slotArtwork != null)
+                Box(
                     modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                MaterialSymbol(
-                    symbol = MaterialSymbols.MusicNote,
-                    contentDescription = null,
-                    tint = colors.textMuted,
-                    size = 22.dp,
-                )
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val activeBitmap = slotArtwork
+                    if (activeBitmap != null) {
+                        Image(
+                            bitmap = activeBitmap,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().alpha(artworkAlpha),
+                        )
+                    } else {
+                        MaterialSymbol(
+                            symbol = MaterialSymbols.MusicNote,
+                            contentDescription = null,
+                            tint = colors.textMuted,
+                            size = 22.dp,
+                        )
+                    }
+                }
             }
         }
         Column(
@@ -392,15 +513,30 @@ internal fun MiniPlayer(
                     )
                 },
             ) {
-                Column(
+                AnimatedContent(
+                    targetState = item,
+                    contentKey = { "${it.trackId}:${it.title}:${it.artist}" },
                     modifier = Modifier.offset { IntOffset(displayedMetadataDragOffset.roundToInt(), 0) },
-                ) {
-                    TuneMarqueeText(
-                        item.title,
-                        colors.textMain,
-                        MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                    )
-                    TuneMarqueeText(item.artist, colors.textMuted, MaterialTheme.typography.bodySmall)
+                    transitionSpec = {
+                        if (reduceMotion) {
+                            EnterTransition.None togetherWith ExitTransition.None
+                        } else {
+                            (fadeIn(tween(220, easing = FastOutSlowInEasing)) +
+                                slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it / 4 }) togetherWith
+                                (fadeOut(tween(150, easing = FastOutSlowInEasing)) +
+                                    slideOutVertically(tween(150, easing = FastOutSlowInEasing)) { -it / 4 })
+                        }
+                    },
+                    label = "mini-player-metadata-transition",
+                ) { activeItem ->
+                    Column {
+                        TuneMarqueeText(
+                            activeItem.title,
+                            colors.textMain,
+                            MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                        )
+                        TuneMarqueeText(activeItem.artist, colors.textMuted, MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }
@@ -424,6 +560,7 @@ internal fun MiniPlayer(
             enabled = !isPreparing || showsPause,
             horizontalOffset = 8.dp,
             isPlaying = showsPause,
+            isBuffering = isBuffering,
         )
         MiniPlayerControl(
             symbol = MaterialSymbols.SkipNext,
@@ -437,6 +574,8 @@ internal fun MiniPlayer(
     }
 }
 
+internal const val MiniPlayerBufferingSpinnerTestTag = "mini_player_buffering_spinner"
+
 @Composable
 private fun MiniPlayerControl(
     label: String,
@@ -444,12 +583,19 @@ private fun MiniPlayerControl(
     enabled: Boolean = true,
     horizontalOffset: Dp = 0.dp,
     isPlaying: Boolean? = null,
+    isBuffering: Boolean = false,
     skipForward: Boolean? = null,
     symbol: String? = null,
 ) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.85f else 1f,
+        animationSpec = tween(durationMillis = if (isPressed) 120 else 200, easing = FastOutSlowInEasing),
+        label = "mini-player-control-press-scale",
+    )
     Box(
         modifier = Modifier
             .size(40.dp)
@@ -468,15 +614,48 @@ private fun MiniPlayerControl(
         // glyph during a track hand-off, which reads as a visual flash.
         val tint = if (enabled || isPlaying != null) colors.textMain else colors.textMuted
         if (isPlaying != null) {
-            AnimatedPlayPauseSymbol(
-                isPlaying = isPlaying,
-                // 播放中但被临时禁用（重连中）时要直接显示“暂停”，不要停留在上一次的形态。
-                isPreparing = !enabled && !isPlaying,
-                isPressed = isPressed,
-                tint = tint,
-                size = 22.dp,
-                touchTargetSize = 40.dp,
-            )
+            if (isBuffering) {
+                if (reduceMotion) {
+                    CircularProgressIndicator(
+                        progress = { 0.72f },
+                        modifier = Modifier
+                            .size(18.dp)
+                            .graphicsLayer {
+                                scaleX = pressScale
+                                scaleY = pressScale
+                            }
+                            .semantics { testTag = MiniPlayerBufferingSpinnerTestTag },
+                        color = tint,
+                        trackColor = tint.copy(alpha = 0.22f),
+                        strokeWidth = 2.2.dp,
+                        strokeCap = StrokeCap.Round,
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .graphicsLayer {
+                                scaleX = pressScale
+                                scaleY = pressScale
+                            }
+                            .semantics { testTag = MiniPlayerBufferingSpinnerTestTag },
+                        color = tint,
+                        trackColor = tint.copy(alpha = 0.22f),
+                        strokeWidth = 2.2.dp,
+                        strokeCap = StrokeCap.Round,
+                    )
+                }
+            } else {
+                AnimatedPlayPauseSymbol(
+                    isPlaying = isPlaying,
+                    // 播放中但被临时禁用（重连中）时要直接显示“暂停”，不要停留在上一次的形态。
+                    isPreparing = !enabled && !isPlaying,
+                    isPressed = isPressed,
+                    tint = tint,
+                    size = 22.dp,
+                    touchTargetSize = 40.dp,
+                )
+            }
         } else if (skipForward != null) {
             AnimatedSkipSymbol(
                 forward = skipForward,

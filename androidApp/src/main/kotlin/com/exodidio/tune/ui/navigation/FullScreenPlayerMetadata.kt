@@ -78,6 +78,9 @@ internal fun FullScreenPlayerMetadataTransition(
     compact: Boolean,
     isFavorite: Boolean,
     onFavoriteToggle: (String, Boolean) -> Unit,
+    isNeteaseTrack: Boolean = false,
+    isNeteaseLiked: Boolean = false,
+    onNeteaseLikeToggle: (String, Boolean) -> Unit = { _, _ -> },
     contextTrack: LibraryTrack?,
     contextMenuExpanded: Boolean,
     onContextMenuOpen: () -> Unit,
@@ -91,6 +94,7 @@ internal fun FullScreenPlayerMetadataTransition(
     onTrackGoToArtist: (String) -> Unit,
     onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit,
     onCloseFullscreenThen: ((() -> Unit) -> Unit),
+    onMoreClick: () -> Unit = {},
 ) {
     androidx.compose.animation.AnimatedContent(
         targetState = item,
@@ -103,10 +107,11 @@ internal fun FullScreenPlayerMetadataTransition(
         label = "full-screen-player-metadata-crossfade",
     ) { animatedItem ->
         FullScreenPlayerMetadata(
-            animatedItem, displayedHorizontalSwipeOffset, hazeState, compact, isFavorite, onFavoriteToggle,
+            animatedItem, displayedHorizontalSwipeOffset, hazeState, compact,
+            isFavorite, onFavoriteToggle, isNeteaseTrack, isNeteaseLiked, onNeteaseLikeToggle,
             contextTrack, contextMenuExpanded, onContextMenuOpen, onContextMenuDismiss, playbackQueue,
             onTrackPlayNext, onTrackAddToQueue, moodRadioEligibleTrackIds, onStartMoodRadio, onTrackGoToAlbum, onTrackGoToArtist,
-            onTrackContextBottomSheet, onCloseFullscreenThen,
+            onTrackContextBottomSheet, onCloseFullscreenThen, onMoreClick,
         )
     }
 }
@@ -119,6 +124,9 @@ private fun FullScreenPlayerMetadata(
     compact: Boolean,
     isFavorite: Boolean,
     onFavoriteToggle: (String, Boolean) -> Unit,
+    isNeteaseTrack: Boolean,
+    isNeteaseLiked: Boolean,
+    onNeteaseLikeToggle: (String, Boolean) -> Unit,
     contextTrack: LibraryTrack?,
     contextMenuExpanded: Boolean,
     onContextMenuOpen: () -> Unit,
@@ -132,22 +140,39 @@ private fun FullScreenPlayerMetadata(
     onTrackGoToArtist: (String) -> Unit,
     onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit,
     onCloseFullscreenThen: ((() -> Unit) -> Unit),
+    onMoreClick: () -> Unit,
 ) {
     val colors = LocalTuneColors.current
     val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
-    val favoriteScale = remember(item.trackId) { Animatable(1f) }
+    val libraryScale = remember(item.trackId) { Animatable(1f) }
     var previousFavorite by remember(item.trackId) { mutableStateOf(isFavorite) }
     LaunchedEffect(item.trackId, isFavorite) {
         val wasAdded = isFavorite && !previousFavorite
         previousFavorite = isFavorite
         if (wasAdded) {
-            favoriteScale.snapTo(1f)
-            favoriteScale.animateTo(1.14f, tween(120, easing = FastOutSlowInEasing))
-            favoriteScale.animateTo(1f, tween(180, easing = FastOutSlowInEasing))
-        } else if (!isFavorite) favoriteScale.snapTo(1f)
+            libraryScale.snapTo(1f)
+            libraryScale.animateTo(1.14f, tween(120, easing = FastOutSlowInEasing))
+            libraryScale.animateTo(1f, tween(180, easing = FastOutSlowInEasing))
+        } else if (!isFavorite) libraryScale.snapTo(1f)
     }
-    val heartLabel = stringResource(R.string.player_heart)
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    val neteaseLikeScale = remember(item.trackId) { Animatable(1f) }
+    var previousNeteaseLiked by remember(item.trackId) { mutableStateOf(isNeteaseLiked) }
+    LaunchedEffect(item.trackId, isNeteaseLiked) {
+        val wasAdded = isNeteaseLiked && !previousNeteaseLiked
+        previousNeteaseLiked = isNeteaseLiked
+        if (wasAdded) {
+            neteaseLikeScale.snapTo(1f)
+            neteaseLikeScale.animateTo(1.14f, tween(120, easing = FastOutSlowInEasing))
+            neteaseLikeScale.animateTo(1f, tween(180, easing = FastOutSlowInEasing))
+        } else if (!isNeteaseLiked) neteaseLikeScale.snapTo(1f)
+    }
+    val libraryLabel = stringResource(R.string.player_library)
+    val neteaseLikeLabel = stringResource(R.string.player_netease_like)
+    val moreLabel = stringResource(R.string.player_more)
+    Row(
+        modifier = if (compact) Modifier.fillMaxWidth().padding(end = 12.dp) else Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f).clipToBounds().graphicsLayer { translationX = displayedHorizontalSwipeOffset }
             .semantics { testTag = FullScreenPlayerMetadataSwipeTestTag }) {
             TuneMarqueeText(
@@ -165,11 +190,14 @@ private fun FullScreenPlayerMetadata(
             )
         }
         Spacer(Modifier.width(4.dp))
-        if (!compact) Box(
+        val buttonSize = if (compact) 36.dp else 44.dp
+        val iconSize = if (compact) 20.dp else 24.dp
+        val heartSize = if (compact) 21.dp else 25.dp
+        Box(
             modifier = Modifier
-                .size(48.dp)
-                .graphicsLayer { scaleX = favoriteScale.value; scaleY = favoriteScale.value }
-                .semantics { contentDescription = heartLabel }
+                .size(buttonSize)
+                .graphicsLayer { scaleX = libraryScale.value; scaleY = libraryScale.value }
+                .semantics { contentDescription = libraryLabel }
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -181,15 +209,56 @@ private fun FullScreenPlayerMetadata(
             contentAlignment = Alignment.Center,
         ) {
             MaterialSymbol(
-                symbol = MaterialSymbols.Star,
+                symbol = MaterialSymbols.Library,
                 tint = colors.onPrimary,
-                size = 26.dp,
+                size = iconSize,
                 filled = isFavorite,
             )
         }
-        // Now-playing keeps only the favorites action. The overflow (three-dot)
-        // menu was removed per v1.2.0 feedback; track actions remain available
-        // from library rows and queue entries.
+        if (isNeteaseTrack) {
+            Spacer(Modifier.width(2.dp))
+            Box(
+                modifier = Modifier
+                    .size(buttonSize)
+                    .graphicsLayer { scaleX = neteaseLikeScale.value; scaleY = neteaseLikeScale.value }
+                    .semantics { contentDescription = neteaseLikeLabel }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        role = Role.Button,
+                    ) {
+                        if (!isNeteaseLiked) hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                        onNeteaseLikeToggle(item.trackId, !isNeteaseLiked)
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                MaterialSymbol(
+                    symbol = MaterialSymbols.Favorite,
+                    tint = if (isNeteaseLiked) androidx.compose.ui.graphics.Color(0xFFFF3B5C) else colors.onPrimary,
+                    size = heartSize,
+                    filled = isNeteaseLiked,
+                )
+            }
+        }
+        Spacer(Modifier.width(2.dp))
+        Box(
+            modifier = Modifier
+                .size(buttonSize)
+                .semantics { contentDescription = moreLabel }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    role = Role.Button,
+                    onClick = onMoreClick,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            MaterialSymbol(
+                symbol = MaterialSymbols.MoreVert,
+                tint = colors.onPrimary,
+                size = iconSize,
+            )
+        }
     }
 }
 

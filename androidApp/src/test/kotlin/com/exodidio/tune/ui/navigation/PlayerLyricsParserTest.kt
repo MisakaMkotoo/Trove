@@ -123,4 +123,21 @@ class PlayerLyricsParserTest {
         assertEquals("Translation", lines[0].secondary)
         assertEquals(null, lines[0].timestampSeconds)
     }
+
+    @Test
+    fun parsesYrcWordsContainingParenthesesAndMatchesCentisecondTlyric() {
+        val json = """
+            {
+              "tuneLyrics": 1,
+              "yrc": "[8133,2000](8133,600,0)Hey (woo) (8733,600,0)now",
+              "tlyric": "[00:08.13]嘿 现 在"
+            }
+        """.trimIndent()
+        val parsed = parsePlayerLyricsDocument(json)
+        assertEquals(1, parsed.lines.size)
+        assertEquals("Hey (woo) now", parsed.lines[0].primary)
+        assertEquals(2, parsed.lines[0].words.size)
+        assertEquals("Hey (woo) ", parsed.lines[0].words[0].text)
+        assertEquals("嘿 现 在", parsed.lines[0].secondary)
+    }
 }

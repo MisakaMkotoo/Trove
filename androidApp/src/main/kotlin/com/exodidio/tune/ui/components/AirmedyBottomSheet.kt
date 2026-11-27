@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -118,6 +119,7 @@ fun TuneBottomSheet(
             decorFitsSystemWindows = false,
         ),
     ) {
+        CompositionLocalProvider(LocalTuneBackdrop provides null) {
         val dialogWindow = (LocalView.current.parent as DialogWindowProvider).window
         SideEffect { dialogWindow.setDimAmount(0f) }
         Box(Modifier.fillMaxSize()) {
@@ -187,6 +189,7 @@ fun TuneBottomSheet(
                 content()
                 Spacer(Modifier.height(12.dp))
             }
+        }
         }
     }
 }

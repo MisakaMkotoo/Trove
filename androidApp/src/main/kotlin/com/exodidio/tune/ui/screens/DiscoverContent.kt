@@ -3,6 +3,7 @@ package com.exodidio.tune.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,44 +23,46 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.launch
+import androidx.compose.runtime.getValue
 import com.exodidio.tune.R
 import com.exodidio.tune.netease.DiscoverPlaylist
+import com.exodidio.tune.netease.DiscoverSquareTab
 import com.exodidio.tune.netease.NeteaseRepository
-import com.exodidio.tune.netease.RADAR_DISPLAY_NAME
 import com.exodidio.tune.player.PlaybackQueueSnapshot
 import com.exodidio.tune.sync.AndroidSyncRuntime
 import com.exodidio.tune.sync.LibraryTrack
 import com.exodidio.tune.ui.components.MaterialSymbol
 import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
+import com.exodidio.tune.ui.components.pressScale
 import com.exodidio.tune.ui.theme.LocalTuneColors
 
-/** 顶部分类入口：只做样式，内容后续再设计。 */
-private data class DiscoverCategory(val label: Int, val symbol: String)
+/** 顶部分类入口：映射到发现广场的对应页签和分类。 */
+private data class DiscoverCategory(
+    val label: Int,
+    val symbol: String,
+    val tab: DiscoverSquareTab,
+    val category: String? = null,
+)
 
 private val DiscoverCategories = listOf(
-    DiscoverCategory(R.string.discover_category_rankings, MaterialSymbols.BarChart),
-    DiscoverCategory(R.string.discover_category_playlists, MaterialSymbols.QueueMusic),
-    DiscoverCategory(R.string.discover_category_japanese, MaterialSymbols.Translate),
-    DiscoverCategory(R.string.discover_category_acg, MaterialSymbols.Palette),
-    DiscoverCategory(R.string.discover_category_explore, MaterialSymbols.Sensors),
-    DiscoverCategory(R.string.discover_category_vip, MaterialSymbols.Crown),
-    DiscoverCategory(R.string.discover_category_ost, MaterialSymbols.Album),
-    DiscoverCategory(R.string.discover_category_rock, MaterialSymbols.GraphicEq),
+    DiscoverCategory(R.string.discover_category_rankings, MaterialSymbols.BarChart, DiscoverSquareTab.Rankings),
+    DiscoverCategory(R.string.discover_category_playlists, MaterialSymbols.QueueMusic, DiscoverSquareTab.Playlists, "全部"),
+    DiscoverCategory(R.string.discover_category_japanese, MaterialSymbols.Translate, DiscoverSquareTab.Playlists, "日语"),
+    DiscoverCategory(R.string.discover_category_acg, MaterialSymbols.Palette, DiscoverSquareTab.Playlists, "ACG"),
+    DiscoverCategory(R.string.discover_category_explore, MaterialSymbols.Sensors, DiscoverSquareTab.NewAlbums),
+    DiscoverCategory(R.string.discover_category_vip, MaterialSymbols.Crown, DiscoverSquareTab.HighQuality, "全部"),
+    DiscoverCategory(R.string.discover_category_ost, MaterialSymbols.Album, DiscoverSquareTab.Playlists, "影视原声"),
+    DiscoverCategory(R.string.discover_category_rock, MaterialSymbols.GraphicEq, DiscoverSquareTab.Playlists, "摇滚"),
 )
 
 /**
@@ -80,14 +83,13 @@ internal fun DiscoverContent(
     onTrackFavoriteToggle: (LibraryTrack, Boolean) -> Unit = { _, _ -> },
     onTrackContextBottomSheet: (TrackContextBottomSheetRequest) -> Unit = {},
     onOpenAccount: () -> Unit = {},
+    onOpenSquare: (DiscoverSquareTab, String?) -> Unit = { _, _ -> },
 ) {
     val colors = LocalTuneColors.current
     val data by NeteaseRepository.discover.collectAsStateWithLifecycle()
     val loggedIn by NeteaseRepository.loggedIn.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var actionTarget by remember { mutableStateOf<PlaylistActionTarget?>(null) }
     LaunchedEffect(Unit) { NeteaseRepository.loadDiscover() }
+    LaunchedEffect(loggedIn) { if (loggedIn) NeteaseRepository.loadMine() }
 
     // 歌曲封面是后台补齐的：按 trackId 合并 store 里的最新封面，晚到也会自动出现。
     val playbackOnlyTracks by AndroidSyncRuntime.syncStore.playbackOnlyTracksFlow
@@ -125,7 +127,10 @@ internal fun DiscoverContent(
             )
         }
         item("discover_categories") {
-            DiscoverCategoryGrid(modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+            DiscoverCategoryGrid(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                onCategoryClick = { category -> onOpenSquare(category.tab, category.category) },
+            )
         }
         if (!data.loaded) {
             item("discover_skeleton_rankings") { NeteasePlaylistRowSkeleton() }
@@ -140,9 +145,6 @@ internal fun DiscoverContent(
                 fallbackSubtitle = R.string.discover_ranking_subtitle,
                 horizontalState = rowStates.state("discover_rankings"),
                 onOpen = onOpenPlaylist,
-                onLongClick = { playlist ->
-                    actionTarget = PlaylistActionTarget(playlist.id, playlist.name, playlist.coverUrl, playlist.coverPath)
-                },
             )
             if (!loggedIn && data.curated.isEmpty()) {
                 // 甄选来自整页块，未登录拿不到：给登录入口，不显示报错。
@@ -159,9 +161,6 @@ internal fun DiscoverContent(
                     fallbackSubtitle = R.string.discover_curated_subtitle,
                     horizontalState = rowStates.state("discover_curated"),
                     onOpen = onOpenPlaylist,
-                    onLongClick = { playlist ->
-                        actionTarget = PlaylistActionTarget(playlist.id, playlist.name, playlist.coverUrl, playlist.coverPath)
-                    },
                 )
             }
             if (songs.isNotEmpty()) {
@@ -189,47 +188,6 @@ internal fun DiscoverContent(
             }
         }
     }
-    actionTarget?.let { target ->
-        NeteasePlaylistActionSheet(
-            target = target,
-            onDismiss = { actionTarget = null },
-            onRefresh = {
-                actionTarget = null
-                scope.launch {
-                    stageActionTarget(target)
-                    NeteaseRepository.refresh(context, target.id)
-                }
-            },
-            onDownloadAll = {
-                actionTarget = null
-                scope.launch {
-                    stageActionTarget(target)
-                    NeteaseRepository.ensureDynamicLoaded(context, target.id)
-                    NeteaseRepository.downloadAll(context, target.id)
-                }
-            },
-            onSave = {
-                actionTarget = null
-                scope.launch {
-                    stageActionTarget(target)
-                    NeteaseRepository.saveSnapshot(target.id)
-                }
-            },
-        )
-    }
-}
-
-private fun stageActionTarget(target: PlaylistActionTarget) {
-    if (NeteaseRepository.playlistById(target.id) == null) {
-        NeteaseRepository.stagePlaylist(
-            playlistId = target.id,
-            name = target.name,
-            coverUrl = target.coverUrl,
-            coverPath = target.coverPath,
-            trackCount = 0,
-            dynamicKind = if (target.name.contains(RADAR_DISPLAY_NAME)) "radar" else null,
-        )
-    }
 }
 
 private fun LazyListScope.discoverPlaylistSection(
@@ -240,7 +198,6 @@ private fun LazyListScope.discoverPlaylistSection(
     fallbackSubtitle: Int,
     horizontalState: LazyListState,
     onOpen: (DiscoverPlaylist) -> Unit,
-    onLongClick: (DiscoverPlaylist) -> Unit,
 ) {
     if (items.isEmpty() && error == null) return
     if (items.isEmpty()) {
@@ -257,7 +214,6 @@ private fun LazyListScope.discoverPlaylistSection(
             fallbackSubtitle = stringResource(fallbackSubtitle),
             onOpen = onOpen,
             horizontalState = horizontalState,
-            onLongClick = onLongClick,
         )
     }
 }
@@ -288,22 +244,31 @@ private fun DiscoverLoginGuide(onOpenAccount: () -> Unit) {
     }
 }
 
-/** 2×4 分类入口：自制样式（我们没有其他分类页），点击暂不进入内容。 */
+/** 2×4 分类入口：直接进入发现广场对应页签与分类。 */
 @Composable
-private fun DiscoverCategoryGrid(modifier: Modifier = Modifier) {
+private fun DiscoverCategoryGrid(
+    modifier: Modifier = Modifier,
+    onCategoryClick: (DiscoverCategory) -> Unit = {},
+) {
     val colors = LocalTuneColors.current
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         DiscoverCategories.chunked(4).forEach { row ->
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 row.forEach { category ->
+                    val interactionSource = remember { MutableInteractionSource() }
                     val shape = RoundedCornerShape(12.dp)
                     Row(
                         modifier = Modifier
                             .weight(1f)
+                            .pressScale(interactionSource, pressedScale = 0.95f)
                             .height(40.dp)
+                            .clip(shape)
                             .background(colors.glassElevated, shape)
                             .border(0.5.dp, colors.borderGlass, shape)
-                            .clickable { },
+                            .clickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                            ) { onCategoryClick(category) },
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {

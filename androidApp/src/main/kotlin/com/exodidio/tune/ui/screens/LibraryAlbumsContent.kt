@@ -1,5 +1,8 @@
 package com.exodidio.tune.ui.screens
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -7,12 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import dev.chrisbanes.haze.HazeState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.exodidio.tune.R
@@ -23,6 +28,7 @@ import com.exodidio.tune.ui.components.HeroCard
 import com.exodidio.tune.ui.components.LibraryVirtualList
 import com.exodidio.tune.ui.components.LibraryPlaybackActions
 import com.exodidio.tune.ui.components.LibraryTextFilter
+import com.exodidio.tune.ui.components.LocalReduceMotion
 import com.exodidio.tune.ui.components.MaterialSymbols
 import com.exodidio.tune.ui.components.TrackContextBottomSheetRequest
 import com.exodidio.tune.ui.components.discGridItems
@@ -34,13 +40,20 @@ internal fun albumsById(albums: List<com.exodidio.tune.sync.LibraryAlbum>): Map<
 internal fun albumContextTracksByAlbumId(
     albums: List<com.exodidio.tune.sync.LibraryAlbum>,
     tracks: List<com.exodidio.tune.sync.LibraryTrack>,
-): Map<String, List<com.exodidio.tune.sync.LibraryTrack>> =
-    albums.associate { album ->
-        album.id to albumDetailsUiStateFor(
-            AlbumDetailsUiState(albums = albums, tracks = tracks),
-            album.id,
-        ).tracks
+): Map<String, List<com.exodidio.tune.sync.LibraryTrack>> {
+    if (albums.isEmpty() || tracks.isEmpty()) return emptyMap()
+    val grouped = HashMap<String, MutableList<com.exodidio.tune.sync.LibraryTrack>>(albums.size)
+    for (track in tracks) {
+        val albumId = trackEffectiveAlbumId(track)
+        if (albumId.isNotEmpty()) {
+            grouped.getOrPut(albumId) { mutableListOf() }.add(track)
+        }
     }
+    return albums.associate { album ->
+        val list = grouped[album.id]
+        album.id to (list?.sortedWith(albumTrackDisplayComparator) ?: emptyList())
+    }
+}
 
 @Composable
 internal fun LibraryAlbumsContent(
@@ -61,8 +74,12 @@ internal fun LibraryAlbumsContent(
 ) {
     var contextAlbumId by remember { mutableStateOf<String?>(null) }
     val albumByIdMap = remember(uiState.albums) { albumsById(uiState.albums) }
-    val albumTracksMap = remember(uiState.albums, uiState.tracks) {
-        albumContextTracksByAlbumId(uiState.albums, uiState.tracks)
+    val contextAlbumTracks = remember(contextAlbumId, uiState.albums, uiState.tracks) {
+        val targetId = contextAlbumId ?: return@remember emptyList()
+        albumDetailsUiStateFor(
+            AlbumDetailsUiState(albums = uiState.albums, tracks = uiState.tracks),
+            targetId,
+        ).tracks
     }
     val unknownArtist = stringResource(R.string.album_unknown_artist)
     val gridItems = remember(uiState.albums, unknownArtist) {
@@ -84,6 +101,20 @@ internal fun LibraryAlbumsContent(
             end = 0.dp,
         )
     }
+    val reduceMotion = LocalReduceMotion.current
+    val layoutAlpha = remember { Animatable(1f) }
+    var previousLayoutMode by remember { mutableStateOf(uiState.layoutMode) }
+    LaunchedEffect(uiState.layoutMode, reduceMotion) {
+        if (previousLayoutMode != uiState.layoutMode) {
+            previousLayoutMode = uiState.layoutMode
+            if (!reduceMotion) {
+                layoutAlpha.snapTo(0.25f)
+                layoutAlpha.animateTo(1f, tween(220, easing = FastOutSlowInEasing))
+            } else {
+                layoutAlpha.snapTo(1f)
+            }
+        }
+    }
     LibraryVirtualList(
         items = uiState.albums,
         isLoaded = uiState.isLoaded,
@@ -91,7 +122,7 @@ internal fun LibraryAlbumsContent(
         contentType = "album_row",
         listState = listState,
         contentPadding = listPadding,
-        modifier = modifier,
+        modifier = modifier.alpha(layoutAlpha.value),
         dividerTestTag = "album-row-divider",
         filterKey = "albums",
         filterActive = uiState.filterQuery.isNotBlank(),
@@ -141,7 +172,7 @@ internal fun LibraryAlbumsContent(
                         if (album == null) {
                             content()
                         } else {
-                            val tracks = if (contextAlbumId == album.id) albumTracksMap[album.id].orEmpty() else emptyList()
+                            val tracks = if (contextAlbumId == album.id) contextAlbumTracks else emptyList()
                             AlbumContextMenu(
                                 tracks = tracks,
                                 expanded = contextAlbumId == album.id,
@@ -165,7 +196,7 @@ internal fun LibraryAlbumsContent(
             null
         },
     ) { album ->
-        val tracks = if (contextAlbumId == album.id) albumTracksMap[album.id].orEmpty() else emptyList()
+        val tracks = if (contextAlbumId == album.id) contextAlbumTracks else emptyList()
         AlbumContextMenu(
             tracks = tracks,
             expanded = contextAlbumId == album.id,

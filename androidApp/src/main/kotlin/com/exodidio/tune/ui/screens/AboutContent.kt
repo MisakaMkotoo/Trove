@@ -1,5 +1,7 @@
 package com.exodidio.tune.ui.screens
 
+import android.os.SystemClock
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,7 +10,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -24,13 +35,24 @@ import com.exodidio.tune.ui.theme.LocalTuneColors
 
 private const val TuneGithubUrl = "https://github.com/MisakaMkotoo/Trove"
 private const val TuneLicenseUrl = "https://github.com/MisakaMkotoo/Trove/blob/master/LICENSE"
+private const val TerminalEasterEggTapCount = 5
+private const val TerminalEasterEggWindowMs = 2_500L
 
 @Composable
 internal fun AboutContent(
     onOpenExternalUrl: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onEnterTerminalMode: () -> Unit = {},
 ) {
     val colors = LocalTuneColors.current
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val countdownOneText = stringResource(R.string.about_terminal_countdown, 1)
+    val countdownTwoText = stringResource(R.string.about_terminal_countdown, 2)
+    val unlockedText = stringResource(R.string.about_terminal_unlocked)
+    var tapCount by remember { mutableIntStateOf(0) }
+    var lastTapMs by remember { mutableLongStateOf(0L) }
+    var activeToast by remember { mutableStateOf<Toast?>(null) }
 
     Column(
         modifier = modifier,
@@ -62,6 +84,43 @@ internal fun AboutContent(
                             style = MaterialTheme.typography.bodyLarge,
                             color = colors.textMuted,
                         )
+                    },
+                    onClick = {
+                        val now = SystemClock.elapsedRealtime()
+                        tapCount = if (now - lastTapMs > TerminalEasterEggWindowMs) 1 else tapCount + 1
+                        lastTapMs = now
+                        when {
+                            tapCount == 3 -> {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                activeToast?.cancel()
+                                activeToast = Toast.makeText(
+                                    context,
+                                    countdownTwoText,
+                                    Toast.LENGTH_SHORT,
+                                ).also { it.show() }
+                            }
+                            tapCount == 4 -> {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                activeToast?.cancel()
+                                activeToast = Toast.makeText(
+                                    context,
+                                    countdownOneText,
+                                    Toast.LENGTH_SHORT,
+                                ).also { it.show() }
+                            }
+                            tapCount >= TerminalEasterEggTapCount -> {
+                                tapCount = 0
+                                lastTapMs = 0L
+                                activeToast?.cancel()
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                activeToast = Toast.makeText(
+                                    context,
+                                    unlockedText,
+                                    Toast.LENGTH_SHORT,
+                                ).also { it.show() }
+                                onEnterTerminalMode()
+                            }
+                        }
                     },
                 ),
             ),

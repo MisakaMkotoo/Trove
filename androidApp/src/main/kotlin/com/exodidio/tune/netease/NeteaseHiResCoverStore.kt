@@ -1,14 +1,9 @@
 package com.exodidio.tune.netease
 
 import android.content.Context
+import android.util.Log
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -26,8 +21,6 @@ internal object NeteaseHiResCoverStore {
 
     @Volatile private var lastTrimAt = 0L
     private val negative = ConcurrentHashMap<Long, Pair<Int, Long>>()
-    private val inFlight = ConcurrentHashMap<Long, Deferred<File?>>()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downloadGate = Semaphore(2)
 
     fun cached(context: Context, songId: Long): File? =
@@ -75,9 +68,9 @@ internal object NeteaseHiResCoverStore {
             val file = target.takeIf { result.isSuccess && it.isFile && it.length() > 0 }
             if (file == null) {
                 negative[songId] = urlKey to System.currentTimeMillis()
-                System.err.println("HIRES fail song=$songId url=$sizedUrl err=${result.exceptionOrNull()?.message}")
+                Log.w("HIRES", "fail song=$songId err=${result.exceptionOrNull()?.message}")
             } else {
-                System.err.println("HIRES ok song=$songId bytes=${file.length()}")
+                Log.d("HIRES", "ok song=$songId bytes=${file.length()}")
                 trim(app, force = true)
             }
             file
@@ -89,6 +82,11 @@ internal object NeteaseHiResCoverStore {
     }
 
     fun usageBytes(context: Context): Long = files(context).sumOf { it.length() }
+
+    fun clear(context: Context) {
+        files(context).forEach { file -> runCatching { file.delete() } }
+        lastTrimAt = System.currentTimeMillis()
+    }
 
     /** 超出 100MB 按最后访问时间淘汰；时间戳先取快照再排序，避免并发 touch 破坏比较器。 */
     @Synchronized

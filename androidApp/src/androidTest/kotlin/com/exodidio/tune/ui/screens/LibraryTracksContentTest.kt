@@ -210,7 +210,7 @@ class LibraryTracksContentTest {
         composeTestRule.onNode(hasContentDescription("Track options")).performClick()
         composeTestRule.onNodeWithText("Play next").assertExists()
         composeTestRule.onNodeWithText("Add to queue").assertExists()
-        composeTestRule.onNodeWithText("Add to favorites").assertExists()
+        composeTestRule.onNodeWithText("Add to library").assertExists()
         composeTestRule.onNodeWithText("Add to playlist").assertExists()
     }
 

@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,7 +58,7 @@ fun LibraryTextFilter(
         )
         if (onlineMode != null) {
             Spacer(Modifier.width(8.dp))
-            Switch(
+            TuneSwitch(
                 checked = onlineMode,
                 onCheckedChange = onOnlineModeChange,
                 modifier = Modifier.semantics { contentDescription = onlineLabel },

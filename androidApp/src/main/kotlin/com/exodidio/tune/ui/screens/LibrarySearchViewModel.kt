@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -39,8 +41,8 @@ data class LibrarySearchUiState(
     val artists: List<LibraryArtist> = emptyList(),
     val playlists: List<LibraryPlaylist> = emptyList(),
     val composers: List<LibraryComposer> = emptyList(),
-    /** 在线搜索开关：打开后搜索框回车才向网易云发请求。 */
-    val onlineMode: Boolean = false,
+    /** 搜索标签页：true = 网易云（默认），false = 本地资料库。 */
+    val onlineMode: Boolean = true,
     val onlineQuery: String = "",
     val onlineTracks: List<LibraryTrack> = emptyList(),
     val onlinePlaylists: List<com.exodidio.tune.netease.OnlinePlaylistInfo> = emptyList(),
@@ -51,7 +53,17 @@ data class LibrarySearchUiState(
     val onlinePlaylistError: String? = null,
     val onlineArtistError: String? = null,
     val onlineAlbumError: String? = null,
+    val onlineSuggestions: List<String> = emptyList(),
+    val onlineCategory: OnlineSearchCategory = OnlineSearchCategory.All,
 )
+
+enum class OnlineSearchCategory {
+    All,
+    Songs,
+    Playlists,
+    Artists,
+    Albums,
+}
 
 private data class OnlineSearchState(
     val query: String = "",
@@ -81,9 +93,28 @@ internal class LibrarySearchViewModel(
     }
 
     private val query = MutableStateFlow("")
-    private val onlineMode = MutableStateFlow(false)
+    private val onlineMode = MutableStateFlow(true)
+    private val onlineCategory = MutableStateFlow(OnlineSearchCategory.All)
     private val onlineState = MutableStateFlow(OnlineSearchState())
+    private val onlineSuggestions = MutableStateFlow<List<String>>(emptyList())
     private var onlineToken = 0
+
+    init {
+        @OptIn(FlowPreview::class)
+        viewModelScope.launch {
+            combine(query, onlineMode) { text, online -> online to text.trim() }
+                .distinctUntilChanged()
+                .debounce { (online, keyword) -> if (!online || keyword.isEmpty()) 0L else 300L }
+                .collectLatest { (online, keyword) ->
+                    if (!online || keyword.isEmpty()) {
+                        onlineSuggestions.value = emptyList()
+                    } else {
+                        onlineSuggestions.value = com.exodidio.tune.netease.NeteaseRepository
+                            .fetchSearchSuggestions(keyword)
+                    }
+                }
+        }
+    }
 
     private val library = combine(
         syncStore.tracks, syncStore.albums, syncStore.artists, syncStore.playlists, syncStore.composers,
@@ -130,6 +161,10 @@ internal class LibrarySearchViewModel(
             onlineArtistError = onlineState.artistError,
             onlineAlbumError = onlineState.albumError,
         )
+    }.combine(onlineSuggestions) { state, suggestions ->
+        state.copy(onlineSuggestions = suggestions)
+    }.combine(onlineCategory) { state, category ->
+        state.copy(onlineCategory = category)
     }.combine(syncStore.playbackOnlyTracksFlow) { state, playbackOnly ->
         // 封面是异步补齐的：结果列表按 trackId 合并 store 里的最新封面，晚到也会自动出现。
         if (state.onlineTracks.isEmpty()) {
@@ -150,12 +185,23 @@ internal class LibrarySearchViewModel(
     )
 
     fun setQuery(value: String) { query.value = value }
-    fun clear() { query.value = "" }
+    fun clear() {
+        query.value = ""
+        onlineCategory.value = OnlineSearchCategory.All
+        onlineState.value = OnlineSearchState()
+        onlineSuggestions.value = emptyList()
+        onlineToken++
+    }
 
-    /** 切换在线搜索：关闭时清掉在线结果，重新打开需要再回车。 */
+    /** 切换搜索标签页（网易云 / 资料库），保留已加载的在线搜索结果，切回无需重新搜。 */
     fun setOnlineMode(enabled: Boolean) {
+        if (onlineMode.value == enabled) return
         onlineMode.value = enabled
-        if (!enabled) onlineState.value = OnlineSearchState()
+    }
+
+    fun setOnlineCategory(category: OnlineSearchCategory) {
+        if (onlineCategory.value == category) return
+        onlineCategory.value = category
     }
 
     /** 在线搜索只在回车时触发，避免每敲一个字就请求网易云。 */
@@ -163,6 +209,9 @@ internal class LibrarySearchViewModel(
         if (!onlineMode.value) return
         val keyword = query.value.trim()
         if (keyword.isEmpty()) return
+        appContext?.let { com.exodidio.tune.netease.NeteaseRepository.recordSearchHistory(it, keyword) }
+        onlineSuggestions.value = emptyList()
+        onlineCategory.value = OnlineSearchCategory.All
         val token = ++onlineToken
         onlineState.value = OnlineSearchState(query = keyword, loading = true)
         viewModelScope.launch {

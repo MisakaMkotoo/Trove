@@ -61,6 +61,30 @@ internal fun shouldStartCrossfade(
     return remainingMs in 401..effectiveFadeMs
 }
 
+/**
+ * Consecutive tracks within the same album (concept/live records) in sequential order
+ * prefer pure gapless playback over crossfade when gapless is enabled.
+ */
+internal fun shouldPreferGaplessForAlbum(
+    gaplessEnabled: Boolean,
+    current: PlaybackItem?,
+    next: PlaybackItem?,
+    isShuffled: Boolean,
+): Boolean {
+    if (!gaplessEnabled || isShuffled || current == null || next == null) return false
+    if (current.trackId == next.trackId) return false
+    val sameAlbumId = current.albumId.isNotBlank() && current.albumId == next.albumId
+    val sameAlbumTitle = current.album.isNotBlank() && current.album == next.album &&
+        (current.albumArtist.isBlank() || next.albumArtist.isBlank() || current.albumArtist == next.albumArtist)
+    if (!sameAlbumId && !sameAlbumTitle) return false
+    val curNo = current.trackNumber
+    val nextNo = next.trackNumber
+    if (curNo > 0 && nextNo > 0) {
+        return nextNo == curNo + 1 || (nextNo == 1 && curNo > 1)
+    }
+    return true
+}
+
 /** Keep the outgoing gain ramp within the audible remainder of its source. */
 internal fun crossfadeDurationMs(crossfadeSeconds: Int, positionMs: Long, durationMs: Long): Long =
     minOf(
@@ -103,7 +127,12 @@ sealed interface PlaybackState {
 
     /** [resumeIntent]：用户刚点了播放，正在重连在线歌曲；按钮先显示“正在播放”，失败会退回暂停。 */
     data class Preparing(val item: PlaybackItem, val resumeIntent: Boolean = false) : PlaybackState
-    data class Playing(val item: PlaybackItem, val positionMs: Long, val durationMs: Long) : PlaybackState
+    data class Playing(
+        val item: PlaybackItem,
+        val positionMs: Long,
+        val durationMs: Long,
+        val isBuffering: Boolean = false,
+    ) : PlaybackState
     data class Paused(val item: PlaybackItem, val positionMs: Long, val durationMs: Long) : PlaybackState
     data class Failed(val trackId: String?, val reason: String) : PlaybackState
 }

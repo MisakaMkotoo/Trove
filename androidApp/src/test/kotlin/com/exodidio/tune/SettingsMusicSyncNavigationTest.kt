@@ -1,5 +1,8 @@
 package com.exodidio.tune
 
+import com.exodidio.tune.settings.ControlStyle
+import com.exodidio.tune.settings.IconStyle
+import com.exodidio.tune.settings.ThemeAccentColor
 import com.exodidio.tune.settings.ThemeMode
 import com.exodidio.tune.settings.PlayerTheme
 import com.exodidio.tune.settings.ThemeModeStore
@@ -81,6 +84,11 @@ private class MusicSyncFakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMod
     override val showComposers: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
     override val rememberTabPage: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(true)
     override val mergeBottomBars: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(true)
+    override val iconStyle: Flow<IconStyle> = kotlinx.coroutines.flow.MutableStateFlow(IconStyle.Material)
+    override val controlStyle: Flow<ControlStyle> = kotlinx.coroutines.flow.MutableStateFlow(ControlStyle.Frosted)
+    override val liquidGlassBlurDp: Flow<Float> = kotlinx.coroutines.flow.MutableStateFlow(com.exodidio.tune.settings.DefaultLiquidGlassBlurDp)
+    override val accentColor: Flow<ThemeAccentColor> = kotlinx.coroutines.flow.MutableStateFlow(ThemeAccentColor.Red)
+    override val mergeMineAndLibrary: Flow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
     override suspend fun setThemeMode(themeMode: ThemeMode) {
         mutableThemeMode.value = themeMode
     }
@@ -98,4 +106,9 @@ private class MusicSyncFakeThemeModeStore(initialThemeMode: ThemeMode = ThemeMod
     override suspend fun setShowComposers(enabled: Boolean) {}
     override suspend fun setRememberTabPage(enabled: Boolean) {}
     override suspend fun setMergeBottomBars(enabled: Boolean) {}
+    override suspend fun setIconStyle(style: IconStyle) {}
+    override suspend fun setControlStyle(style: ControlStyle) {}
+    override suspend fun setLiquidGlassBlurDp(blurDp: Float) {}
+    override suspend fun setAccentColor(accentColor: ThemeAccentColor) {}
+    override suspend fun setMergeMineAndLibrary(enabled: Boolean) {}
 }

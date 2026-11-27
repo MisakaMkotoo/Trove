@@ -2,12 +2,14 @@ package com.exodidio.tune.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
@@ -26,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.BlendMode
@@ -64,29 +67,43 @@ fun FeaturedPlaylistCard(
     onLongClick: (() -> Unit)? = null,
 ) {
     val colors = LocalTuneColors.current
+    val reduceMotion = LocalReduceMotion.current
     val bitmap = rememberArtworkThumbnail(artworkPath, targetPx = 400)
+    val bitmapAlpha = rememberArtworkFadeAlpha(artworkPath, bitmap != null)
     var infoColor by remember(artworkPath) { mutableStateOf<Color?>(null) }
     LaunchedEffect(bitmap) {
         infoColor = bitmap?.let { image -> withContext(Dispatchers.Default) { artworkInfoBandColor(image) } }
     }
-    val onInfo = infoColor?.let { if (it.luminance() < 0.5f) Color.White else Color.Black } ?: colors.textMain
+    val targetOnInfo = infoColor?.let { if (it.luminance() < 0.5f) Color.White else Color.Black } ?: colors.textMain
+    val onInfo by animateColorAsState(
+        targetValue = targetOnInfo,
+        animationSpec = if (reduceMotion) snap() else tween(220, easing = FastOutSlowInEasing),
+        label = "featured-card-on-info",
+    )
+    val interactive = onClick != null || onLongClick != null
+    val interactionSource = remember { MutableInteractionSource() }
     val shape = RoundedCornerShape(TuneRadii.LargeArtwork)
     Box(
         modifier = modifier
+            .then(if (interactive) Modifier.pressScale(interactionSource, pressedScale = 0.975f) else Modifier)
             .clip(shape)
             .artworkBorder(colors, shape)
             .combinedClickable(
-                enabled = onClick != null || onLongClick != null,
+                enabled = interactive,
                 role = Role.Button,
+                interactionSource = interactionSource,
+                indication = null,
                 onClick = { onClick?.invoke() },
                 onLongClick = onLongClick,
             ),
     ) {
         if (bitmap != null) {
-            // 封面和拉伸区画在同一张画布里，先保证颜色与纹理连续。
-            Canvas(modifier = Modifier.matchParentSize()) { drawCardArt(bitmap) }
-            // 再对整张画布按高度做递进模糊；文字在模糊层之上，不会被模糊。
-            BlurredArtOverlay(bitmap, Modifier.matchParentSize())
+            Box(Modifier.matchParentSize().alpha(bitmapAlpha)) {
+                // 封面和拉伸区画在同一张画布里，先保证颜色与纹理连续。
+                Canvas(modifier = Modifier.matchParentSize()) { drawCardArt(bitmap) }
+                // 再对整张画布按高度做递进模糊；文字在模糊层之上，不会被模糊。
+                BlurredArtOverlay(bitmap, Modifier.matchParentSize())
+            }
         } else {
             Box(Modifier.matchParentSize().background(colors.card))
         }
@@ -195,19 +212,25 @@ private fun BlurredArtOverlay(bitmap: ImageBitmap, modifier: Modifier = Modifier
 /** 取居中裁切正方形的最底一行：信息区就是由这一行拉伸出来的，用它决定文字黑/白。 */
 private fun artworkInfoBandColor(bitmap: ImageBitmap): Color? {
     val source = bitmap.asAndroidBitmap()
+    if (source.isRecycled) return null
     val side = kotlin.math.min(source.width, source.height)
     if (side <= 0) return null
-    val cropped = android.graphics.Bitmap.createBitmap(
-        source,
-        (source.width - side) / 2,
-        (source.height - side) / 2,
-        side,
-        side,
-    )
+    val left = (source.width - side) / 2
+    val top = (source.height - side) / 2
     val size = 48
-    val sample = android.graphics.Bitmap.createScaledBitmap(cropped, size, size, true)
+    val sample = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
     val pixels = IntArray(size * size)
-    sample.getPixels(pixels, 0, size, 0, 0, size, size)
+    try {
+        android.graphics.Canvas(sample).drawBitmap(
+            source,
+            android.graphics.Rect(left, top, left + side, top + side),
+            android.graphics.Rect(0, 0, size, size),
+            android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG),
+        )
+        sample.getPixels(pixels, 0, size, 0, 0, size, size)
+    } finally {
+        if (!sample.isRecycled) sample.recycle()
+    }
     var r = 0L
     var g = 0L
     var b = 0L
