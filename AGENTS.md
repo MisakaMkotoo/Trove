@@ -336,25 +336,3 @@ JavaScript / Node.js
 3. 使用了什么异步机制。
 4. 设置了哪些超时和取消机制。
 5. 是否仍存在已知的阻塞风险。
-
-**最高优先级原则：任何阻塞操作都必须经过明确的线程安全性判断。不得仅因为某个方法可以正常编译、正常运行或被包装在异步函数中，就认为它不会阻塞。**
-
-## 未认可方案不得作为依赖
-
-完整条款见 `.qoder/rules/unapproved-solutions.md`：Agent 自行引入且用户未认可的方案，不得作为后续开发或其他模块的依赖基础；用户要求“照原本/内置/参考实现来”时，必须弃用自建方案并在认可基准上重建。
-
-## 已验证无效的旧路径不得作为兜底
-
-完整条款见 `.qoder/rules/verified-path-first.md`：用户未认可、且实测已证明无效的实现，不得因为“一开始就是这么写的”而保留为默认或兜底；实测有效的方法必须作为主路径，无效路径直接删除。
-
-## 禁用 dev / beta 打包 flavor
-
-完整条款见 `.qoder/rules/disabled-flavors.md`：`com.exodidio.tune.dev` 与 `com.exodidio.tune.beta` 已禁用，只使用 prod（`com.mashiro.favmusic`）出包；构建、安装、发布这两个包名必须取得用户明确同意。
-
-## Bug 备忘录
-
-完整条款见 `.qoder/rules/memos.md`：发现或修复交互/动画/状态类 bug 时，在项目根目录 `memos/` 记录现象、根因与状态；备忘录只归档，用户未要求时不主动读取。
-
-## 新增依赖必须补 R8 keep 规则
-
-完整条款见 `.qoder/rules/r8-keep-rules.md`：带 `.so`/JNI/反射的依赖必须在同一笔提交里补 keep 规则；触及 native/反射的功能必须用 prod release 包实跑验证，只 compile/debug 通过不算完成。
