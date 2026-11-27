@@ -16,6 +16,21 @@
 > 在线功能依赖第三方接口，可能随时失效；请优先使用正版服务。
 > 应用无广告、无统计上报；除网易云接口本身外不向任何服务器上传数据，登录凭据只保存在本机。
 
+## 界面预览
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/screenshots/home.jpg" width="240" alt="主页" /><br /><sub><b>主页</b></sub></td>
+    <td align="center"><img src="assets/screenshots/discover.jpg" width="240" alt="新发现" /><br /><sub><b>新发现</b></sub></td>
+    <td align="center"><img src="assets/screenshots/library.jpg" width="240" alt="资料库" /><br /><sub><b>资料库</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/search.jpg" width="240" alt="搜索界面" /><br /><sub><b>搜索界面</b></sub></td>
+    <td align="center"><img src="assets/screenshots/lyrics.jpg" width="240" alt="歌词界面" /><br /><sub><b>歌词界面</b></sub></td>
+    <td align="center"><img src="assets/screenshots/now-playing.jpg" width="240" alt="播放界面" /><br /><sub><b>播放界面</b></sub></td>
+  </tr>
+</table>
+
 ## 功能
 
 ### 网易云音乐

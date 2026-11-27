@@ -18,6 +18,21 @@
 > The app has no ads and no analytics: apart from the NetEase endpoints themselves it
 > uploads nothing, and your login credentials stay on the device.
 
+## Screenshots
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/screenshots/home.jpg" width="240" alt="Home" /><br /><sub><b>Home</b></sub></td>
+    <td align="center"><img src="assets/screenshots/discover.jpg" width="240" alt="Discover" /><br /><sub><b>Discover</b></sub></td>
+    <td align="center"><img src="assets/screenshots/library.jpg" width="240" alt="Library" /><br /><sub><b>Library</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/search.jpg" width="240" alt="Search" /><br /><sub><b>Search</b></sub></td>
+    <td align="center"><img src="assets/screenshots/lyrics.jpg" width="240" alt="Lyrics" /><br /><sub><b>Lyrics</b></sub></td>
+    <td align="center"><img src="assets/screenshots/now-playing.jpg" width="240" alt="Now Playing" /><br /><sub><b>Now Playing</b></sub></td>
+  </tr>
+</table>
+
 ## Features
 
 ### NetEase Cloud Music
